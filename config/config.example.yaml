@@ -1,0 +1,25 @@
+exchanges:
+  binance:
+    enabled: true
+  bybit:
+    enabled: true
+
+coins:
+  - BTC/USDT
+  - ETH/USDT
+
+collectors:
+  interval_seconds: 60
+
+strategy:
+  # Параметры стратегии — будут уточнены
+  min_volume_usdt: 100000
+  oi_change_threshold_pct: 5.0
+
+telegram:
+  bot_token: "${TELEGRAM_BOT_TOKEN}"
+  chat_ids:
+    - 123456789
+
+trading:
+  mode: signal
