@@ -51,7 +51,9 @@ class Application:
         # Сборщик данных
         self._collector = MarketDataCollector(
             connectors=self._connectors,
-            coins=self.settings.coins,
+            static_coins=self.settings.coins,
+            exclude_coins=self.settings.strategy.exclude_coins,
+            min_volume_usdt=self.settings.strategy.min_volume_usdt,
             interval_seconds=self.settings.collectors.interval_seconds,
             on_cycle_done=self._on_collect_cycle_done,
         )

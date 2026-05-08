@@ -1,6 +1,5 @@
 import asyncio
 import logging
-from datetime import datetime, timezone
 from typing import Callable, Coroutine
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -18,12 +17,16 @@ class MarketDataCollector:
     def __init__(
         self,
         connectors: list[ExchangeConnector],
-        coins: list[str],
+        static_coins: list[str],
+        exclude_coins: list[str],
+        min_volume_usdt: float,
         interval_seconds: int = 60,
         on_cycle_done: Callable[[AsyncSession], Coroutine] | None = None,
     ):
         self._connectors = connectors
-        self._coins = coins
+        self._static_coins = static_coins
+        self._exclude_coins = set(name.upper() for name in exclude_coins)
+        self._min_volume = min_volume_usdt
         self._interval = interval_seconds
         self._on_cycle_done = on_cycle_done
         self._running = False
@@ -60,47 +63,83 @@ class MarketDataCollector:
         logger.info("Цикл сбора данных...")
         async with async_session() as session:
             for connector in self._connectors:
-                for coin in self._coins:
-                    try:
-                        await self._collect_coin(connector, coin, session)
-                    except Exception:
-                        logger.exception(
-                            f"Ошибка сбора {coin} на {connector.exchange_id}"
-                        )
+                try:
+                    await self._collect_for_exchange(connector, session)
+                except Exception:
+                    logger.exception(f"Ошибка сбора на {connector.exchange_id}")
 
             await session.commit()
 
             if self._on_cycle_done:
                 await self._on_cycle_done(session)
 
-    async def _collect_coin(
-        self, connector: ExchangeConnector, symbol: str, session: AsyncSession
+    async def _collect_for_exchange(
+        self, connector: ExchangeConnector, session: AsyncSession
     ) -> None:
-        # Свечи
+        # 1. Собираем все тикеры одним запросом
         try:
-            candles = await connector.fetch_ohlcv(symbol, limit=20)
-            for c in candles:
-                session.add(Candle(**c))
+            all_tickers = await connector.fetch_tickers()
         except Exception as e:
-            logger.warning(
-                f"{connector.exchange_id}: не удалось получить свечи для {symbol}: {e}"
-            )
+            logger.warning(f"{connector.exchange_id}: не удалось получить тикеры: {e}")
+            return
 
-        # Тикер
-        try:
-            ticker = await connector.fetch_ticker(symbol)
-            session.add(Ticker(**ticker))
-        except Exception as e:
-            logger.warning(
-                f"{connector.exchange_id}: не удалось получить тикер для {symbol}: {e}"
-            )
+        logger.info(f"{connector.exchange_id}: получено {len(all_tickers)} тикеров")
 
-        # Открытый интерес
-        try:
-            oi = await connector.fetch_open_interest(symbol)
-            if oi is not None:
-                session.add(OpenInterest(**oi))
-        except Exception as e:
-            logger.warning(
-                f"{connector.exchange_id}: не удалось получить OI для {symbol}: {e}"
-            )
+        # 2. Фильтруем по объёму и списку исключений
+        selected = self._filter_tickers(all_tickers)
+        logger.info(
+            f"{connector.exchange_id}: после фильтра — {len(selected)} монет"
+        )
+
+        # 3. Сохраняем отфильтрованные тикеры
+        for t in selected:
+            session.add(Ticker(**t))
+
+        # 4. Для отобранных монет собираем свечи и OI
+        for t in selected:
+            symbol = t["symbol"]
+            try:
+                candles = await connector.fetch_ohlcv(symbol, limit=20)
+                for c in candles:
+                    session.add(Candle(**c))
+            except Exception as e:
+                logger.warning(
+                    f"{connector.exchange_id}: свечи для {symbol}: {e}"
+                )
+
+            try:
+                oi = await connector.fetch_open_interest(symbol)
+                if oi is not None:
+                    session.add(OpenInterest(**oi))
+            except Exception as e:
+                logger.warning(
+                    f"{connector.exchange_id}: OI для {symbol}: {e}"
+                )
+
+    def _filter_tickers(self, tickers: list[dict]) -> list[dict]:
+        result = []
+
+        # Если задан статический список — используем только его
+        if self._static_coins:
+            static_set = set(self._static_coins)
+            for t in tickers:
+                if t["symbol"] in static_set:
+                    result.append(t)
+            return result
+
+        # Динамический отбор: объём >= min И монета не в exclusion list
+        for t in tickers:
+            symbol = t["symbol"]
+            volume = t.get("volume") or 0
+
+            if volume < self._min_volume:
+                continue
+
+            # Извлекаем базовую монету из пары (BTC/USDT → BTC, BTC/USDT:USDT → BTC)
+            base = symbol.split("/")[0].upper()
+            if base in self._exclude_coins:
+                continue
+
+            result.append(t)
+
+        return result

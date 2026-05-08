@@ -93,6 +93,29 @@ class ExchangeConnector:
             "value": raw["openInterestAmount"],
         }
 
+    async def fetch_tickers(self) -> list[dict]:
+        """Забрать тикеры всех пар одним запросом."""
+        raw = await self._call("fetch_tickers")
+        result = []
+        now = datetime.now(tz=timezone.utc)
+        for symbol, data in raw.items():
+            if not isinstance(data, dict):
+                continue
+            ts = data.get("timestamp")
+            volume = data.get("baseVolume") or data.get("quoteVolume") or 0
+            result.append({
+                "exchange": self.exchange_id,
+                "symbol": symbol,
+                "timestamp": datetime.fromtimestamp(ts / 1000, tz=timezone.utc)
+                if ts else now,
+                "bid": data.get("bid"),
+                "ask": data.get("ask"),
+                "last": data.get("last", 0),
+                "volume": volume,
+                "change_pct": data.get("percentage"),
+            })
+        return result
+
     async def close(self) -> None:
         """Закрыть соединение с биржей."""
         if hasattr(self._exchange, "close"):

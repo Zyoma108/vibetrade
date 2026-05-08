@@ -28,10 +28,29 @@ class TelegramNotifier:
         self._polling_task: asyncio.Task | None = None
         self._setup_handlers()
 
+    def _is_authorized(self, chat: types.Chat) -> bool:
+        """Проверить, что сообщение из разрешённого чата/канала."""
+        chat_id_str = str(chat.id)
+        chat_username = f"@{chat.username}" if chat.username else None
+        for allowed in self._config.chat_ids:
+            if allowed == chat_id_str or allowed == chat_username:
+                return True
+        return False
+
     def _setup_handlers(self) -> None:
+        @self._dp.message(Command("start"))
+        async def start_handler(message: types.Message):
+            """Всегда отвечает — нужно чтобы узнать свой ID для конфига."""
+            username = f" (@{message.chat.username})" if message.chat.username else ""
+            await message.answer(
+                f"Привет! Твой chat ID: <code>{message.chat.id}</code>{username}\n\n"
+                f"Пропиши этот ID в <code>chat_ids</code> в config.yaml, "
+                f"чтобы бот отправлял тебе сигналы."
+            )
+
         @self._dp.message(Command("status"))
         async def status_handler(message: types.Message):
-            if message.chat.id not in self._config.chat_ids:
+            if not self._is_authorized(message.chat):
                 return
             uptime = ""
             if self._start_time:
@@ -48,7 +67,7 @@ class TelegramNotifier:
 
         @self._dp.message(Command("pause"))
         async def pause_handler(message: types.Message):
-            if message.chat.id not in self._config.chat_ids:
+            if not self._is_authorized(message.chat):
                 return
             if self._paused:
                 await message.answer("Бот уже приостановлен.")
@@ -58,7 +77,7 @@ class TelegramNotifier:
 
         @self._dp.message(Command("resume"))
         async def resume_handler(message: types.Message):
-            if message.chat.id not in self._config.chat_ids:
+            if not self._is_authorized(message.chat):
                 return
             if not self._paused:
                 await message.answer("Бот уже активен.")
@@ -127,7 +146,7 @@ class TelegramNotifier:
 
         emoji = "📈" if signal.direction == "long" else "📉"
         text = (
-            f"{emoji} *Сигнал: {signal.symbol}*\n"
+            f"{emoji} <b>Сигнал: {signal.symbol}</b>\n"
             f"Тип сетапа: {signal.setup_type}\n"
             f"Направление: {signal.direction.upper()}\n"
             f"Уверенность: {signal.confidence}%\n\n"
@@ -150,7 +169,7 @@ class TelegramNotifier:
         for chat_id in self._config.chat_ids:
             for attempt in range(3):
                 try:
-                    await self._bot.send_message(chat_id, text, parse_mode="Markdown")
+                    await self._bot.send_message(chat_id, text, parse_mode="HTML")
                     success = True
                     break
                 except TelegramNetworkError:

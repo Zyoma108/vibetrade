@@ -4,22 +4,32 @@ exchanges:
   bybit:
     enabled: true
 
-coins:
-  - BTC/USDT
-  - ETH/USDT
+# coins: если список пуст — все монеты с бирж отбираются динамически
+#   по объёму и исключениям. Можно указать конкретные пары:
+# coins:
+#   - BTC/USDT
+#   - ETH/USDT
+coins: []
 
 collectors:
   interval_seconds: 60
 
 strategy:
-  # Параметры стратегии — будут уточнены
-  min_volume_usdt: 100000
+  min_volume_usdt: 100000       # минимальный суточный объём в USDT
+  exclude_coins:                # монеты, исключаемые из сканирования (без /USDT)
+    - BTC
+    - ETH
+    - BNB
+    - SOL
+    - XRP
   oi_change_threshold_pct: 5.0
 
 telegram:
   bot_token: "${TELEGRAM_BOT_TOKEN}"
   chat_ids:
-    - 123456789
+    # Поддерживаются: числовой ID (строка), @username канала, отрицательный ID
+    # Как узнать ID канала: перешлите сообщение из канала боту @getidsbot
+    - "@my_channel"
 
 trading:
   mode: signal

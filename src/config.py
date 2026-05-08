@@ -16,12 +16,16 @@ class CollectorsConfig(BaseModel):
 
 class StrategyConfig(BaseModel):
     min_volume_usdt: float = 100_000
+    exclude_coins: list[str] = Field(
+        default=["BTC", "ETH"],
+        description="Монеты, исключаемые из сканирования (без /USDT)",
+    )
     oi_change_threshold_pct: float = 5.0
 
 
 class TelegramConfig(BaseModel):
     bot_token: str = ""
-    chat_ids: list[int] = []
+    chat_ids: list[str] = []  # числовые ID, @username канала, или отрицательные ID
 
 
 class TradingConfig(BaseModel):
@@ -30,7 +34,7 @@ class TradingConfig(BaseModel):
 
 class Settings(BaseModel):
     exchanges: dict[str, ExchangeConfig]
-    coins: list[str]
+    coins: list[str] = []  # пустой список = сканировать все монеты динамически
     collectors: CollectorsConfig = CollectorsConfig()
     strategy: StrategyConfig = StrategyConfig()
     telegram: TelegramConfig = TelegramConfig()
