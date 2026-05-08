@@ -15,7 +15,7 @@ collectors:
   interval_seconds: 60
 
 strategy:
-  min_volume_usdt: 100000       # минимальный суточный объём в USDT
+  min_volume_usdt: 200000       # минимальный суточный объём в USDT
   exclude_coins:                # монеты, исключаемые из сканирования (без /USDT)
     - BTC
     - ETH

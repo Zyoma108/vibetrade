@@ -15,7 +15,7 @@ class CollectorsConfig(BaseModel):
 
 
 class StrategyConfig(BaseModel):
-    min_volume_usdt: float = 100_000
+    min_volume_usdt: float = 200_000
     exclude_coins: list[str] = Field(
         default=["BTC", "ETH"],
         description="Монеты, исключаемые из сканирования (без /USDT)",

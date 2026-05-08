@@ -127,15 +127,18 @@ class MarketDataCollector:
                     result.append(t)
             return result
 
-        # Динамический отбор: объём >= min И монета не в exclusion list
+        # Динамический отбор: USDT-пары, объём >= min, не в exclusion list
         for t in tickers:
             symbol = t["symbol"]
             volume = t.get("volume") or 0
 
+            # Только пары к USDT (не USDC, не BTC и т.д.)
+            if "/USDT" not in symbol:
+                continue
+
             if volume < self._min_volume:
                 continue
 
-            # Извлекаем базовую монету из пары (BTC/USDT → BTC, BTC/USDT:USDT → BTC)
             base = symbol.split("/")[0].upper()
             if base in self._exclude_coins:
                 continue

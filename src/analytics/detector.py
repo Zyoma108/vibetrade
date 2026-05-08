@@ -28,6 +28,7 @@ class SetupDetector(BaseDetector):
             return []
 
         signals = []
+        seen = set()
         for exchange, symbol in symbols:
             try:
                 candles = await self._load_candles(session, exchange, symbol)
@@ -37,17 +38,21 @@ class SetupDetector(BaseDetector):
                 if not self._check_volume_pattern(candles):
                     continue
 
-                if not self._check_oi_trend(session, symbol):
+                if not await self._check_oi_trend(session, exchange, symbol):
                     continue
 
                 direction = self._check_price_trend(candles)
                 if direction is None:
                     continue
 
-                name = f"{exchange}:{symbol}"
-                signal = self._build_signal(name, direction, candles)
+                # Дедупликация: одна монета — один сигнал
+                if symbol in seen:
+                    continue
+                seen.add(symbol)
+
+                signal = self._build_signal(symbol, direction, candles)
                 signals.append(signal)
-                logger.info(f"Сетап найден: {name} {direction}")
+                logger.info(f"Сетап найден: {symbol} {direction} ({exchange})")
 
             except Exception:
                 logger.exception(f"Ошибка анализа {exchange}:{symbol}")
@@ -90,11 +95,14 @@ class SetupDetector(BaseDetector):
     # Open Interest trend
     # ------------------------------------------------------------------
 
-    async def _check_oi_trend(self, session, symbol: str) -> bool:
+    async def _check_oi_trend(self, session, exchange: str, symbol: str) -> bool:
         """Проверить, что OI растёт (приток денег, а не перекладка)."""
         stmt = (
             select(OpenInterest)
-            .where(OpenInterest.symbol == symbol)
+            .where(
+                OpenInterest.exchange == exchange,
+                OpenInterest.symbol == symbol,
+            )
             .order_by(desc(OpenInterest.timestamp))
             .limit(OI_TREND_BARS)
         )
@@ -144,7 +152,7 @@ class SetupDetector(BaseDetector):
     # ------------------------------------------------------------------
 
     async def _get_active_symbols(self, session) -> list[tuple[str, str]]:
-        """Все пары (exchange, symbol), по которым есть свежие данные."""
+        """Все пары (exchange, symbol) с данными."""
         stmt = (
             select(Candle.exchange, Candle.symbol)
             .distinct()
