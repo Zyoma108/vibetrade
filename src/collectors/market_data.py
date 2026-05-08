@@ -99,7 +99,7 @@ class MarketDataCollector:
         for t in selected:
             symbol = t["symbol"]
             try:
-                candles = await connector.fetch_ohlcv(symbol, limit=20)
+                candles = await connector.fetch_ohlcv(symbol, limit=100)
                 for c in candles:
                     session.add(Candle(**c))
             except Exception as e:

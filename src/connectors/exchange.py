@@ -14,11 +14,21 @@ RETRY_DELAY = 5  # seconds
 class ExchangeConnector:
     """Обёртка над ccxt для работы с CEX-биржами."""
 
+    # Режим биржи по умолчанию — фьючерсы (нужен OI для стратегии)
+    _DEFAULT_TYPE: dict[str, str] = {
+        "binance": "future",
+        "bybit": "linear",
+    }
+
     def __init__(self, exchange_id: str):
         exchange_class = getattr(ccxt, exchange_id)
-        self._exchange = exchange_class({"timeout": FETCH_TIMEOUT})
+        market_type = self._DEFAULT_TYPE.get(exchange_id, "spot")
+        self._exchange = exchange_class({
+            "timeout": FETCH_TIMEOUT,
+            "options": {"defaultType": market_type},
+        })
         self.exchange_id = exchange_id
-        self._semaphore = asyncio.Semaphore(5)  # ограничиваем конкурентные запросы
+        self._semaphore = asyncio.Semaphore(5)
 
     async def _call(self, method_name: str, *args, **kwargs):
         """Вызов синхронного метода ccxt в потоке с ретраями."""

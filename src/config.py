@@ -20,6 +20,12 @@ class StrategyConfig(BaseModel):
         default=["BTC", "ETH"],
         description="Монеты, исключаемые из сканирования (без /USDT)",
     )
+    volume_surge_mult: float = Field(
+        default=2.0, description="Во сколько раз объём должен превышать норму"
+    )
+    sustain_bars: int = Field(
+        default=4, description="Сколько свечей подряд должны быть выше порога"
+    )
     oi_change_threshold_pct: float = 5.0
 
 
