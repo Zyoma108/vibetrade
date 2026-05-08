@@ -10,6 +10,7 @@ from src.analytics.detector import SetupDetector
 from src.collectors.market_data import MarketDataCollector
 from src.config import Settings
 from src.connectors.exchange import ExchangeConnector
+from src.executor.position_manager import PositionManager
 from src.notifier.telegram_bot import TelegramNotifier
 from src.storage.database import init_db
 from src.storage.models import Signal as SignalModel
@@ -27,6 +28,7 @@ class Application:
         self._collector: MarketDataCollector | None = None
         self._detector: BaseDetector | None = None
         self._notifier: TelegramNotifier | None = None
+        self._positions: PositionManager | None = None
 
     async def start(self) -> None:
         logger.info("Запуск приложения...")
@@ -47,6 +49,15 @@ class Application:
             await self._notifier.start()
         else:
             logger.warning("Telegram не настроен (токен или chat_ids пусты), уведомления отключены")
+
+        # Торговля (виртуальная или реальная)
+        mode = self.settings.trading.mode
+        if mode in ("virtual", "real"):
+            self._positions = PositionManager(
+                config=self.settings.trading,
+                send_message=self._notifier.send_message if self._notifier else None,
+            )
+            logger.info(f"Менеджер позиций запущен (режим: {mode})")
 
         # Сборщик данных
         self._collector = MarketDataCollector(
@@ -76,25 +87,36 @@ class Application:
 
     async def _on_collect_cycle_done(self, session: AsyncSession) -> None:
         """Вызывается после каждого цикла сбора данных."""
-        if not self._detector:
-            return
 
-        signals = await self._detector.analyze(session)
-        for sig in signals:
-            # Сохраняем сигнал в БД
-            db_signal = SignalModel(
-                timestamp=datetime.now(tz=timezone.utc),
-                symbol=sig.symbol,
-                setup_type=sig.setup_type,
-                direction=sig.direction,
-                confidence=sig.confidence,
-                message=sig.message,
-            )
-            session.add(db_signal)
+        # 1. Аналитика — ищем сетапы
+        if self._detector:
+            signals = await self._detector.analyze(session)
+            for sig in signals:
+                db_signal = SignalModel(
+                    timestamp=datetime.now(tz=timezone.utc),
+                    symbol=sig.symbol,
+                    setup_type=sig.setup_type,
+                    direction=sig.direction,
+                    confidence=sig.confidence,
+                    message=sig.message,
+                )
+                session.add(db_signal)
 
-            # Отправляем в Telegram
-            if self._notifier:
-                await self._notifier.send_signal(sig)
+                # Сигнал в Telegram
+                if self._notifier and self._positions is None:
+                    await self._notifier.send_signal(sig)
+
+                # Открываем позицию (если торговля активна)
+                if self._positions:
+                    await self._positions.open_position(session, sig)
+
+        # 2. Проверка TP/SL открытых позиций
+        if self._positions:
+            closed = await self._positions.update_positions(session)
+            if closed:
+                logger.info(f"Закрыто позиций за цикл: {len(closed)}")
+
+        await session.commit()
 
     async def wait(self) -> None:
         """Ожидание graceful shutdown."""
@@ -109,7 +131,6 @@ class Application:
             try:
                 loop.add_signal_handler(sig, handle_stop)
             except NotImplementedError:
-                # Windows — используем альтернативный подход
                 signal.signal(sig, lambda s, f: handle_stop())
 
         await stop_event.wait()

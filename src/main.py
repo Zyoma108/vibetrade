@@ -29,7 +29,7 @@ async def main() -> None:
     parser.add_argument(
         "--mode",
         type=str,
-        choices=["signal", "auto"],
+        choices=["signal", "virtual", "real"],
         default=None,
         help="Режим работы (переопределяет конфиг)",
     )

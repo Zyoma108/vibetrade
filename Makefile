@@ -1,4 +1,4 @@
-.PHONY: run run-signal run-auto test migrate-create migrate-up clean
+.PHONY: run run-signal run-virtual test migrate-create migrate-up clean
 
 APP := .venv/bin/python -m src.main
 
@@ -8,8 +8,8 @@ run:
 run-signal:
 	$(APP) --config config/config.yaml --mode signal
 
-run-auto:
-	$(APP) --config config/config.yaml --mode auto
+run-virtual:
+	$(APP) --config config/config.yaml --mode virtual
 
 test:
 	.venv/bin/pytest -v

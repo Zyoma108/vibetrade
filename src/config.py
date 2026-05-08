@@ -35,7 +35,11 @@ class TelegramConfig(BaseModel):
 
 
 class TradingConfig(BaseModel):
-    mode: str = "signal"
+    mode: str = "signal"              # signal | virtual | real
+    max_positions: int = Field(default=5, ge=1, description="Максимум одновременных позиций")
+    position_size_usdt: float = Field(default=100.0, ge=10, description="Размер позиции в USDT")
+    take_profit_pct: float = Field(default=12.0, ge=0.5, description="Тейк-профит, %")
+    stop_loss_pct: float = Field(default=4.0, ge=0.5, description="Стоп-лосс, %")
 
 
 class Settings(BaseModel):
