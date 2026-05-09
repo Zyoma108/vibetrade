@@ -129,7 +129,7 @@ class SetupDetector(BaseDetector):
     # ------------------------------------------------------------------
 
     def _check_price_trend(self, candles: list[dict]) -> str | None:
-        """Определить направление цены. None — нет явного тренда."""
+        """Только лонг: цена должна расти."""
         closes = np.array([c["close"] for c in candles[-PRICE_TREND_BARS:]])
 
         x = np.arange(len(closes))
@@ -140,12 +140,7 @@ class SetupDetector(BaseDetector):
             return None
 
         slope_pct = (slope * len(closes)) / mean_price * 100
-
-        if slope_pct > 0.2:
-            return "long"
-        elif slope_pct < -0.2:
-            return "short"
-        return None
+        return "long" if slope_pct > 0.2 else None
 
     # ------------------------------------------------------------------
     # Data loading

@@ -35,7 +35,7 @@ telegram:
 
 trading:
   mode: signal                    # signal | virtual | real
-  max_positions: 5                # максимум одновременных позиций
+  max_positions: 10               # максимум одновременных позиций
   position_size_usdt: 100.0       # размер позиции в USDT
   take_profit_pct: 12.0           # тейк-профит, %
   stop_loss_pct: 4.0              # стоп-лосс, %

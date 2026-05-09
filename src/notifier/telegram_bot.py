@@ -135,7 +135,7 @@ class TelegramNotifier:
         await self._bot.session.close()
         logger.info("Telegram-бот остановлен")
 
-    async def send_signal(self, signal: Signal) -> None:
+    async def send_signal(self, signal: Signal, opened: bool = False) -> None:
         """Отправить торговый сигнал."""
         if self._paused:
             logger.info(f"Сигнал {signal.symbol} пропущен: бот приостановлен")
@@ -145,11 +145,13 @@ class TelegramNotifier:
             return
 
         emoji = "📈" if signal.direction == "long" else "📉"
+        status_line = "🟢 Позиция открыта" if opened else "⚠️ Позиция не открыта (лимит)"
         text = (
             f"{emoji} <b>Сигнал: {signal.symbol}</b>\n"
             f"Тип сетапа: {signal.setup_type}\n"
             f"Направление: {signal.direction.upper()}\n"
-            f"Уверенность: {signal.confidence}%\n\n"
+            f"Уверенность: {signal.confidence}%\n"
+            f"Статус: {status_line}\n\n"
             f"{signal.message}"
         )
         if await self._notify_all(text):

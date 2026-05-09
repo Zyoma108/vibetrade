@@ -102,13 +102,14 @@ class Application:
                 )
                 session.add(db_signal)
 
-                # Сигнал в Telegram
-                if self._notifier and self._positions is None:
-                    await self._notifier.send_signal(sig)
-
                 # Открываем позицию (если торговля активна)
+                trade = None
                 if self._positions:
-                    await self._positions.open_position(session, sig)
+                    trade = await self._positions.open_position(session, sig)
+
+                # Сигнал в Telegram — всегда, с пометкой о позиции
+                if self._notifier:
+                    await self._notifier.send_signal(sig, opened=bool(trade))
 
         # 2. Проверка TP/SL открытых позиций
         if self._positions:
