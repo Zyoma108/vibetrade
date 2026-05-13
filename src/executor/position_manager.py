@@ -134,6 +134,11 @@ class PositionManager:
             logger.info(f"Сигнал {signal.symbol} пропущен: уже есть позиция")
             return None
 
+        # Проверка кулдауна после TP/SL (сутки)
+        if await self._in_cooldown(session, signal.symbol):
+            logger.info(f"Сигнал {signal.symbol} пропущен: кулдаун после закрытия")
+            return None
+
         # Цена входа из последнего тикера
         entry_price = await self._get_current_price(session, signal.symbol)
         if entry_price is None or entry_price <= 0:
@@ -280,6 +285,22 @@ class PositionManager:
         )
         result = await session.execute(stmt)
         return result.scalar() or 0
+
+    async def _in_cooldown(self, session: AsyncSession, symbol: str) -> bool:
+        """Была ли по символу закрытая сделка за последние 24 часа."""
+        from datetime import timedelta
+        cutoff = datetime.now(tz=timezone.utc) - timedelta(hours=24)
+        stmt = (
+            select(Trade)
+            .where(
+                Trade.symbol == symbol,
+                Trade.status == "closed",
+                Trade.exit_time >= cutoff,
+            )
+            .limit(1)
+        )
+        result = await session.execute(stmt)
+        return result.first() is not None
 
     async def _has_position(self, session: AsyncSession, symbol: str) -> bool:
         stmt = (
