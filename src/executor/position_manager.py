@@ -147,6 +147,9 @@ class PositionManager:
         # Реальный ордер на бирже
         if self.is_real:
             try:
+                await self._connector.set_leverage(  # type: ignore[union-attr]
+                    signal.symbol, self.config.leverage
+                )
                 await self._connector.create_order_with_tpsl(  # type: ignore[union-attr]
                     symbol=signal.symbol,
                     side="buy",
@@ -171,11 +174,12 @@ class PositionManager:
 
         # Нотификация
         mode_label = "REAL" if self.is_real else "VIRTUAL"
+        margin = self.config.position_size_usdt / self.config.leverage
         await self._notify(
             f"📈 <b>Открыта позиция [{mode_label}]</b> {signal.direction.upper()}\n"
             f"Монета: {signal.symbol}\n"
             f"Вход: ${entry_price:.6f}\n"
-            f"Объём: {quantity:.2f}\n"
+            f"Объём: ${self.config.position_size_usdt:.0f} (маржа ${margin:.0f} на {self.config.leverage}x)\n"
             f"TP: ${tp_price:.6f} (+{self.config.take_profit_pct}%)\n"
             f"SL: ${sl_price:.6f} (-{self.config.stop_loss_pct}%)"
         )

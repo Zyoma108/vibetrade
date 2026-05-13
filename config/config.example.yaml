@@ -40,7 +40,8 @@ trading:
   mode: signal                    # signal | virtual | real
   exchange: bybit                 # биржа для торговли
   max_positions: 10               # максимум одновременных позиций
-  position_size_usdt: 100.0       # размер позиции в USDT
+  position_size_usdt: 100.0       # объём позиции в USDT (не маржа!)
+  leverage: 1                    # кредитное плечо
   take_profit_pct: 12.0           # тейк-профит, %
   stop_loss_pct: 4.0              # стоп-лосс, %
   max_hold_hours: 24.0            # макс. время удержания, часов
