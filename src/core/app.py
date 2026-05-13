@@ -84,9 +84,15 @@ class Application:
 
             # Синхронизация с биржей при старте (real)
             if mode == "real":
-                async with async_session() as session:
-                    await self._positions.sync_positions(session)
-                    await session.commit()
+                try:
+                    async with async_session() as session:
+                        await self._positions.sync_positions(session)
+                        await session.commit()
+                except Exception:
+                    logger.exception(
+                        "Не удалось синхронизировать позиции. "
+                        "Бот продолжит работу в режиме сбора данных"
+                    )
 
         # Сборщик данных
         self._collector = MarketDataCollector(

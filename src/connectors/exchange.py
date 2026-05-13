@@ -44,6 +44,12 @@ class ExchangeConnector:
         self.exchange_id = exchange_id
         self._semaphore = asyncio.Semaphore(5)
 
+        if api_key:
+            net = "testnet" if testnet else "mainnet"
+            logger.info(
+                f"{exchange_id}: trading connector создан ({net})"
+            )
+
     @property
     def has_credentials(self) -> bool:
         return bool(self._exchange.apiKey)
@@ -68,7 +74,7 @@ class ExchangeConnector:
                 )
                 if attempt < MAX_RETRIES - 1:
                     await asyncio.sleep(RETRY_DELAY * (attempt + 1))
-            except ccxt.BadRequest:
+            except (ccxt.BadRequest, ccxt.AuthenticationError):
                 raise
             except Exception:
                 logger.exception(f"{self.exchange_id}: неожиданная ошибка в {method_name}")

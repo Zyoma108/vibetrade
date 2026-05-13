@@ -39,7 +39,21 @@ class PositionManager:
         if not self.is_real:
             return
 
-        exchange_positions = await self._connector.fetch_positions()  # type: ignore[union-attr]
+        try:
+            exchange_positions = await self._connector.fetch_positions()  # type: ignore[union-attr]
+        except Exception as e:
+            logger.error(f"Не удалось получить позиции с биржи: {e}")
+            logger.error(
+                "Проверь:\n"
+                "  1) api_key/secret скопированы без пробелов\n"
+                "  2) testnet: true для ключей с testnet.bybit.com\n"
+                "     testnet: false для ключей с bybit.com (включая demo-счёт)\n"
+                "  3) У API-ключа есть разрешения:\n"
+                "     - Account → Read\n"
+                "     - Trade → Derivatives (фьючерсы)\n"
+                "     (в настройках API-ключа на сайте ByBit)"
+            )
+            return
         ex_symbols = {p["symbol"] for p in exchange_positions}
 
         # Позиции в БД, открытые
