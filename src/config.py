@@ -8,6 +8,9 @@ from pydantic import BaseModel, Field
 
 class ExchangeConfig(BaseModel):
     enabled: bool = True
+    api_key: str = ""
+    secret: str = ""
+    testnet: bool = False
 
 
 class CollectorsConfig(BaseModel):
@@ -36,10 +39,12 @@ class TelegramConfig(BaseModel):
 
 class TradingConfig(BaseModel):
     mode: str = "signal"              # signal | virtual | real
+    exchange: str = "bybit"           # биржа для торговли
     max_positions: int = Field(default=10, ge=1, description="Максимум одновременных позиций")
     position_size_usdt: float = Field(default=100.0, ge=10, description="Размер позиции в USDT")
     take_profit_pct: float = Field(default=12.0, ge=0.5, description="Тейк-профит, %")
     stop_loss_pct: float = Field(default=4.0, ge=0.5, description="Стоп-лосс, %")
+    max_hold_hours: float = Field(default=24.0, ge=1.0, description="Максимальное время удержания позиции, часов")
 
 
 class Settings(BaseModel):

@@ -3,6 +3,9 @@ exchanges:
     enabled: true
   bybit:
     enabled: true
+    # api_key: "your-api-key"    # для реальной торговли
+    # secret: "your-secret"
+    # testnet: true              # true = testnet, false = mainnet
 
 # coins: если список пуст — все монеты с бирж отбираются динамически
 #   по объёму и исключениям. Можно указать конкретные пары:
@@ -35,7 +38,9 @@ telegram:
 
 trading:
   mode: signal                    # signal | virtual | real
+  exchange: bybit                 # биржа для торговли
   max_positions: 10               # максимум одновременных позиций
   position_size_usdt: 100.0       # размер позиции в USDT
   take_profit_pct: 12.0           # тейк-профит, %
   stop_loss_pct: 4.0              # стоп-лосс, %
+  max_hold_hours: 24.0            # макс. время удержания, часов

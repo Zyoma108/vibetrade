@@ -1,6 +1,7 @@
 import asyncio
 import logging
 from datetime import datetime, timezone
+from typing import Optional
 
 import ccxt
 
@@ -10,25 +11,46 @@ FETCH_TIMEOUT = 30_000  # ms
 MAX_RETRIES = 3
 RETRY_DELAY = 5  # seconds
 
+# Режим биржи по умолчанию — фьючерсы (нужен OI для стратегии)
+_DEFAULT_TYPE: dict[str, str] = {
+    "binance": "future",
+    "bybit": "linear",
+}
+
 
 class ExchangeConnector:
-    """Обёртка над ccxt для работы с CEX-биржами."""
+    """Обёртка над ccxt для работы с CEX-биржами (public + trading)."""
 
-    # Режим биржи по умолчанию — фьючерсы (нужен OI для стратегии)
-    _DEFAULT_TYPE: dict[str, str] = {
-        "binance": "future",
-        "bybit": "linear",
-    }
-
-    def __init__(self, exchange_id: str):
+    def __init__(
+        self,
+        exchange_id: str,
+        api_key: str = "",
+        secret: str = "",
+        testnet: bool = False,
+    ):
         exchange_class = getattr(ccxt, exchange_id)
-        market_type = self._DEFAULT_TYPE.get(exchange_id, "spot")
-        self._exchange = exchange_class({
+        market_type = _DEFAULT_TYPE.get(exchange_id, "spot")
+
+        config: dict = {
             "timeout": FETCH_TIMEOUT,
             "options": {"defaultType": market_type},
-        })
+        }
+        if api_key and secret:
+            config.update({"apiKey": api_key, "secret": secret})
+        if testnet:
+            config["test"] = True
+
+        self._exchange = exchange_class(config)
         self.exchange_id = exchange_id
         self._semaphore = asyncio.Semaphore(5)
+
+    @property
+    def has_credentials(self) -> bool:
+        return bool(self._exchange.apiKey)
+
+    # ------------------------------------------------------------------
+    # Low-level
+    # ------------------------------------------------------------------
 
     async def _call(self, method_name: str, *args, **kwargs):
         """Вызов синхронного метода ccxt в потоке с ретраями."""
@@ -53,6 +75,10 @@ class ExchangeConnector:
                 raise
 
         raise last_error  # type: ignore[misc]
+
+    # ------------------------------------------------------------------
+    # Public data
+    # ------------------------------------------------------------------
 
     async def fetch_ohlcv(
         self, symbol: str, timeframe: str = "5m", limit: int = 100
@@ -125,6 +151,85 @@ class ExchangeConnector:
                 "change_pct": data.get("percentage"),
             })
         return result
+
+    # ------------------------------------------------------------------
+    # Trading
+    # ------------------------------------------------------------------
+
+    async def create_market_order(
+        self, symbol: str, side: str, amount: float
+    ) -> dict:
+        """Рыночный ордер. side = 'buy' | 'sell'."""
+        raw = await self._call("create_order", symbol, "market", side, amount)
+        logger.info(
+            f"{self.exchange_id}: market {side} {amount} {symbol} → "
+            f"цена={raw.get('price', raw.get('average', '?'))}"
+        )
+        return raw
+
+    async def create_order_with_tpsl(
+        self,
+        symbol: str,
+        side: str,
+        amount: float,
+        tp_price: float,
+        sl_price: float,
+    ) -> dict:
+        """Рыночный ордер с TP/SL на бирже (bracket order)."""
+        params = {
+            "takeProfitPrice": tp_price,
+            "stopLossPrice": sl_price,
+        }
+        raw = await self._call(
+            "create_order", symbol, "market", side, amount, None, params
+        )
+        logger.info(
+            f"{self.exchange_id}: market {side} {amount} {symbol} "
+            f"TP={tp_price:.6f} SL={sl_price:.6f}"
+        )
+        return raw
+
+    async def fetch_positions(self, symbol: str | None = None) -> list[dict]:
+        """Открытые позиции на бирже."""
+        args = ([symbol],) if symbol else ()
+        raw = await self._call("fetch_positions", *args)
+        result = []
+        for p in raw:
+            if isinstance(p, dict) and p.get("contracts", 0):
+                result.append({
+                    "symbol": p["symbol"],
+                    "side": p["side"],
+                    "contracts": p["contracts"],
+                    "entry_price": p.get("entryPrice", 0),
+                    "unrealized_pnl": p.get("unrealizedPnl"),
+                    "timestamp": datetime.fromtimestamp(
+                        p["timestamp"] / 1000, tz=timezone.utc
+                    ) if p.get("timestamp") else datetime.now(tz=timezone.utc),
+                })
+        return result
+
+    async def close_position(self, symbol: str) -> dict | None:
+        """Закрыть позицию по рынку."""
+        positions = await self.fetch_positions(symbol)
+        if not positions:
+            logger.info(f"{self.exchange_id}: нет открытой позиции для {symbol}")
+            return None
+
+        pos = positions[0]
+        close_side = "sell" if pos["side"] == "long" else "buy"
+        raw = await self._call(
+            "create_order", symbol, "market", close_side, pos["contracts"],
+            None, None, {"reduceOnly": True}
+        )
+        logger.info(
+            f"{self.exchange_id}: закрыта позиция {symbol} "
+            f"{close_side} {pos['contracts']}"
+        )
+        return raw
+
+    # ------------------------------------------------------------------
+    # Cleanup
+    # ------------------------------------------------------------------
 
     async def close(self) -> None:
         """Закрыть соединение с биржей."""

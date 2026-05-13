@@ -12,7 +12,7 @@ from src.config import Settings
 from src.connectors.exchange import ExchangeConnector
 from src.executor.position_manager import PositionManager
 from src.notifier.telegram_bot import TelegramNotifier
-from src.storage.database import init_db
+from src.storage.database import async_session, init_db
 from src.storage.models import Signal as SignalModel
 
 logger = logging.getLogger(__name__)
@@ -25,6 +25,7 @@ class Application:
         self.settings = settings
         self._running = False
         self._connectors: list[ExchangeConnector] = []
+        self._trading_connector: ExchangeConnector | None = None
         self._collector: MarketDataCollector | None = None
         self._detector: BaseDetector | None = None
         self._notifier: TelegramNotifier | None = None
@@ -34,11 +35,33 @@ class Application:
         logger.info("Запуск приложения...")
         await init_db()
 
-        # Коннекторы
+        mode = self.settings.trading.mode
+        trading_exchange = self.settings.trading.exchange
+
+        # Коннекторы для сбора данных
         for ex_id, ex_cfg in self.settings.exchanges.items():
             if ex_cfg.enabled:
                 self._connectors.append(ExchangeConnector(ex_id))
-        logger.info(f"Биржи: {[c.exchange_id for c in self._connectors]}")
+        logger.info(f"Биржи (данные): {[c.exchange_id for c in self._connectors]}")
+
+        # Коннектор для торговли (real)
+        if mode == "real":
+            ex_cfg = self.settings.exchanges.get(trading_exchange)
+            if not ex_cfg or not ex_cfg.api_key:
+                logger.error(
+                    f"Real-режим: не настроены API-ключи для {trading_exchange}. "
+                    f"Проверь config.yaml"
+                )
+                raise RuntimeError("Real-режим требует API-ключи")
+
+            self._trading_connector = ExchangeConnector(
+                exchange_id=trading_exchange,
+                api_key=ex_cfg.api_key,
+                secret=ex_cfg.secret,
+                testnet=ex_cfg.testnet,
+            )
+            net = "TESTNET" if ex_cfg.testnet else "MAINNET"
+            logger.info(f"Торговый коннектор: {trading_exchange} ({net})")
 
         # Аналитика
         self._detector = SetupDetector(self.settings.strategy)
@@ -48,16 +71,22 @@ class Application:
             self._notifier = TelegramNotifier(self.settings.telegram)
             await self._notifier.start()
         else:
-            logger.warning("Telegram не настроен (токен или chat_ids пусты), уведомления отключены")
+            logger.warning("Telegram не настроен, уведомления отключены")
 
-        # Торговля (виртуальная или реальная)
-        mode = self.settings.trading.mode
+        # Торговля (virtual или real)
         if mode in ("virtual", "real"):
             self._positions = PositionManager(
                 config=self.settings.trading,
                 send_message=self._notifier.send_message if self._notifier else None,
+                trading_connector=self._trading_connector,
             )
             logger.info(f"Менеджер позиций запущен (режим: {mode})")
+
+            # Синхронизация с биржей при старте (real)
+            if mode == "real":
+                async with async_session() as session:
+                    await self._positions.sync_positions(session)
+                    await session.commit()
 
         # Сборщик данных
         self._collector = MarketDataCollector(
@@ -79,6 +108,9 @@ class Application:
 
         if self._collector:
             await self._collector.stop()
+
+        if self._trading_connector:
+            await self._trading_connector.close()
 
         if self._notifier:
             await self._notifier.stop()
@@ -111,7 +143,7 @@ class Application:
                 if self._notifier:
                     await self._notifier.send_signal(sig, opened=bool(trade))
 
-        # 2. Проверка TP/SL открытых позиций
+        # 2. Проверка открытых позиций (TP/SL/время)
         if self._positions:
             closed = await self._positions.update_positions(session)
             if closed:
