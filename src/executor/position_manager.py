@@ -162,13 +162,27 @@ class PositionManager:
                         logger.warning(
                             f"Не удалось выставить плечо {lev}x для {signal.symbol}: {e}"
                         )
-                await self._connector.create_order_with_tpsl(  # type: ignore[union-attr]
+
+                # 1. Открываем позицию рыночным ордером
+                await self._connector.create_market_order(  # type: ignore[union-attr]
                     symbol=signal.symbol,
                     side="buy",
                     amount=quantity,
-                    tp_price=tp_price,
-                    sl_price=sl_price,
                 )
+
+                # 2. Выставляем TP/SL (может не сработать если ордер не заполнился)
+                try:
+                    await self._connector.set_tpsl(  # type: ignore[union-attr]
+                        symbol=signal.symbol,
+                        side="buy",
+                        amount=quantity,
+                        tp_price=tp_price,
+                        sl_price=sl_price,
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"TP/SL для {signal.symbol} будут выставлены в следующем цикле: {e}"
+                    )
             except Exception:
                 logger.exception(f"Не удалось создать ордер для {signal.symbol}")
                 return None

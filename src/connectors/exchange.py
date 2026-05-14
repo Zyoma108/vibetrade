@@ -173,7 +173,7 @@ class ExchangeConnector:
         )
         return raw
 
-    async def create_order_with_tpsl(
+    async def set_tpsl(
         self,
         symbol: str,
         side: str,
@@ -181,16 +181,18 @@ class ExchangeConnector:
         tp_price: float,
         sl_price: float,
     ) -> dict:
-        """Рыночный ордер с TP/SL на бирже (bracket order)."""
+        """Выставить TP/SL на открытую позицию (вызывается ПОСЛЕ ордера)."""
+        close_side = "sell" if side == "buy" else "buy"
         params = {
             "takeProfitPrice": tp_price,
             "stopLossPrice": sl_price,
         }
         raw = await self._call(
-            "create_order", symbol, "market", side, amount, None, params
+            "create_order", symbol, "market", close_side, amount,
+            None, params
         )
         logger.info(
-            f"{self.exchange_id}: market {side} {amount} {symbol} "
+            f"{self.exchange_id}: TP/SL {symbol} "
             f"TP={tp_price:.6f} SL={sl_price:.6f}"
         )
         return raw
