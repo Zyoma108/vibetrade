@@ -165,13 +165,16 @@ class ExchangeConnector:
     async def create_market_order(
         self, symbol: str, side: str, amount: float
     ) -> dict:
-        """Рыночный ордер. side = 'buy' | 'sell'."""
+        """Рыночный ордер. side = 'buy' | 'sell'.
+        Возвращает словарь с ключом 'fill_price' — фактическая цена исполнения."""
         raw = await self._call("create_order", symbol, "market", side, amount)
+        # Фактическая цена: average (средневзвешенная) или price
+        fill_price = raw.get("average") or raw.get("price")
         logger.info(
             f"{self.exchange_id}: market {side} {amount} {symbol} → "
-            f"цена={raw.get('price', raw.get('average', '?'))}"
+            f"цена={fill_price}"
         )
-        return raw
+        return {**raw, "fill_price": fill_price}
 
     async def set_tpsl(
         self,

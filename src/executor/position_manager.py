@@ -164,13 +164,24 @@ class PositionManager:
                         )
 
                 # 1. Открываем позицию рыночным ордером
-                await self._connector.create_market_order(  # type: ignore[union-attr]
+                order = await self._connector.create_market_order(  # type: ignore[union-attr]
                     symbol=signal.symbol,
                     side="buy",
                     amount=quantity,
                 )
 
-                # 2. Выставляем TP/SL (может не сработать если ордер не заполнился)
+                # 2. Фактическая цена исполнения — по ней считаем TP/SL
+                fill_price = order.get("fill_price") or entry_price
+                if fill_price != entry_price:
+                    logger.info(
+                        f"Цена изменилась: тикер={entry_price:.6f} → "
+                        f"факт={fill_price:.6f}"
+                    )
+                entry_price = fill_price
+                tp_price = self._tp_price(entry_price, signal.direction)
+                sl_price = self._sl_price(entry_price, signal.direction)
+
+                # 3. Выставляем TP/SL от фактической цены
                 try:
                     await self._connector.set_tpsl(  # type: ignore[union-attr]
                         symbol=signal.symbol,
