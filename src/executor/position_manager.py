@@ -278,7 +278,20 @@ class PositionManager:
             # --- Real: позиция закрыта на бирже (TP/SL) ---
             if self.is_real:
                 if pos.symbol not in ex_symbols:
+                    # Пытаемся получить фактическую цену выхода
                     exit_price = current_price or pos.entry_price
+                    try:
+                        last_trade = await self._connector.fetch_last_trade(  # type: ignore[union-attr]
+                            pos.symbol, pos.entry_time
+                        )
+                        if last_trade:
+                            exit_price = last_trade["price"]
+                            logger.info(
+                                f"Фактическая цена выхода {pos.symbol}: "
+                                f"${exit_price:.6f}"
+                            )
+                    except Exception:
+                        pass
                     await self._close_position(pos, exit_price, "tp_sl_exchange")
                     closed.append(pos)
                     continue

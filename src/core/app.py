@@ -127,7 +127,13 @@ class Application:
     async def _on_collect_cycle_done(self, session: AsyncSession) -> None:
         """Вызывается после каждого цикла сбора данных."""
 
-        # 1. Аналитика — ищем сетапы
+        # 1. Синхронизация позиций с биржей (каждый цикл, перед аналитикой)
+        if self._positions:
+            closed = await self._positions.update_positions(session)
+            if closed:
+                logger.info(f"Закрыто позиций за цикл: {len(closed)}")
+
+        # 2. Аналитика — ищем сетапы (уже с актуальным списком позиций)
         if self._detector:
             signals = await self._detector.analyze(session)
             for sig in signals:
@@ -149,12 +155,6 @@ class Application:
                 # Сигнал в Telegram — всегда, с пометкой о позиции
                 if self._notifier:
                     await self._notifier.send_signal(sig, opened=bool(trade))
-
-        # 2. Проверка открытых позиций (TP/SL/время)
-        if self._positions:
-            closed = await self._positions.update_positions(session)
-            if closed:
-                logger.info(f"Закрыто позиций за цикл: {len(closed)}")
 
         await session.commit()
 

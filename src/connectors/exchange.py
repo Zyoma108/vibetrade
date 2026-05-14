@@ -224,6 +224,27 @@ class ExchangeConnector:
         logger.info(f"{self.exchange_id}: устанавливаю плечо {leverage}x для {symbol}")
         await self._call("set_leverage", leverage, symbol)
 
+    async def fetch_last_trade(
+        self, symbol: str, since: datetime
+    ) -> dict | None:
+        """Последняя сделка по символу после указанного времени
+        (нужна для определения фактической цены выхода)."""
+        since_ts = int(since.timestamp() * 1000)
+        trades = await self._call(
+            "fetch_my_trades", symbol, since_ts, None, {"limit": 1}
+        )
+        if trades and len(trades) > 0:
+            t = trades[-1]
+            return {
+                "price": t["price"],
+                "amount": t["amount"],
+                "side": t["side"],
+                "timestamp": datetime.fromtimestamp(
+                    t["timestamp"] / 1000, tz=timezone.utc
+                ),
+            }
+        return None
+
     async def close_position(self, symbol: str) -> dict | None:
         """Закрыть позицию по рынку."""
         positions = await self.fetch_positions(symbol)
