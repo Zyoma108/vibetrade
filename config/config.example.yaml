@@ -16,6 +16,7 @@ coins: []
 
 collectors:
   interval_seconds: 60
+  timeframe: 5m                  # таймфрейм свечей (1m, 5m, 15m, 1h)
 
 strategy:
   min_volume_usdt: 200000       # минимальный суточный объём в USDT

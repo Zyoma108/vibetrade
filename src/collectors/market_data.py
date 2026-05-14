@@ -21,6 +21,7 @@ class MarketDataCollector:
         exclude_coins: list[str],
         min_volume_usdt: float,
         interval_seconds: int = 60,
+        timeframe: str = "5m",
         on_cycle_done: Callable[[AsyncSession], Coroutine] | None = None,
     ):
         self._connectors = connectors
@@ -28,6 +29,7 @@ class MarketDataCollector:
         self._exclude_coins = set(name.upper() for name in exclude_coins)
         self._min_volume = min_volume_usdt
         self._interval = interval_seconds
+        self._timeframe = timeframe
         self._on_cycle_done = on_cycle_done
         self._running = False
         self._task: asyncio.Task | None = None
@@ -100,7 +102,7 @@ class MarketDataCollector:
         for t in selected:
             symbol = t["symbol"]
             try:
-                candles = await connector.fetch_ohlcv(symbol, limit=100)
+                candles = await connector.fetch_ohlcv(symbol, timeframe=self._timeframe, limit=100)
                 for c in candles:
                     session.add(Candle(**c))
 

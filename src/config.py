@@ -15,6 +15,7 @@ class ExchangeConfig(BaseModel):
 
 class CollectorsConfig(BaseModel):
     interval_seconds: int = Field(default=60, ge=10)
+    timeframe: str = Field(default="5m", description="Таймфрейм свечей (1m, 5m, 15m, 1h)")
 
 
 class StrategyConfig(BaseModel):

@@ -101,6 +101,7 @@ class Application:
             exclude_coins=self.settings.strategy.exclude_coins,
             min_volume_usdt=self.settings.strategy.min_volume_usdt,
             interval_seconds=self.settings.collectors.interval_seconds,
+            timeframe=self.settings.collectors.timeframe,
             on_cycle_done=self._on_collect_cycle_done,
         )
 
