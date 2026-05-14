@@ -144,7 +144,7 @@ class ExchangeConnector:
             if not isinstance(data, dict):
                 continue
             ts = data.get("timestamp")
-            volume = data.get("baseVolume") or data.get("quoteVolume") or 0
+            volume = data.get("quoteVolume") or data.get("baseVolume") or 0
             result.append({
                 "exchange": self.exchange_id,
                 "symbol": symbol,
