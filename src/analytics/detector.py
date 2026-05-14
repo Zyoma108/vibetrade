@@ -12,7 +12,6 @@ logger = logging.getLogger(__name__)
 # Фиксированные параметры (редко меняются — не в конфиге)
 SMOOTH_MAX_RATIO = 5.0   # макс. отношение макс/медиана объёма в окне (отсекает спайки)
 OI_TREND_BARS = 6        # сколько последних точек OI для проверки тренда
-PRICE_TREND_BARS = 12    # сколько последних свечей для проверки направления цены
 
 
 class SetupDetector(BaseDetector):
@@ -129,18 +128,15 @@ class SetupDetector(BaseDetector):
     # ------------------------------------------------------------------
 
     def _check_price_trend(self, candles: list[dict]) -> str | None:
-        """Только лонг: цена должна расти."""
-        closes = np.array([c["close"] for c in candles[-PRICE_TREND_BARS:]])
+        """Только лонг: цена должна вырасти за период всплеска объёмов."""
+        sustain = self.config.sustain_bars
+        closes = np.array([c["close"] for c in candles[-sustain:]])
 
-        x = np.arange(len(closes))
-        slope = np.polyfit(x, closes, 1)[0]
-
-        mean_price = np.mean(closes)
-        if mean_price <= 0:
+        if closes[0] <= 0:
             return None
 
-        slope_pct = (slope * len(closes)) / mean_price * 100
-        return "long" if slope_pct > 0.2 else None
+        change_pct = (closes[-1] / closes[0] - 1) * 100
+        return "long" if change_pct > 0 else None
 
     # ------------------------------------------------------------------
     # Data loading
