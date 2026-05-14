@@ -152,10 +152,16 @@ class PositionManager:
         # Реальный ордер на бирже
         if self.is_real:
             try:
-                if self.config.leverage > 1:
-                    await self._connector.set_leverage(  # type: ignore[union-attr]
-                        signal.symbol, self.config.leverage
-                    )
+                lev = int(self.config.leverage)
+                if lev > 1:
+                    try:
+                        await self._connector.set_leverage(  # type: ignore[union-attr]
+                            signal.symbol, lev
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            f"Не удалось выставить плечо {lev}x для {signal.symbol}: {e}"
+                        )
                 await self._connector.create_order_with_tpsl(  # type: ignore[union-attr]
                     symbol=signal.symbol,
                     side="buy",
