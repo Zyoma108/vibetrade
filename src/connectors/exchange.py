@@ -216,8 +216,8 @@ class ExchangeConnector:
 
     async def set_leverage(self, symbol: str, leverage: int) -> None:
         """Установить плечо для символа."""
+        logger.info(f"{self.exchange_id}: устанавливаю плечо {leverage}x для {symbol}")
         await self._call("set_leverage", leverage, symbol)
-        logger.info(f"{self.exchange_id}: плечо {leverage}x для {symbol}")
 
     async def close_position(self, symbol: str) -> dict | None:
         """Закрыть позицию по рынку."""
