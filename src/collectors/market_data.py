@@ -103,8 +103,17 @@ class MarketDataCollector:
             symbol = t["symbol"]
             try:
                 candles = await connector.fetch_ohlcv(symbol, timeframe=self._timeframe, limit=100)
+                # Сохраняем только новые свечи (дедупликация по exchange+symbol+timestamp)
                 for c in candles:
-                    session.add(Candle(**c))
+                    exists = await session.scalar(
+                        select(Candle.id).where(
+                            Candle.exchange == c["exchange"],
+                            Candle.symbol == c["symbol"],
+                            Candle.timestamp == c["timestamp"],
+                        ).limit(1)
+                    )
+                    if not exists:
+                        session.add(Candle(**c))
 
                 # Быстрая проверка: есть ли рост объёма в последних свечах?
                 if len(candles) >= 4:

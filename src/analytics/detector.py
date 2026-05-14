@@ -175,6 +175,7 @@ class SetupDetector(BaseDetector):
                 "volume": r.volume,
             }
             for r in reversed(rows)  # хронологический порядок
+            if r.volume > 0  # пропускаем незакрытые свечи (volume=0)
         ]
 
     # ------------------------------------------------------------------
