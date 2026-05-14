@@ -19,6 +19,7 @@ class SetupDetector(BaseDetector):
 
     def __init__(self, config: StrategyConfig):
         self.config = config
+        self._exclude_coins = set(c.upper() for c in config.exclude_coins)
         self.baseline_bars = 50  # свечей для расчёта "нормального" объёма
 
     async def analyze(self, session) -> list[Signal]:
@@ -143,14 +144,18 @@ class SetupDetector(BaseDetector):
     # ------------------------------------------------------------------
 
     async def _get_active_symbols(self, session) -> list[tuple[str, str]]:
-        """Все пары (exchange, symbol) с данными."""
+        """Все пары (exchange, symbol), кроме исключённых."""
         stmt = (
             select(Candle.exchange, Candle.symbol)
             .distinct()
             .order_by(Candle.exchange, Candle.symbol)
         )
         result = await session.execute(stmt)
-        return [(row[0], row[1]) for row in result.all()]
+        return [
+            (ex, sym)
+            for ex, sym in result.all()
+            if sym.split("/")[0].upper() not in self._exclude_coins
+        ]
 
     async def _load_candles(
         self, session, exchange: str, symbol: str
