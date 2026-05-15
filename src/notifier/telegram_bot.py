@@ -50,7 +50,8 @@ class TelegramNotifier:
             await message.answer(
                 f"Привет! Твой chat ID: <code>{message.chat.id}</code>{username}\n\n"
                 f"Пропиши этот ID в <code>chat_ids</code> в config.yaml, "
-                f"чтобы бот отправлял тебе сигналы."
+                f"чтобы бот отправлял тебе сигналы.",
+                parse_mode="HTML",
             )
 
         @self._dp.message(Command("status"))
@@ -104,7 +105,7 @@ class TelegramNotifier:
                 await message.answer("Формат: /stats [day|week|month|all]")
                 return
             text = await self._stats_provider(period)
-            await message.answer(text)
+            await message.answer(text, parse_mode="HTML")
 
     @property
     def is_paused(self) -> bool:
