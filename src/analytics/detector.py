@@ -144,7 +144,17 @@ class SetupDetector(BaseDetector):
     # ------------------------------------------------------------------
 
     async def _get_active_symbols(self, session) -> list[tuple[str, str]]:
-        """Все пары (exchange, symbol), кроме исключённых."""
+        """Все пары (exchange, symbol), которые есть на торгуемой бирже (ByBit)."""
+        # Символы, доступные на ByBit
+        bybit_syms_stmt = (
+            select(Candle.symbol)
+            .where(Candle.exchange == "bybit")
+            .distinct()
+        )
+        bybit_result = await session.execute(bybit_syms_stmt)
+        bybit_symbols = set(bybit_result.scalars().all())
+
+        # Все уникальные пары биржа+символ
         stmt = (
             select(Candle.exchange, Candle.symbol)
             .distinct()
@@ -154,7 +164,8 @@ class SetupDetector(BaseDetector):
         return [
             (ex, sym)
             for ex, sym in result.all()
-            if sym.split("/")[0].upper() not in self._exclude_coins
+            if sym in bybit_symbols
+            and sym.split("/")[0].upper() not in self._exclude_coins
         ]
 
     async def _load_candles(
