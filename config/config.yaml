@@ -28,6 +28,7 @@ strategy:
     - XRP
     - HBAR
     - EWY
+  baseline_bars: 50             # свечей для расчёта нормального объёма
   volume_surge_mult: 5.0        # во сколько раз объём должен превысить норму
   sustain_bars: 4               # сколько свечей подряд выше порога для сигнала
   oi_change_threshold_pct: 5.0

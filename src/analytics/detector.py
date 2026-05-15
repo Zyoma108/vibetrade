@@ -20,7 +20,6 @@ class SetupDetector(BaseDetector):
     def __init__(self, config: StrategyConfig):
         self.config = config
         self._exclude_coins = set(c.upper() for c in config.exclude_coins)
-        self.baseline_bars = 50  # свечей для расчёта "нормального" объёма
 
     async def analyze(self, session) -> list[Signal]:
         symbols = await self._get_active_symbols(session)
@@ -32,7 +31,7 @@ class SetupDetector(BaseDetector):
         for exchange, symbol in symbols:
             try:
                 candles = await self._load_candles(session, exchange, symbol)
-                if len(candles) < self.baseline_bars + self.config.sustain_bars:
+                if len(candles) < self.config.baseline_bars + self.config.sustain_bars:
                     continue
 
                 if not self._check_volume_pattern(candles):
@@ -67,7 +66,7 @@ class SetupDetector(BaseDetector):
         """Проверить плавный рост объёма над базовым уровнем."""
         volumes = np.array([c["volume"] for c in candles])
 
-        baseline = np.median(volumes[:self.baseline_bars])
+        baseline = np.median(volumes[:self.config.baseline_bars])
         if baseline <= 0:
             return False
 
@@ -172,7 +171,7 @@ class SetupDetector(BaseDetector):
         self, session, exchange: str, symbol: str
     ) -> list[dict]:
         """Загрузить последние свечи для пары биржа+символ."""
-        limit = self.baseline_bars + self.config.sustain_bars + 10
+        limit = self.config.baseline_bars + self.config.sustain_bars + 10
         stmt = (
             select(Candle)
             .where(Candle.exchange == exchange, Candle.symbol == symbol)
@@ -203,7 +202,7 @@ class SetupDetector(BaseDetector):
     ) -> Signal:
         sustain = self.config.sustain_bars
         volumes = [c["volume"] for c in candles[-sustain:]]
-        baseline = np.median([c["volume"] for c in candles[:self.baseline_bars]])
+        baseline = np.median([c["volume"] for c in candles[:self.config.baseline_bars]])
         surge = np.mean(volumes) / baseline if baseline > 0 else 0
 
         return Signal(

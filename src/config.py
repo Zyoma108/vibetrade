@@ -24,6 +24,9 @@ class StrategyConfig(BaseModel):
         default=["BTC", "ETH"],
         description="Монеты, исключаемые из сканирования (без /USDT)",
     )
+    baseline_bars: int = Field(
+        default=50, description="Свечей для расчёта нормального объёма"
+    )
     volume_surge_mult: float = Field(
         default=2.0, description="Во сколько раз объём должен превышать норму"
     )
