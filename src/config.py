@@ -33,7 +33,12 @@ class StrategyConfig(BaseModel):
     sustain_bars: int = Field(
         default=4, description="Сколько свечей подряд должны быть выше порога"
     )
-    oi_change_threshold_pct: float = 5.0
+    oi_slope_min_pct: float = Field(
+        default=2.0, description="Минимальный наклон OI, % (фильтрует плоский/падающий OI)"
+    )
+    price_growth_min_pct: float = Field(
+        default=0.3, description="Минимальный рост цены за sustain-окно, %"
+    )
 
 
 class TelegramConfig(BaseModel):

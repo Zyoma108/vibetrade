@@ -88,6 +88,11 @@ class SetupDetector(BaseDetector):
         if recent[-1] < np.mean(recent[:2]) * 0.5:
             return False
 
+        # Объём должен ускоряться: последняя половина окна > первая половина
+        half = max(sustain // 2, 1)
+        if np.mean(recent[-half:]) <= np.mean(recent[:half]):
+            return False
+
         return True
 
     # ------------------------------------------------------------------
@@ -121,7 +126,7 @@ class SetupDetector(BaseDetector):
             return False
 
         slope_pct = (slope * len(values)) / mean_oi * 100
-        return slope_pct > 0
+        return slope_pct >= self.config.oi_slope_min_pct
 
     # ------------------------------------------------------------------
     # Price direction
@@ -136,7 +141,7 @@ class SetupDetector(BaseDetector):
             return None
 
         change_pct = (closes[-1] / closes[0] - 1) * 100
-        return "long" if change_pct > 0 else None
+        return "long" if change_pct >= self.config.price_growth_min_pct else None
 
     # ------------------------------------------------------------------
     # Data loading
