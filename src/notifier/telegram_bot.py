@@ -1,6 +1,7 @@
 import asyncio
 import logging
 from datetime import datetime
+from typing import Callable, Coroutine
 
 from aiogram import Bot, Dispatcher, types
 from aiogram.exceptions import TelegramNetworkError
@@ -26,7 +27,11 @@ class TelegramNotifier:
         self._start_time: datetime | None = None
         self._signals_sent = 0
         self._polling_task: asyncio.Task | None = None
+        self._stats_provider: Callable[[str], Coroutine] | None = None
         self._setup_handlers()
+
+    def set_stats_provider(self, provider: Callable[[str], Coroutine]) -> None:
+        self._stats_provider = provider
 
     def _is_authorized(self, chat: types.Chat) -> bool:
         """Проверить, что сообщение из разрешённого чата/канала."""
@@ -84,6 +89,22 @@ class TelegramNotifier:
             else:
                 self._paused = False
                 await message.answer("🟢 Бот возобновлён. Сигналы отправляются.")
+
+        @self._dp.message(Command("stats"))
+        async def stats_handler(message: types.Message):
+            if not self._is_authorized(message.chat):
+                return
+            if not self._stats_provider:
+                await message.answer("Статистика недоступна")
+                return
+            # Разбираем аргумент
+            arg = message.text.strip().split()
+            period = arg[1] if len(arg) > 1 else "day"
+            if period not in ("day", "week", "month", "all"):
+                await message.answer("Формат: /stats [day|week|month|all]")
+                return
+            text = await self._stats_provider(period)
+            await message.answer(text)
 
     @property
     def is_paused(self) -> bool:

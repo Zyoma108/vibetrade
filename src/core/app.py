@@ -13,6 +13,7 @@ from src.connectors.exchange import ExchangeConnector
 from src.executor.position_manager import PositionManager
 from src.notifier.telegram_bot import TelegramNotifier
 from src.storage.database import async_session, init_db
+from src.storage.stats import trade_stats
 from src.storage.models import Signal as SignalModel
 
 logger = logging.getLogger(__name__)
@@ -70,6 +71,13 @@ class Application:
         if self.settings.telegram.bot_token and self.settings.telegram.chat_ids:
             self._notifier = TelegramNotifier(self.settings.telegram)
             await self._notifier.start()
+
+            # Провайдер статистики
+            async def stats_provider(period: str) -> str:
+                async with async_session() as s:
+                    return await trade_stats(s, period)
+
+            self._notifier.set_stats_provider(stats_provider)
         else:
             logger.warning("Telegram не настроен, уведомления отключены")
 
