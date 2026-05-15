@@ -117,8 +117,10 @@ class PositionManager:
 
     async def open_position(
         self, session: AsyncSession, signal: Signal
-    ) -> Trade | None:
-        """Открыть позицию по сигналу, если есть свободные слоты."""
+    ) -> tuple[Trade | None, str]:
+        """Открыть позицию по сигналу.
+        Возвращает (trade, status): status = 'opened' | 'limit' | 'duplicate' |
+        'cooldown' | 'no_price' | 'error'."""
 
         # Проверка лимита
         open_count = await self._count_open(session)
@@ -127,23 +129,23 @@ class PositionManager:
                 f"Сигнал {signal.symbol} пропущен: "
                 f"{open_count}/{self.config.max_positions} позиций открыто"
             )
-            return None
+            return None, "limit"
 
         # Проверка — нет ли уже позиции по этой монете
         if await self._has_position(session, signal.symbol):
             logger.info(f"Сигнал {signal.symbol} пропущен: уже есть позиция")
-            return None
+            return None, "duplicate"
 
         # Проверка кулдауна после TP/SL (сутки)
         if await self._in_cooldown(session, signal.symbol):
             logger.info(f"Сигнал {signal.symbol} пропущен: кулдаун после закрытия")
-            return None
+            return None, "cooldown"
 
         # Цена входа из последнего тикера
         entry_price = await self._get_current_price(session, signal.symbol)
         if entry_price is None or entry_price <= 0:
             logger.warning(f"Нет цены для {signal.symbol}, позиция не открыта")
-            return None
+            return None, "no_price"
 
         quantity = self.config.position_size_usdt / entry_price
         tp_price = self._tp_price(entry_price, signal.direction)
@@ -196,7 +198,7 @@ class PositionManager:
                     )
             except Exception:
                 logger.exception(f"Не удалось создать ордер для {signal.symbol}")
-                return None
+                return None, "error"
 
         # Запись в БД
         trade = Trade(
@@ -225,7 +227,7 @@ class PositionManager:
             f"Позиция открыта [{mode_label}]: {signal.symbol} @ {entry_price:.6f} "
             f"qty={quantity:.2f}"
         )
-        return trade
+        return trade, "opened"
 
     # ==================================================================
     # MONITORING
@@ -387,10 +389,13 @@ class PositionManager:
             else (trade.entry_price / exit_price - 1) * 100
         )
 
+        # Если закрыто биржей — определяем TP или SL по PnL
+        if reason == "tp_sl_exchange":
+            reason = "tp" if (trade.pnl or 0) > 0 else "sl"
+
         labels = {
             "tp": ("✅", "Тейк-профит"),
             "sl": ("🛑", "Стоп-лосс"),
-            "tp_sl_exchange": ("🏦", "Закрыто биржей (TP/SL)"),
         }
         emoji, label = labels.get(reason, ("⏰", "Выход по времени"))
 

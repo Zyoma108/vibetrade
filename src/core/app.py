@@ -148,13 +148,13 @@ class Application:
                 session.add(db_signal)
 
                 # Открываем позицию (если торговля активна)
-                trade = None
+                status = "disabled"
                 if self._positions:
-                    trade = await self._positions.open_position(session, sig)
+                    _trade, status = await self._positions.open_position(session, sig)
 
-                # Сигнал в Telegram — всегда, с пометкой о позиции
+                # Сигнал в Telegram — всегда, с реальной причиной
                 if self._notifier:
-                    await self._notifier.send_signal(sig, opened=bool(trade))
+                    await self._notifier.send_signal(sig, status=status)
 
         await session.commit()
 
