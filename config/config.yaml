@@ -1,0 +1,48 @@
+exchanges:
+  binance:
+    enabled: true
+  bybit:
+    enabled: true
+    api_key: "КЛЮЧ_УДАЛЕН"
+    secret: "КЛЮЧ_УДАЛЕН"
+    testnet: false
+
+# coins: если список пуст — все монеты с бирж отбираются динамически
+#   по объёму и исключениям. Можно указать конкретные пары:
+# coins:
+#   - BTC/USDT
+#   - ETH/USDT
+coins: []
+
+collectors:
+  interval_seconds: 60
+  timeframe: 5m                  # таймфрейм свечей (1m, 5m, 15m, 1h)
+
+strategy:
+  min_volume_usdt: 1000000       # минимальный суточный объём в USDT
+  exclude_coins:                # монеты, исключаемые из сканирования (без /USDT)
+    - BTC
+    - ETH
+    - BNB
+    - SOL
+    - XRP
+    - HBAR
+    - EWY
+  volume_surge_mult: 5.0        # во сколько раз объём должен превысить норму
+  sustain_bars: 4               # сколько свечей подряд выше порога для сигнала
+  oi_change_threshold_pct: 5.0
+
+telegram:
+  bot_token: "КЛЮЧ_УДАЛЕНQ"
+  chat_ids:
+    - "КЛЮЧ_УДАЛЕН"
+
+trading:
+  mode: real                      # signal | virtual | real
+  exchange: bybit                 # биржа для торговли
+  max_positions: 10                # максимум одновременных позиций
+  position_size_usdt: 10.0       # объём позиции в USDT (не маржа!)
+  leverage: 10                     # кредитное плечо
+  take_profit_pct: 9.0            # тейк-профит, %
+  stop_loss_pct: 4.0              # стоп-лосс, %
+  max_hold_hours: 48.0            # макс. время удержания, часов

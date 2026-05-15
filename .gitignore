@@ -5,7 +5,6 @@ venv/
 .env
 *.egg-info/
 .pytest_cache/
-config/config.yaml
 data/
 *.db
 *.sqlite
