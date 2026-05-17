@@ -74,6 +74,7 @@ class PositionManager:
                     quantity=quantity,
                     entry_time=ex_pos["timestamp"],
                     status="open",
+                    tp_sl_set=True,  # на бирже уже есть TP/SL, не надо выставлять повторно
                 )
                 session.add(trade)
                 logger.info(
