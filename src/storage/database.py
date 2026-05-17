@@ -24,12 +24,24 @@ async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit
 
 
 async def init_db() -> None:
-    """Создать таблицы, если их ещё нет."""
+    """Создать таблицы и недостающие колонки."""
     from src.storage.models import Base
 
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        # Добавляем новые колонки, если их ещё нет (для старых БД)
+        for col_name, col_type in [
+            ("tp_sl_set", "INTEGER DEFAULT 0"),
+            ("partial_closed", "INTEGER DEFAULT 0"),
+            ("partial_pnl", "FLOAT DEFAULT 0.0"),
+        ]:
+            try:
+                await conn.exec_driver_sql(
+                    f"ALTER TABLE trades ADD COLUMN {col_name} {col_type}"
+                )
+            except Exception:
+                pass  # колонка уже существует
 
 
 async def get_session() -> AsyncSession:
