@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from datetime import datetime, timezone
 from typing import Callable, Coroutine
@@ -150,6 +151,7 @@ class PositionManager:
         quantity = self.config.position_size_usdt / entry_price
         tp_price = self._tp_price(entry_price, signal.direction)
         sl_price = self._sl_price(entry_price, signal.direction)
+        tp_sl_ok = True  # virtual всегда True
 
         # Реальный ордер на бирже
         if self.is_real:
@@ -172,7 +174,10 @@ class PositionManager:
                     amount=quantity,
                 )
 
-                # 2. Фактическая цена исполнения — по ней считаем TP/SL
+                # 2. Ждём исполнения ордера (бирже нужно время)
+                await asyncio.sleep(2)
+
+                # 3. Фактическая цена исполнения — по ней считаем TP/SL
                 fill_price = order.get("fill_price") or entry_price
                 if fill_price != entry_price:
                     logger.info(
@@ -183,7 +188,8 @@ class PositionManager:
                 tp_price = self._tp_price(entry_price, signal.direction)
                 sl_price = self._sl_price(entry_price, signal.direction)
 
-                # 3. Выставляем TP/SL от фактической цены
+                # 4. Выставляем TP/SL от фактической цены
+                tp_sl_ok = False
                 try:
                     await self._connector.set_tpsl(  # type: ignore[union-attr]
                         symbol=signal.symbol,
@@ -192,6 +198,7 @@ class PositionManager:
                         tp_price=tp_price,
                         sl_price=sl_price,
                     )
+                    tp_sl_ok = True
                 except Exception as e:
                     logger.warning(
                         f"TP/SL для {signal.symbol} будут выставлены в следующем цикле: {e}"
@@ -208,6 +215,7 @@ class PositionManager:
             quantity=quantity,
             entry_time=datetime.now(tz=timezone.utc),
             status="open",
+            tp_sl_set=tp_sl_ok,
         )
         session.add(trade)
 
@@ -259,6 +267,23 @@ class PositionManager:
                 return []
 
         for pos in db_positions:
+            # --- Real: повторно выставить TP/SL если не получилось ---
+            if self.is_real and not pos.tp_sl_set:
+                try:
+                    await asyncio.sleep(1)
+                    await self._connector.set_tpsl(  # type: ignore[union-attr]
+                        symbol=pos.symbol,
+                        side="buy",
+                        amount=pos.quantity,
+                        tp_price=self._tp_price(pos.entry_price, pos.direction),
+                        sl_price=self._sl_price(pos.entry_price, pos.direction),
+                    )
+                    pos.tp_sl_set = True
+                    session.add(pos)
+                    logger.info(f"TP/SL повторно выставлены для {pos.symbol}")
+                except Exception as e:
+                    logger.warning(f"Повторная установка TP/SL для {pos.symbol}: {e}")
+
             current_price = await self._get_current_price(session, pos.symbol)
 
             # --- Выход по времени (virtual + real) ---

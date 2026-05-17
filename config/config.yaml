@@ -15,8 +15,8 @@ exchanges:
 coins: []
 
 collectors:
-  interval_seconds: 60
-  timeframe: 5m                  # таймфрейм свечей (1m, 5m, 15m, 1h)
+  interval_seconds: 45
+  timeframe: 3m                  # таймфрейм свечей (1m, 5m, 15m, 1h)
 
 strategy:
   min_volume_usdt: 1000000       # минимальный суточный объём в USDT
@@ -28,9 +28,9 @@ strategy:
     - XRP
     - HBAR
     - EWY
-  baseline_bars: 50             # свечей для расчёта нормального объёма
-  volume_surge_mult: 5.0        # во сколько раз объём должен превысить норму
-  sustain_bars: 4               # сколько свечей подряд выше порога для сигнала
+  baseline_bars: 70             # свечей для расчёта нормального объёма
+  volume_surge_mult: 6.0        # во сколько раз объём должен превысить норму
+  sustain_bars: 3               # сколько свечей подряд выше порога для сигнала
   oi_slope_min_pct: 2.0         # минимальный наклон OI, %
   price_growth_min_pct: 0.3     # минимальный рост цены за sustain-окно, %
 
@@ -46,5 +46,5 @@ trading:
   position_size_usdt: 10.0       # объём позиции в USDT (не маржа!)
   leverage: 10                     # кредитное плечо
   take_profit_pct: 9.0            # тейк-профит, %
-  stop_loss_pct: 4.0              # стоп-лосс, %
+  stop_loss_pct: 7.0              # стоп-лосс, %
   max_hold_hours: 48.0            # макс. время удержания, часов

@@ -78,3 +78,4 @@ class Trade(Base):
     exit_time: Mapped[datetime | None] = mapped_column(nullable=True)
     pnl: Mapped[float | None] = mapped_column(Float, nullable=True)
     status: Mapped[str] = mapped_column(String(16), default="open")  # open / closed
+    tp_sl_set: Mapped[bool] = mapped_column(default=False)  # выставлены ли TP/SL на бирже
