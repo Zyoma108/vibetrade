@@ -42,9 +42,9 @@ telegram:
 trading:
   mode: real                      # signal | virtual | real
   exchange: bybit                 # биржа для торговли
-  max_positions: 10                # максимум одновременных позиций
-  position_size_usdt: 10.0       # объём позиции в USDT (не маржа!)
-  leverage: 10                     # кредитное плечо
+  max_positions: 10               # максимум одновременных позиций
+  position_size_usdt: 15.0        # объём позиции в USDT (не маржа!)
+  leverage: 10                    # кредитное плечо
   take_profit_pct: 9.0            # тейк-профит, %
   stop_loss_pct: 7.0              # стоп-лосс, %
   max_hold_hours: 48.0            # макс. время удержания, часов
