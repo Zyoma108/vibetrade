@@ -79,3 +79,5 @@ class Trade(Base):
     pnl: Mapped[float | None] = mapped_column(Float, nullable=True)
     status: Mapped[str] = mapped_column(String(16), default="open")  # open / closed
     tp_sl_set: Mapped[bool] = mapped_column(default=False)  # выставлены ли TP/SL на бирже
+    partial_closed: Mapped[bool] = mapped_column(default=False)  # выполнено ли частичное закрытие
+    partial_pnl: Mapped[float | None] = mapped_column(Float, nullable=True, default=0.0)  # PnL от частичных закрытий

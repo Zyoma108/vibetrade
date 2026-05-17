@@ -286,6 +286,63 @@ class PositionManager:
 
             current_price = await self._get_current_price(session, pos.symbol)
 
+            # --- Частичное закрытие на полпути к TP ---
+            if (
+                self.config.partial_close_enabled
+                and not pos.partial_closed
+                and current_price
+            ):
+                tp = self._tp_price(pos.entry_price, pos.direction)
+                trigger = pos.entry_price + (tp - pos.entry_price) * (
+                    self.config.partial_close_pct / 100
+                )
+                if (pos.direction == "long" and current_price >= trigger) or (
+                    pos.direction == "short" and current_price <= trigger
+                ):
+                    close_qty = pos.quantity / 2
+                    if self.is_real:
+                        try:
+                            # Частичное закрытие на бирже (reduce-only market)
+                            await self._connector._call(  # type: ignore[union-attr]
+                                "create_order",
+                                pos.symbol, "market",
+                                "sell" if pos.direction == "long" else "buy",
+                                close_qty, None, None,
+                                {"reduceOnly": True},
+                            )
+                            # Переводим SL в безубыток
+                            if self.config.breakeven_after_partial:
+                                await self._connector.set_tpsl(  # type: ignore[union-attr]
+                                    symbol=pos.symbol,
+                                    side="buy" if pos.direction == "long" else "sell",
+                                    amount=pos.quantity - close_qty,
+                                    tp_price=tp,
+                                    sl_price=pos.entry_price,
+                                )
+                        except Exception as e:
+                            logger.warning(f"Частичное закрытие {pos.symbol}: {e}")
+                            continue
+
+                    # Обновляем запись в БД
+                    partial_pnl = (current_price - pos.entry_price) * close_qty if pos.direction == "long" else (pos.entry_price - current_price) * close_qty
+                    pos.quantity -= close_qty
+                    pos.partial_closed = True
+                    pos.partial_pnl = (pos.partial_pnl or 0.0) + partial_pnl
+                    session.add(pos)
+
+                    pnl_pct = (current_price / pos.entry_price - 1) * 100
+                    await self._notify(
+                        f"🔒 <b>Частичная фиксация</b> {pos.direction.upper()}\n"
+                        f"Монета: {pos.symbol}\n"
+                        f"Закрыто 50% @ ${current_price:.6f}\n"
+                        f"Частичный PnL: ${partial_pnl:+.2f} ({pnl_pct:+.1f}%)\n"
+                        f"{'Стоп переведён в безубыток' if self.config.breakeven_after_partial else ''}"
+                    )
+                    logger.info(
+                        f"Частичное закрытие: {pos.symbol} 50% @ {current_price:.6f}"
+                    )
+                    continue  # не проверяем TP/SL в этом цикле
+
             # --- Выход по времени (virtual + real) ---
             age_hours = (
                 now - pos.entry_time.replace(tzinfo=timezone.utc)
@@ -403,10 +460,15 @@ class PositionManager:
         trade.exit_time = datetime.now(tz=timezone.utc)
         trade.status = "closed"
 
+        # PnL оставшейся части
         if trade.direction == "long":
-            trade.pnl = (exit_price - trade.entry_price) * trade.quantity
+            remainder_pnl = (exit_price - trade.entry_price) * trade.quantity
         else:
-            trade.pnl = (trade.entry_price - exit_price) * trade.quantity
+            remainder_pnl = (trade.entry_price - exit_price) * trade.quantity
+
+        # Суммируем с частичными закрытиями
+        total_pnl = remainder_pnl + (trade.partial_pnl or 0.0)
+        trade.pnl = total_pnl
 
         pnl_pct = (
             (exit_price / trade.entry_price - 1) * 100

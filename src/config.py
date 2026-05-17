@@ -55,6 +55,9 @@ class TradingConfig(BaseModel):
     take_profit_pct: float = Field(default=12.0, ge=0.5, description="Тейк-профит, %")
     stop_loss_pct: float = Field(default=4.0, ge=0.5, description="Стоп-лосс, %")
     max_hold_hours: float = Field(default=24.0, ge=1.0, description="Максимальное время удержания позиции, часов")
+    partial_close_enabled: bool = Field(default=False, description="Частичная фиксация на полпути к TP")
+    partial_close_pct: float = Field(default=50.0, ge=10.0, le=90.0, description="% пути до TP для частичного закрытия")
+    breakeven_after_partial: bool = Field(default=True, description="Перевести стоп в безубыток после частичного закрытия")
 
 
 class Settings(BaseModel):
