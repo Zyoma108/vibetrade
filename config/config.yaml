@@ -31,6 +31,7 @@ strategy:
     - EWY
     - DEXE
     - HOLO
+    - WHITEWHALE
   baseline_bars: 70             # свечей для расчёта нормального объёма
   volume_surge_mult: 6.0        # во сколько раз объём должен превысить норму
   sustain_bars: 3               # сколько свечей подряд выше порога для сигнала
