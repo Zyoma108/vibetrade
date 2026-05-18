@@ -287,7 +287,23 @@ class PositionManager:
 
             current_price = await self._get_current_price(session, pos.symbol)
 
-            # --- Частичное закрытие на полпути к TP ---
+            # --- Real: позиция уже закрыта на бирже (TP/SL) ---
+            if self.is_real and pos.symbol not in ex_symbols:
+                exit_price = current_price or pos.entry_price
+                # Пытаемся получить фактическую цену выхода
+                try:
+                    last_trade = await self._connector.fetch_last_trade(  # type: ignore[union-attr]
+                        pos.symbol, pos.entry_time
+                    )
+                    if last_trade:
+                        exit_price = last_trade["price"]
+                except Exception:
+                    pass
+                await self._close_position(pos, exit_price, "tp_sl_exchange")
+                closed.append(pos)
+                continue
+
+            # --- Частичное закрытие на полпути к TP (только живая позиция) ---
             if (
                 self.config.partial_close_enabled
                 and not pos.partial_closed
@@ -303,15 +319,13 @@ class PositionManager:
                     close_qty = pos.quantity / 2
                     if self.is_real:
                         try:
-                            # Частичное закрытие на бирже (reduce-only market)
                             await self._connector._call(  # type: ignore[union-attr]
                                 "create_order",
                                 pos.symbol, "market",
                                 "sell" if pos.direction == "long" else "buy",
-                                close_qty, None, None,
+                                close_qty, None,
                                 {"reduceOnly": True},
                             )
-                            # Переводим SL в безубыток
                             if self.config.breakeven_after_partial:
                                 await self._connector.set_tpsl(  # type: ignore[union-attr]
                                     symbol=pos.symbol,
@@ -324,7 +338,6 @@ class PositionManager:
                             logger.warning(f"Частичное закрытие {pos.symbol}: {e}")
                             continue
 
-                    # Обновляем запись в БД
                     partial_pnl = (current_price - pos.entry_price) * close_qty if pos.direction == "long" else (pos.entry_price - current_price) * close_qty
                     pos.quantity -= close_qty
                     pos.partial_closed = True
@@ -339,10 +352,8 @@ class PositionManager:
                         f"Частичный PnL: ${partial_pnl:+.2f} ({pnl_pct:+.1f}%)\n"
                         f"{'Стоп переведён в безубыток' if self.config.breakeven_after_partial else ''}"
                     )
-                    logger.info(
-                        f"Частичное закрытие: {pos.symbol} 50% @ {current_price:.6f}"
-                    )
-                    continue  # не проверяем TP/SL в этом цикле
+                    logger.info(f"Частичное закрытие: {pos.symbol} 50% @ {current_price:.6f}")
+                    continue
 
             # --- Выход по времени (virtual + real) ---
             age_hours = (
@@ -359,27 +370,6 @@ class PositionManager:
                 await self._close_position(pos, exit_price, "time")
                 closed.append(pos)
                 continue
-
-            # --- Real: позиция закрыта на бирже (TP/SL) ---
-            if self.is_real:
-                if pos.symbol not in ex_symbols:
-                    # Пытаемся получить фактическую цену выхода
-                    exit_price = current_price or pos.entry_price
-                    try:
-                        last_trade = await self._connector.fetch_last_trade(  # type: ignore[union-attr]
-                            pos.symbol, pos.entry_time
-                        )
-                        if last_trade:
-                            exit_price = last_trade["price"]
-                            logger.info(
-                                f"Фактическая цена выхода {pos.symbol}: "
-                                f"${exit_price:.6f}"
-                            )
-                    except Exception:
-                        pass
-                    await self._close_position(pos, exit_price, "tp_sl_exchange")
-                    closed.append(pos)
-                    continue
 
             # --- Virtual: проверка TP/SL по цене ---
             if not self.is_real and current_price:
