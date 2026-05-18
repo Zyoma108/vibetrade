@@ -133,7 +133,8 @@ class SetupDetector(BaseDetector):
     # ------------------------------------------------------------------
 
     def _check_price_trend(self, candles: list[dict]) -> str | None:
-        """Только лонг: цена должна вырасти за период всплеска объёмов."""
+        """Только лонг: цена должна вырасти, но не слишком сильно
+        (фильтр «памп уже состоялся»)."""
         sustain = self.config.sustain_bars
         closes = np.array([c["close"] for c in candles[-sustain:]])
 
@@ -141,7 +142,18 @@ class SetupDetector(BaseDetector):
             return None
 
         change_pct = (closes[-1] / closes[0] - 1) * 100
-        return "long" if change_pct >= self.config.price_growth_min_pct else None
+
+        # Минимальный рост
+        if change_pct < self.config.price_growth_min_pct:
+            return None
+
+        # Максимальный рост (0 = без лимита)
+        max_growth = self.config.price_growth_max_pct
+        if max_growth > 0 and change_pct > max_growth:
+            logger.debug(f"Сигнал пропущен: рост {change_pct:.1f}% > лимита {max_growth}%")
+            return None
+
+        return "long"
 
     # ------------------------------------------------------------------
     # Data loading

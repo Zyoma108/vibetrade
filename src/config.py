@@ -39,6 +39,9 @@ class StrategyConfig(BaseModel):
     price_growth_min_pct: float = Field(
         default=0.3, description="Минимальный рост цены за sustain-окно, %"
     )
+    price_growth_max_pct: float = Field(
+        default=0.0, description="Максимальный рост цены за sustain-окно, % (0 = без лимита)"
+    )
 
 
 class TelegramConfig(BaseModel):
