@@ -35,7 +35,7 @@ strategy:
   baseline_bars: 70             # свечей для расчёта нормального объёма
   volume_surge_mult: 10.0       # во сколько раз объём должен превысить норму
   sustain_bars: 3               # сколько свечей подряд выше порога для сигнала
-  oi_slope_min_pct: 2.0         # минимальный наклон OI, %
+  oi_slope_min_pct: 3.0         # минимальный наклон OI, %
   price_growth_min_pct: 1.5     # минимальный рост цены за sustain-окно, %
   price_growth_max_pct: 10.0    # максимальный рост цены (фильтр «уже поздно»), 0 = выкл
 
@@ -48,10 +48,10 @@ trading:
   mode: real                      # signal | virtual | real
   exchange: bybit                 # биржа для торговли
   max_positions: 10               # максимум одновременных позиций
-  position_size_usdt: 15.0        # объём позиции в USDT (не маржа!)
+  position_size_usdt: 10.0        # объём позиции в USDT (не маржа!)
   leverage: 10                    # кредитное плечо
-  take_profit_pct: 9.0            # тейк-профит, %
-  stop_loss_pct: 7.0              # стоп-лосс, %
+  take_profit_pct: 10.0            # тейк-профит, %
+  stop_loss_pct: 5.0              # стоп-лосс, %
   max_hold_hours: 48.0            # макс. время удержания, часов
   partial_close_enabled: true     # частичная фиксация на полпути к TP
   partial_close_pct: 50.0         # % пути до TP для частичного закрытия
