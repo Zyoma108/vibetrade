@@ -27,7 +27,7 @@ backtest-load-month:
 	.venv/bin/python -m src.backtest.loader --days 30
 
 backtest-run:
-	.venv/bin/python -m src.backtest.runner
+	.venv/bin/python -m src.backtest.runner $(ARGS)
 
 clean:
 	find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true

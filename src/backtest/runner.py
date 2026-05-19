@@ -63,9 +63,9 @@ def _bar(rows, idx):
 # Main loop
 # ---------------------------------------------------------------------------
 
-async def run_backtest() -> dict:
+async def run_backtest(config_path: str = "config/config.yaml") -> dict:
     """Запустить бэктест и вернуть статистику."""
-    settings = Settings.from_yaml("config/config.yaml")
+    settings = Settings.from_yaml(config_path)
 
     engine = create_async_engine(f"sqlite+aiosqlite:///{BACKTEST_DB}", echo=False)
     session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
@@ -310,12 +310,19 @@ async def run_backtest() -> dict:
 # ---------------------------------------------------------------------------
 
 def main():
+    parser = argparse.ArgumentParser(description="Бэктест торговой стратегии")
+    parser.add_argument(
+        "--config", type=str, default="config/config.yaml",
+        help="Путь к конфигу (можно указать отдельный конфиг для тестов)"
+    )
+    args = parser.parse_args()
+
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
 
-    result = asyncio.run(run_backtest())
+    result = asyncio.run(run_backtest(args.config))
 
     if not result:
         print("Нет данных")
