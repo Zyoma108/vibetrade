@@ -99,12 +99,10 @@ class MarketDataCollector:
             session.add(Ticker(**t))
 
         # 4. Собираем свечи для всех отобранных монет
-        oi_candidates: list[str] = []
         for t in selected:
             symbol = t["symbol"]
             try:
                 candles = await connector.fetch_ohlcv(symbol, timeframe=self._timeframe, limit=100)
-                # Сохраняем только новые свечи (дедупликация по exchange+symbol+timestamp)
                 for c in candles:
                     exists = await session.scalar(
                         select(Candle.id).where(
@@ -115,27 +113,17 @@ class MarketDataCollector:
                     )
                     if not exists:
                         session.add(Candle(**c))
-
-                # Быстрая проверка: есть ли рост объёма в последних свечах?
-                if len(candles) >= 4:
-                    vols = [c["volume"] for c in candles[-4:]]
-                    prev_vols = [c["volume"] for c in candles[-10:-4]]
-                    if prev_vols and sum(prev_vols) > 0:
-                        recent_avg = sum(vols) / len(vols)
-                        prev_avg = sum(prev_vols) / len(prev_vols)
-                        if recent_avg > prev_avg * 1.5:
-                            oi_candidates.append(symbol)
             except Exception as e:
                 logger.warning(
                     f"{connector.exchange_id}: свечи для {symbol}: {e}"
                 )
 
-        # 5. OI собираем только для кандидатов (где объём реально растёт)
+        # 5. OI собираем для всех монет (чтобы данные были готовы к началу пампа)
         logger.info(
-            f"{connector.exchange_id}: OI кандидатов — {len(oi_candidates)} "
-            f"(из {len(selected)})"
+            f"{connector.exchange_id}: сбор OI для {len(selected)} монет..."
         )
-        for symbol in oi_candidates:
+        for t in selected:
+            symbol = t["symbol"]
             try:
                 oi = await connector.fetch_open_interest(symbol)
                 if oi is not None:

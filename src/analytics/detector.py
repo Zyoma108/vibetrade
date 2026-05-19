@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 
 # Фиксированные параметры (редко меняются — не в конфиге)
 SMOOTH_MAX_RATIO = 5.0   # макс. отношение макс/медиана объёма в окне (отсекает спайки)
-OI_TREND_BARS = 6        # сколько последних точек OI для проверки тренда
+OI_TREND_BARS = 3        # сколько последних точек OI для проверки тренда
 
 
 class SetupDetector(BaseDetector):
