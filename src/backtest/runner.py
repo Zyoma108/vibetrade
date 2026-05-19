@@ -21,6 +21,7 @@ from src.storage.models import Candle
 logger = logging.getLogger(__name__)
 
 BACKTEST_DB = Path("data/backtest.db")
+CYCLE_DELAY_BARS = 3  # проверять сетапы раз в N свечей (имитация цикла сканирования)
 
 
 # ---------------------------------------------------------------------------
@@ -184,7 +185,9 @@ async def run_backtest() -> dict:
                 closed_trades.append(pos)
                 positions.remove(pos)
 
-        # Ищем сетапы (только если есть свободные слоты)
+        # Ищем сетапы только в «циклы сканирования» (имитация задержки)
+        if ts_idx % CYCLE_DELAY_BARS != 0:
+            continue
         if len(positions) >= cfg.max_positions:
             continue
 
