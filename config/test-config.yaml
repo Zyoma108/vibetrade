@@ -1,0 +1,58 @@
+exchanges:
+  binance:
+    enabled: true
+  bybit:
+    enabled: true
+    api_key: "КЛЮЧ_УДАЛЕН"
+    secret: "КЛЮЧ_УДАЛЕН"
+    testnet: false
+
+# coins: если список пуст — все монеты с бирж отбираются динамически
+#   по объёму и исключениям. Можно указать конкретные пары:
+# coins:
+#   - BTC/USDT
+#   - ETH/USDT
+coins: []
+
+collectors:
+  interval_seconds: 45
+  timeframe: 3m                  # таймфрейм свечей (1m, 5m, 15m, 1h)
+
+strategy:
+  min_volume_usdt: 1000000       # минимальный суточный объём в USDT
+  exclude_coins:                 # монеты, исключаемые из сканирования (без /USDT)
+    - BTC
+    - ETH
+    - BNB
+    - SOL
+    - XRP
+    # Скамные монеты, которые часто дают ложные сигналы из-за низкой ликвидности
+    - HBAR
+    - EWY
+    - DEXE
+    - HOLO
+    - WHITEWHALE
+  baseline_bars: 70             # свечей для расчёта нормального объёма
+  volume_surge_mult: 10.0       # во сколько раз объём должен превысить норму
+  sustain_bars: 3               # сколько свечей подряд выше порога для сигнала
+  oi_slope_min_pct: 3.0         # минимальный наклон OI, %
+  price_growth_min_pct: 1.5     # минимальный рост цены за sustain-окно, %
+  price_growth_max_pct: 10.0    # максимальный рост цены (фильтр «уже поздно»), 0 = выкл
+
+telegram:
+  bot_token: "КЛЮЧ_УДАЛЕНQ"
+  chat_ids:
+    - "КЛЮЧ_УДАЛЕН"
+
+trading:
+  mode: real                      # signal | virtual | real
+  exchange: bybit                 # биржа для торговли
+  max_positions: 10               # максимум одновременных позиций
+  position_size_usdt: 10.0        # объём позиции в USDT (не маржа!)
+  leverage: 10                    # кредитное плечо
+  take_profit_pct: 12.0           # тейк-профит, %
+  stop_loss_pct: 4.0              # стоп-лосс, %
+  max_hold_hours: 48.0            # макс. время удержания, часов
+  partial_close_enabled: false    # частичная фиксация на полпути к TP
+  partial_close_pct: 50.0         # % пути до TP для частичного закрытия
+  breakeven_after_partial: false  # перевести стоп в безубыток после частичного закрытия
