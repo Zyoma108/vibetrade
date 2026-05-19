@@ -28,10 +28,14 @@ class TelegramNotifier:
         self._signals_sent = 0
         self._polling_task: asyncio.Task | None = None
         self._stats_provider: Callable[[str], Coroutine] | None = None
+        self._positions_provider: Callable[[], Coroutine] | None = None
         self._setup_handlers()
 
     def set_stats_provider(self, provider: Callable[[str], Coroutine]) -> None:
         self._stats_provider = provider
+
+    def set_positions_provider(self, provider: Callable[[], Coroutine]) -> None:
+        self._positions_provider = provider
 
     def _is_authorized(self, chat: types.Chat) -> bool:
         """Проверить, что сообщение из разрешённого чата/канала."""
@@ -105,6 +109,16 @@ class TelegramNotifier:
                 await message.answer("Формат: /stats [day|week|month|all]")
                 return
             text = await self._stats_provider(period)
+            await message.answer(text, parse_mode="HTML")
+
+        @self._dp.message(Command("positions"))
+        async def positions_handler(message: types.Message):
+            if not self._is_authorized(message.chat):
+                return
+            if not self._positions_provider:
+                await message.answer("Информация о позициях недоступна")
+                return
+            text = await self._positions_provider()
             await message.answer(text, parse_mode="HTML")
 
     @property

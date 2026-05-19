@@ -41,15 +41,10 @@ async def trade_stats(session, period: str = "all") -> str:
     total_pnl = sum(t.pnl or 0 for t in trades)
     win_rate = wins / len(trades) * 100 if trades else 0
 
-    best = max(trades, key=lambda t: t.pnl or 0)
-    worst = min(trades, key=lambda t: t.pnl or 0)
-
     return (
         f"📊 <b>Статистика за {labels[period]}</b>\n\n"
         f"Сделок: {len(trades)} | Плюс: {wins} | Минус: {losses}\n"
         f"Win rate: {win_rate:.0f}%\n"
         f"PnL: ${total_pnl:+.2f}\n\n"
-        f"Лучшая: {best.symbol} ${best.pnl:+.2f}\n"
-        f"Худшая: {worst.symbol} ${worst.pnl:+.2f}\n\n"
         f"Открыто позиций: {open_count}"
     )

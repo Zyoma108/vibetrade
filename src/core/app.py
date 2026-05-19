@@ -78,6 +78,41 @@ class Application:
                     return await trade_stats(s, period)
 
             self._notifier.set_stats_provider(stats_provider)
+
+            # Провайдер позиций
+            async def positions_provider() -> str:
+                if not self._positions:
+                    return "Торговля не активна"
+                if not self._trading_connector:
+                    return "Торговля не активна (нет подключения к бирже)"
+
+                try:
+                    ex_positions = await self._trading_connector.fetch_positions()
+                except Exception as e:
+                    return f"Ошибка получения позиций: {e}"
+
+                if not ex_positions:
+                    return "📋 Нет открытых позиций"
+
+                lines = ["📋 <b>Открытые позиции</b>\n"]
+                for p in ex_positions:
+                    entry = p["entry_price"]
+                    qty = abs(p["contracts"])
+                    # Текущая цена из тикера
+                    async with async_session() as s:
+                        price = await self._positions._get_current_price(s, p["symbol"])
+                    current = price or entry
+                    upnl = (current - entry) * qty
+                    roi = (current / entry - 1) * 100
+                    emoji = "🟢" if upnl >= 0 else "🔴"
+                    lines.append(
+                        f"{emoji} <b>{p['symbol']}</b>\n"
+                        f"  Вход: ${entry:.6f} → Тек: ${current:.6f}\n"
+                        f"  PnL: ${upnl:+.2f} | ROI: {roi:+.1f}%"
+                    )
+                return "\n".join(lines)
+
+            self._notifier.set_positions_provider(positions_provider)
         else:
             logger.warning("Telegram не настроен, уведомления отключены")
 
