@@ -327,10 +327,17 @@ class PositionManager:
                                 {"reduceOnly": True},
                             )
                             if self.config.breakeven_after_partial:
+                                # Получаем фактический остаток позиции с биржи
+                                ex_positions = await self._connector.fetch_positions(  # type: ignore[union-attr]
+                                    pos.symbol
+                                )
+                                remaining = pos.quantity - close_qty
+                                if ex_positions:
+                                    remaining = abs(ex_positions[0]["contracts"])
                                 await self._connector.set_tpsl(  # type: ignore[union-attr]
                                     symbol=pos.symbol,
                                     side="buy" if pos.direction == "long" else "sell",
-                                    amount=pos.quantity - close_qty,
+                                    amount=remaining,
                                     tp_price=tp,
                                     sl_price=pos.entry_price,
                                 )
