@@ -88,9 +88,13 @@ class SetupDetector(BaseDetector):
         if recent[-1] < np.mean(recent[:2]) * 0.5:
             return False
 
-        # Объём должен ускоряться: последняя половина окна > первая половина
-        half = max(sustain // 2, 1)
-        if np.mean(recent[-half:]) <= np.mean(recent[:half]):
+        # Объём должен разгоняться (не угасать):
+        # — каждая следующая свеча >= предыдущей
+        for j in range(1, sustain):
+            if recent[j] < recent[j-1]:
+                return False
+        # — и последняя >= 1.5x от первой в окне
+        if recent[-1] < recent[0] * 1.5:
             return False
 
         return True
@@ -133,25 +137,33 @@ class SetupDetector(BaseDetector):
     # ------------------------------------------------------------------
 
     def _check_price_trend(self, candles: list[dict]) -> str | None:
-        """Только лонг: цена должна вырасти, но не слишком сильно
-        (фильтр «памп уже состоялся»)."""
+        """Только лонг: цена должна быть в аптренде до сигнала и не слишком
+        сильно вырасти за sustain-окно (фильтр «памп уже состоялся»)."""
         sustain = self.config.sustain_bars
         closes = np.array([c["close"] for c in candles[-sustain:]])
 
         if closes[0] <= 0:
             return None
 
+        # Рост за sustain-окно
         change_pct = (closes[-1] / closes[0] - 1) * 100
-
-        # Минимальный рост
         if change_pct < self.config.price_growth_min_pct:
             return None
-
-        # Максимальный рост (0 = без лимита)
         max_growth = self.config.price_growth_max_pct
         if max_growth > 0 and change_pct > max_growth:
             logger.debug(f"Сигнал пропущен: рост {change_pct:.1f}% > лимита {max_growth}%")
             return None
+
+        # Пре-тренд: цена до sustain-окна должна быть в плюсе
+        # (монета уже в аптренде, а не в дампе)
+        pre_bars = sustain * 3
+        all_closes = np.array([c["close"] for c in candles])
+        if len(all_closes) >= sustain + pre_bars:
+            pre_start = len(all_closes) - sustain - pre_bars
+            pre_end = len(all_closes) - sustain
+            pre_change = (all_closes[pre_end] / all_closes[pre_start] - 1) * 100
+            if pre_change < 0:
+                return None
 
         return "long"
 

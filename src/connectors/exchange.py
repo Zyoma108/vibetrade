@@ -74,7 +74,7 @@ class ExchangeConnector:
                 )
                 if attempt < MAX_RETRIES - 1:
                     await asyncio.sleep(RETRY_DELAY * (attempt + 1))
-            except (ccxt.BadRequest, ccxt.AuthenticationError):
+            except (ccxt.BadRequest, ccxt.AuthenticationError, ccxt.ExchangeError):
                 raise
             except Exception:
                 logger.exception(f"{self.exchange_id}: неожиданная ошибка в {method_name}")
@@ -87,9 +87,13 @@ class ExchangeConnector:
     # ------------------------------------------------------------------
 
     async def fetch_ohlcv(
-        self, symbol: str, timeframe: str = "5m", limit: int = 100
+        self, symbol: str, timeframe: str = "5m", limit: int = 100,
+        since: int | None = None,
     ) -> list[dict]:
-        raw = await self._call("fetch_ohlcv", symbol, timeframe, limit=limit)
+        kwargs = {"limit": limit}
+        if since is not None:
+            kwargs["since"] = since
+        raw = await self._call("fetch_ohlcv", symbol, timeframe, **kwargs)
         return [
             {
                 "exchange": self.exchange_id,
@@ -123,7 +127,7 @@ class ExchangeConnector:
     async def fetch_open_interest(self, symbol: str) -> dict | None:
         try:
             raw = await self._call("fetch_open_interest", symbol)
-        except (ccxt.BadRequest, ccxt.NotSupported):
+        except (ccxt.BadRequest, ccxt.NotSupported, ccxt.ExchangeError):
             logger.debug(f"{self.exchange_id}: OI не поддерживается для {symbol}")
             return None
         return {

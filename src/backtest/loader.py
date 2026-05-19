@@ -78,42 +78,56 @@ async def load_history(
     stored = 0
     new_candles = 0
 
-    # Загружаем свечи
+    # Загружаем свечи батчами (по 500 за запрос, с учётом since)
+    BATCH_LIMIT = 500
     for i, symbol in enumerate(filtered):
         try:
-            candles = await conn.fetch_ohlcv(symbol, timeframe=timeframe, limit=500)
+            symbol_candles = 0
+            batch_since_ms = since_ms  # начинаем с начала периода
 
-            # Фильтруем по периоду
-            period_candles = [
-                c for c in candles
-                if start <= c["timestamp"] <= end
-            ]
+            while batch_since_ms < int(end.timestamp() * 1000):
+                batch = await conn.fetch_ohlcv(
+                    symbol,
+                    timeframe=timeframe,
+                    since=batch_since_ms,
+                    limit=BATCH_LIMIT,
+                )
 
-            if not period_candles:
-                progress = f"{i+1}/{total}"
-                print(f"\r[{progress}] {symbol}: нет данных в периоде", end="")
-                continue
+                if not batch:
+                    break
 
-            # Сохраняем в БД с дедупликацией
-            async with session_factory() as session:
-                for c in period_candles:
-                    exists = await session.scalar(
-                        select(Candle.id).where(
-                            Candle.exchange == c["exchange"],
-                            Candle.symbol == c["symbol"],
-                            Candle.timestamp == c["timestamp"],
-                        ).limit(1)
-                    )
-                    if not exists:
-                        session.add(Candle(**c))
-                        new_candles += 1
-                await session.commit()
+                # Фильтруем по периоду
+                batch = [c for c in batch if start <= c["timestamp"] <= end]
+                if not batch and len(batch) < BATCH_LIMIT:
+                    break  # достигли текущего момента
+
+                # Сохраняем
+                async with session_factory() as session:
+                    for c in batch:
+                        exists = await session.scalar(
+                            select(Candle.id).where(
+                                Candle.exchange == c["exchange"],
+                                Candle.symbol == c["symbol"],
+                                Candle.timestamp == c["timestamp"],
+                            ).limit(1)
+                        )
+                        if not exists:
+                            session.add(Candle(**c))
+                            new_candles += 1
+                            symbol_candles += 1
+                    await session.commit()
+
+                # Следующий батч: через 1 мс после последней свечи
+                last_ts_ms = int(batch[-1]["timestamp"].timestamp() * 1000)
+                batch_since_ms = last_ts_ms + 1
+
+                if len(batch) < BATCH_LIMIT / 2:
+                    break  # мало данных — конец истории
 
             stored += 1
             progress = f"[{i+1}/{total}]"
-            print(f"\r{progress} {symbol}: {len(period_candles)} свечей", end="")
+            print(f"\r{progress} {symbol}: {symbol_candles} свечей", end="")
 
-            # Rate limit — небольшая пауза
             if (i + 1) % 50 == 0:
                 await asyncio.sleep(1)
 
