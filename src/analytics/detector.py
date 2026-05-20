@@ -88,10 +88,6 @@ class SetupDetector(BaseDetector):
         if recent[-1] < np.mean(recent[:2]) * 0.5:
             return False
 
-        # Объём должен расти за окно: последняя свеча >= 1.5x от первой
-        if recent[-1] < recent[0] * 1.5:
-            return False
-
         return True
 
     # ------------------------------------------------------------------
