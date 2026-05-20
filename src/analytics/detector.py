@@ -131,12 +131,13 @@ class SetupDetector(BaseDetector):
         """Только лонг: цена должна вырасти, но не слишком сильно
         (фильтр «памп уже состоялся»)."""
         sustain = self.config.sustain_bars
+        opens = np.array([c["open"] for c in candles[-sustain:]])
         closes = np.array([c["close"] for c in candles[-sustain:]])
 
-        if closes[0] <= 0:
+        if opens[0] <= 0:
             return None
 
-        change_pct = (closes[-1] / closes[0] - 1) * 100
+        change_pct = (closes[-1] / opens[0] - 1) * 100
 
         if change_pct < self.config.price_growth_min_pct:
             return None
