@@ -53,6 +53,6 @@ trading:
   take_profit_pct: 10.0            # тейк-профит, %
   stop_loss_pct: 5.0              # стоп-лосс, %
   max_hold_hours: 48.0            # макс. время удержания, часов
-  partial_close_enabled: true     # частичная фиксация на полпути к TP
-  partial_close_pct: 50.0         # % пути до TP для частичного закрытия
-  breakeven_after_partial: true   # перевести стоп в безубыток после частичного закрытия
+  partial_close_enabled: true     # частичная фиксация на полпути к TP (+ стоп в б/у)
+  partial_close_pct: 50.0         # % пути до TP для закрытия / перевода в б/у
+  breakeven_at_halfway: false     # перевести стоп в б/у на полпути (без частичной фиксации)

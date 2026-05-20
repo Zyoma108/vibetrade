@@ -343,6 +343,40 @@ class PositionManager:
                 closed.append(pos)
                 continue
 
+            # --- Перевод стопа в б/у на полпути (без частичной фиксации) ---
+            if (
+                self.config.breakeven_at_halfway
+                and not pos.partial_closed
+                and current_price
+            ):
+                tp = self._tp_price(pos.entry_price, pos.direction)
+                trigger = pos.entry_price + (tp - pos.entry_price) * (
+                    self.config.partial_close_pct / 100
+                )
+                if (pos.direction == "long" and current_price >= trigger) or (
+                    pos.direction == "short" and current_price <= trigger
+                ):
+                    pos.partial_closed = True  # флаг «б/у уже переведён»
+                    session.add(pos)
+                    if self.is_real:
+                        try:
+                            await self._connector.set_tpsl(  # type: ignore[union-attr]
+                                symbol=pos.symbol,
+                                side="buy" if pos.direction == "long" else "sell",
+                                amount=pos.quantity,
+                                tp_price=tp,
+                                sl_price=pos.entry_price,
+                            )
+                        except Exception as e:
+                            logger.warning(f"Не удалось перевести стоп в б/у для {pos.symbol}: {e}")
+                    await self._notify(
+                        f"🔒 <b>Стоп в безубыток</b> {pos.direction.upper()}\n"
+                        f"Монета: {pos.symbol}\n"
+                        f"Цена: ${current_price:.6f} → SL на вход ${pos.entry_price:.6f}"
+                    )
+                    logger.info(f"Стоп в б/у: {pos.symbol} @ {current_price:.6f}")
+                    continue
+
             # --- Частичное закрытие на полпути к TP (только живая позиция) ---
             if (
                 self.config.partial_close_enabled
@@ -366,21 +400,20 @@ class PositionManager:
                                 close_qty, None,
                                 {"reduceOnly": True},
                             )
-                            if self.config.breakeven_after_partial:
-                                # Получаем фактический остаток позиции с биржи
-                                ex_positions = await self._connector.fetch_positions(  # type: ignore[union-attr]
-                                    pos.symbol
-                                )
-                                remaining = pos.quantity - close_qty
-                                if ex_positions:
-                                    remaining = abs(ex_positions[0]["contracts"])
-                                await self._connector.set_tpsl(  # type: ignore[union-attr]
-                                    symbol=pos.symbol,
-                                    side="buy" if pos.direction == "long" else "sell",
-                                    amount=remaining,
-                                    tp_price=tp,
-                                    sl_price=pos.entry_price,
-                                )
+                            # Получаем фактический остаток и переводим стоп в б/у
+                            ex_positions = await self._connector.fetch_positions(  # type: ignore[union-attr]
+                                pos.symbol
+                            )
+                            remaining = pos.quantity - close_qty
+                            if ex_positions:
+                                remaining = abs(ex_positions[0]["contracts"])
+                            await self._connector.set_tpsl(  # type: ignore[union-attr]
+                                symbol=pos.symbol,
+                                side="buy" if pos.direction == "long" else "sell",
+                                amount=remaining,
+                                tp_price=tp,
+                                sl_price=pos.entry_price,
+                            )
                         except Exception as e:
                             logger.warning(f"Частичное закрытие {pos.symbol}: {e}")
                             continue
@@ -397,7 +430,7 @@ class PositionManager:
                         f"Монета: {pos.symbol}\n"
                         f"Закрыто 50% @ ${current_price:.6f}\n"
                         f"Частичный PnL: ${partial_pnl:+.2f} ({pnl_pct:+.1f}%)\n"
-                        f"{'Стоп переведён в безубыток' if self.config.breakeven_after_partial else ''}"
+                        f"Стоп переведён в безубыток"
                     )
                     logger.info(f"Частичное закрытие: {pos.symbol} 50% @ {current_price:.6f}")
                     continue

@@ -50,9 +50,9 @@ trading:
   max_positions: 10               # максимум одновременных позиций
   position_size_usdt: 10.0        # объём позиции в USDT (не маржа!)
   leverage: 10                    # кредитное плечо
-  take_profit_pct: 8.0            # тейк-профит, %
+  take_profit_pct: 12.0            # тейк-профит, %
   stop_loss_pct: 4.0              # стоп-лосс, %
   max_hold_hours: 48.0            # макс. время удержания, часов
   partial_close_enabled: false    # частичная фиксация на полпути к TP
   partial_close_pct: 50.0         # % пути до TP для частичного закрытия
-  breakeven_after_partial: false  # перевести стоп в безубыток после частичного закрытия
+  breakeven_at_halfway: true      # перевести стоп в б/у на полпути (без частичной фиксации)

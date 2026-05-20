@@ -52,3 +52,4 @@ trading:
   partial_close_enabled: false    # частичная фиксация на полпути к TP
   partial_close_pct: 50.0         # % пути до TP для частичного закрытия
   breakeven_after_partial: true   # перевести стоп в безубыток после частичного закрытия
+  breakeven_at_halfway: false     # перевести стоп в б/у на полпути (без частичной фиксации)
