@@ -28,6 +28,27 @@ async def init_db() -> None:
     from src.storage.models import Base
 
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+    if DB_PATH.exists():
+        # Проверить целостность базы
+        import sqlite3
+        try:
+            db = sqlite3.connect(str(DB_PATH))
+            result = db.execute("PRAGMA integrity_check").fetchone()
+            db.close()
+            if result[0] != "ok":
+                raise RuntimeError(
+                    f"База данных повреждена! integrity_check: {result[0]}\n"
+                    f"Удали файл и перезапусти бота:\n"
+                    f"  rm {DB_PATH.resolve()}"
+                )
+        except sqlite3.DatabaseError:
+            raise RuntimeError(
+                f"База данных повреждена и не читается!\n"
+                f"Удали файл и перезапусти бота:\n"
+                f"  rm {DB_PATH.resolve()}"
+            )
+
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
         # Добавляем новые колонки, если их ещё нет (для старых БД)
