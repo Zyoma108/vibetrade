@@ -1,4 +1,4 @@
-.PHONY: run run-signal run-virtual test migrate-create migrate-up backtest-load backtest-run clean
+.PHONY: run run-signal run-virtual test migrate-create migrate-up backtest-load backtest-run docker-build docker-up docker-down clean
 
 APP := .venv/bin/python -m src.main
 
@@ -28,6 +28,18 @@ backtest-load-month:
 
 backtest-run:
 	.venv/bin/python -m src.backtest.runner $(ARGS)
+
+docker-build:
+	docker compose build
+
+docker-up:
+	docker compose up -d
+
+docker-down:
+	docker compose down
+
+docker-logs:
+	docker compose logs -f
 
 clean:
 	find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
