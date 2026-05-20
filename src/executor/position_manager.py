@@ -201,9 +201,30 @@ class PositionManager:
                     )
                     tp_sl_ok = True
                 except Exception as e:
-                    logger.warning(
-                        f"TP/SL для {signal.symbol} будут выставлены в следующем цикле: {e}"
-                    )
+                    err = str(e)
+                    # Цена уже ушла ниже SL — аварийно закрываем позицию
+                    if "lower than" in err.lower() or "higher than" in err.lower():
+                        logger.error(
+                            f"Цена ушла за SL для {signal.symbol}, "
+                            f"аварийно закрываю позицию: {e}"
+                        )
+                        try:
+                            await self._connector.close_position(  # type: ignore[union-attr]
+                                signal.symbol
+                            )
+                        except Exception:
+                            logger.exception(f"Не удалось аварийно закрыть {signal.symbol}")
+                        await self._notify(
+                            f"🆘 <b>Аварийное закрытие</b>\n"
+                            f"Монета: {signal.symbol}\n"
+                            f"Цена ушла за SL до его установки"
+                        )
+                        return None, "error"
+                    else:
+                        logger.warning(
+                            f"TP/SL для {signal.symbol} "
+                            f"будут выставлены в следующем цикле: {e}"
+                        )
             except Exception:
                 logger.exception(f"Не удалось создать ордер для {signal.symbol}")
                 return None, "error"
@@ -283,7 +304,26 @@ class PositionManager:
                     session.add(pos)
                     logger.info(f"TP/SL повторно выставлены для {pos.symbol}")
                 except Exception as e:
-                    logger.warning(f"Повторная установка TP/SL для {pos.symbol}: {e}")
+                    err = str(e)
+                    if "lower than" in err.lower() or "higher than" in err.lower():
+                        logger.error(
+                            f"Цена ушла за SL для {pos.symbol}, "
+                            f"аварийно закрываю позицию: {e}"
+                        )
+                        try:
+                            await self._connector.close_position(  # type: ignore[union-attr]
+                                pos.symbol
+                            )
+                        except Exception:
+                            logger.exception(f"Не удалось аварийно закрыть {pos.symbol}")
+                        current_price = await self._get_current_price(session, pos.symbol)
+                        await self._close_position(
+                            pos, current_price or pos.entry_price, "sl"
+                        )
+                        closed.append(pos)
+                        continue
+                    else:
+                        logger.warning(f"Повторная установка TP/SL для {pos.symbol}: {e}")
 
             current_price = await self._get_current_price(session, pos.symbol)
 
