@@ -138,7 +138,17 @@ async def run_backtest(config_path: str = "config/config.yaml") -> dict:
             low = current_bar[4]
             close = current_bar[5]
 
-            # Частичное закрытие
+            # Перевод стопа в б/у на полпути (без частичной фиксации)
+            if cfg.breakeven_at_halfway and not pos.partial_closed:
+                trigger = pos.entry_price + (pos.tp_price - pos.entry_price) * (
+                    cfg.partial_close_pct / 100
+                )
+                if high >= trigger:
+                    pos.partial_closed = True
+                    pos.sl_price = pos.entry_price
+                    continue
+
+            # Частичное закрытие (+ стоп в б/у)
             if cfg.partial_close_enabled and not pos.partial_closed:
                 trigger = pos.entry_price + (pos.tp_price - pos.entry_price) * (
                     cfg.partial_close_pct / 100
@@ -149,8 +159,7 @@ async def run_backtest(config_path: str = "config/config.yaml") -> dict:
                     pos.quantity -= close_qty
                     pos.partial_closed = True
                     pos.partial_pnl = partial_pnl
-                    if cfg.breakeven_after_partial:
-                        pos.sl_price = pos.entry_price
+                    pos.sl_price = pos.entry_price
                     continue
 
             # TP
