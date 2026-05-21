@@ -133,9 +133,7 @@ class ExchangeConnector:
         return {
             "exchange": self.exchange_id,
             "symbol": symbol,
-            "timestamp": datetime.fromtimestamp(raw["timestamp"] / 1000, tz=timezone.utc)
-            if raw.get("timestamp")
-            else datetime.now(tz=timezone.utc),
+            "timestamp": datetime.now(tz=timezone.utc),  # свой timestamp (ByBit округляет до часа)
             "value": raw["openInterestAmount"],
         }
 

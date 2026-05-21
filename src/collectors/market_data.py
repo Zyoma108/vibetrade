@@ -118,7 +118,7 @@ class MarketDataCollector:
                     f"{connector.exchange_id}: свечи для {symbol}: {e}"
                 )
 
-        # 5. OI собираем для всех монет (чтобы данные были готовы к началу пампа)
+        # 5. OI собираем для всех монет (с дедупликацией: только если значение изменилось)
         logger.info(
             f"{connector.exchange_id}: сбор OI для {len(selected)} монет..."
         )
@@ -127,7 +127,18 @@ class MarketDataCollector:
             try:
                 oi = await connector.fetch_open_interest(symbol)
                 if oi is not None:
-                    session.add(OpenInterest(**oi))
+                    # Не сохраняем дубликат, если значение не изменилось
+                    last_oi = await session.scalar(
+                        select(OpenInterest.value)
+                        .where(
+                            OpenInterest.exchange == oi["exchange"],
+                            OpenInterest.symbol == oi["symbol"],
+                        )
+                        .order_by(desc(OpenInterest.timestamp))
+                        .limit(1)
+                    )
+                    if last_oi is None or last_oi != oi["value"]:
+                        session.add(OpenInterest(**oi))
             except Exception as e:
                 logger.warning(
                     f"{connector.exchange_id}: OI для {symbol}: {e}"
