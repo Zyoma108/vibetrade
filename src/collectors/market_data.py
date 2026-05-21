@@ -2,7 +2,7 @@ import asyncio
 import logging
 from typing import Callable, Coroutine
 
-from sqlalchemy import select
+from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.connectors.exchange import ExchangeConnector
