@@ -260,7 +260,7 @@ class ExchangeConnector:
         close_side = "sell" if pos["side"] == "long" else "buy"
         raw = await self._call(
             "create_order", symbol, "market", close_side, pos["contracts"],
-            None, None, {"reduceOnly": True}
+            None, {"reduceOnly": True}
         )
         logger.info(
             f"{self.exchange_id}: закрыта позиция {symbol} "
