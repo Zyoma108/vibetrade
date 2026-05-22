@@ -221,6 +221,11 @@ class ExchangeConnector:
                 })
         return result
 
+    async def fetch_balance(self) -> dict:
+        """Баланс аккаунта. Возвращает {'USDT': {'free': ..., 'used': ..., 'total': ...}}."""
+        raw = await self._call("fetch_balance")
+        return raw.get("USDT", raw.get("free", raw))
+
     async def set_leverage(self, symbol: str, leverage: int) -> None:
         """Установить плечо для символа."""
         logger.info(f"{self.exchange_id}: устанавливаю плечо {leverage}x для {symbol}")

@@ -155,7 +155,25 @@ class PositionManager:
             logger.warning(f"Нет цены для {signal.symbol}, позиция не открыта")
             return None, "no_price"
 
-        quantity = self.config.position_size_usdt / entry_price
+        # Размер позиции: % от депозита или фиксированный USDT
+        if self.config.position_size_pct > 0 and self.is_real:
+            try:
+                balance = await self._connector.fetch_balance()  # type: ignore[union-attr]
+                total = float(balance.get("total", balance.get("free", 0)))
+                if total <= 0:
+                    logger.warning("Баланс депозита = 0, позиция не открыта")
+                    return None, "error"
+                size_usdt = total * self.config.position_size_pct / 100
+                logger.info(
+                    f"Баланс: ${total:.0f}, позиция {self.config.position_size_pct}% = ${size_usdt:.0f}"
+                )
+            except Exception as e:
+                logger.warning(f"Не удалось получить баланс: {e}, используется фикс. размер")
+                size_usdt = self.config.position_size_usdt
+        else:
+            size_usdt = self.config.position_size_usdt
+
+        quantity = size_usdt / entry_price
         tp_price = self._tp_price(entry_price, signal.direction)
         sl_price = self._sl_price(entry_price, signal.direction)
         tp_sl_ok = True  # virtual всегда True
@@ -258,12 +276,12 @@ class PositionManager:
 
         # Нотификация
         mode_label = "REAL" if self.is_real else "VIRTUAL"
-        margin = self.config.position_size_usdt / self.config.leverage
+        margin = size_usdt / self.config.leverage
         await self._notify(
             f"📈 <b>Открыта позиция [{mode_label}]</b> {signal.direction.upper()}\n"
             f"Монета: {signal.symbol}\n"
             f"Вход: ${entry_price:.6f}\n"
-            f"Объём: ${self.config.position_size_usdt:.0f} (маржа ${margin:.0f} на {self.config.leverage}x)\n"
+            f"Объём: ${size_usdt:.0f} (маржа ${margin:.0f} на {self.config.leverage}x)\n"
             f"TP: ${tp_price:.6f} (+{self.config.take_profit_pct}%)\n"
             f"SL: ${sl_price:.6f} (-{self.config.stop_loss_pct}%)"
         )

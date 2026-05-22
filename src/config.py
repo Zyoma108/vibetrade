@@ -54,6 +54,7 @@ class TradingConfig(BaseModel):
     exchange: str = "bybit"           # биржа для торговли
     max_positions: int = Field(default=10, ge=1, description="Максимум одновременных позиций")
     position_size_usdt: float = Field(default=100.0, ge=10, description="Объём позиции в USDT (не маржа)")
+    position_size_pct: float = Field(default=0.0, ge=0.0, le=100.0, description="% от депозита на позицию (0 = использовать position_size_usdt)")
     leverage: int = Field(default=1, ge=1, le=100, description="Кредитное плечо")
     take_profit_pct: float = Field(default=12.0, ge=0.5, description="Тейк-профит, %")
     stop_loss_pct: float = Field(default=4.0, ge=0.5, description="Стоп-лосс, %")

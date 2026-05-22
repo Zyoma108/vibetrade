@@ -49,8 +49,9 @@ trading:
   exchange: bybit                 # биржа для торговли
   max_positions: 10               # максимум одновременных позиций
   position_size_usdt: 10.0        # объём позиции в USDT (не маржа!)
+  position_size_pct: 20.0         # % от депозита (0 = использовать position_size_usdt)
   leverage: 10                    # кредитное плечо
-  take_profit_pct: 10.0            # тейк-профит, %
+  take_profit_pct: 12.0           # тейк-профит, %
   stop_loss_pct: 5.0              # стоп-лосс, %
   max_hold_hours: 48.0            # макс. время удержания, часов
   partial_close_enabled: true     # частичная фиксация на полпути к TP (+ стоп в б/у)
