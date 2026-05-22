@@ -26,6 +26,7 @@ class PositionManager:
         self.config = config
         self._send_message = send_message
         self._connector = trading_connector  # None для virtual
+        self._banned_symbols: set[str] = set()  # монеты с ошибками торговли
 
     @property
     def is_real(self) -> bool:
@@ -133,6 +134,11 @@ class PositionManager:
             )
             return None, "limit"
 
+        # Проверка — монета в чёрном списке (ошибки торговли)
+        if signal.symbol in self._banned_symbols:
+            logger.info(f"Сигнал {signal.symbol} пропущен: монета в чёрном списке")
+            return None, "error"
+
         # Проверка — нет ли уже позиции по этой монете
         if await self._has_position(session, signal.symbol):
             logger.info(f"Сигнал {signal.symbol} пропущен: уже есть позиция")
@@ -225,7 +231,16 @@ class PositionManager:
                             f"TP/SL для {signal.symbol} "
                             f"будут выставлены в следующем цикле: {e}"
                         )
-            except Exception:
+            except Exception as e:
+                err = str(e)
+                # ByBit требует подписать соглашение — пропускаем без шума
+                if "sign the required agreement" in err or "110126" in err:
+                    self._banned_symbols.add(signal.symbol)
+                    logger.info(
+                        f"ByBit не даёт торговать {signal.symbol}: "
+                        f"нужно подписать соглашение на сайте (добавлен в чёрный список)"
+                    )
+                    return None, "error"
                 logger.exception(f"Не удалось создать ордер для {signal.symbol}")
                 return None, "error"
 
