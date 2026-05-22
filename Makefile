@@ -41,6 +41,12 @@ docker-down:
 docker-logs:
 	docker compose logs -f
 
+docker-rebuild:
+	docker compose down
+	docker compose build --no-cache
+	docker compose up -d
+	docker compose logs -f
+
 clean:
 	find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
 	rm -rf .pytest_cache
