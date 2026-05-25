@@ -193,23 +193,29 @@ class PositionManager:
                         )
 
                 # 1. Открываем позицию рыночным ордером
-                order = await self._connector.create_market_order(  # type: ignore[union-attr]
+                await self._connector.create_market_order(  # type: ignore[union-attr]
                     symbol=signal.symbol,
                     side="buy",
                     amount=quantity,
                 )
 
-                # 2. Ждём исполнения ордера (бирже нужно время)
+                # 2. Ждём исполнения и получаем фактическую цену с биржи
                 await asyncio.sleep(2)
-
-                # 3. Фактическая цена исполнения — по ней считаем TP/SL
-                fill_price = order.get("fill_price") or entry_price
-                if fill_price != entry_price:
-                    logger.info(
-                        f"Цена изменилась: тикер={entry_price:.6f} → "
-                        f"факт={fill_price:.6f}"
+                try:
+                    ex_positions = await self._connector.fetch_positions(  # type: ignore[union-attr]
+                        signal.symbol
                     )
-                entry_price = fill_price
+                    if ex_positions and ex_positions[0].get("entry_price"):
+                        fill_price = ex_positions[0]["entry_price"]
+                        if fill_price != entry_price:
+                            logger.info(
+                                f"Цена изменилась: тикер={entry_price:.6f} → "
+                                f"биржа={fill_price:.6f}"
+                            )
+                        entry_price = fill_price
+                except Exception as e:
+                    logger.warning(f"Не удалось получить цену входа с биржи: {e}")
+
                 tp_price = self._tp_price(entry_price, signal.direction)
                 sl_price = self._sl_price(entry_price, signal.direction)
 
