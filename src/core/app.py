@@ -65,7 +65,10 @@ class Application:
             logger.info(f"Торговый коннектор: {trading_exchange} ({net})")
 
         # Аналитика
-        self._detector = SetupDetector(self.settings.strategy)
+        self._detector = SetupDetector(
+            self.settings.strategy,
+            timeframe=self.settings.collectors.timeframe,
+        )
 
         # Уведомления
         if self.settings.telegram.bot_token and self.settings.telegram.chat_ids:

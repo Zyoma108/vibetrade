@@ -32,6 +32,7 @@ strategy:
   oi_slope_min_pct: 2.0         # минимальный наклон OI, %
   price_growth_min_pct: 1.0     # минимальный рост цены за sustain-окно, %
   price_growth_max_pct: 5.0     # максимальный рост цены (фильтр «уже поздно»), 0 = выкл
+  max_hourly_drop_pct: 10.0     # макс. падение за час (защита от рагпулов), 0 = выкл
 
 telegram:
   bot_token: "${TELEGRAM_BOT_TOKEN}"

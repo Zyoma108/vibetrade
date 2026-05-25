@@ -101,7 +101,7 @@ async def run_backtest(config_path: str = "config/config.yaml") -> dict:
     logger.info(f"Всего временных срезов: {len(all_timestamps)}")
 
     # Детектор (без боевой БД — только данные в памяти)
-    detector = SetupDetector(settings.strategy)
+    detector = SetupDetector(settings.strategy, timeframe=settings.collectors.timeframe)
     cfg = settings.trading
 
     positions: list[SimPosition] = []
