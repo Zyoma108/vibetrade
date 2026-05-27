@@ -96,10 +96,6 @@ class SetupDetector(BaseDetector):
         if recent[-1] < np.mean(recent[:2]) * 0.5:
             return False
 
-        # Объём ровный, без провалов: мин >= 50% от макс
-        if np.min(recent) < np.max(recent) * 0.5:
-            return False
-
         return True
 
     # ------------------------------------------------------------------
