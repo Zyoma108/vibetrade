@@ -27,6 +27,7 @@ class MarketDataCollector:
     ):
         self._connectors = connectors
         self._static_coins = static_coins
+        self._static_coins_set = set(static_coins)
         self._exclude_coins = set(name.upper() for name in exclude_coins)
         self._min_volume = min_volume_usdt
         self._interval = interval_seconds
@@ -62,10 +63,20 @@ class MarketDataCollector:
                 logger.exception("Ошибка в цикле сбора данных")
             await asyncio.sleep(self._interval)
 
+    def _passes_basic_filter(self, ticker: dict) -> bool:
+        """Базовые фильтры (без учёта объёма): USDT-пара и не в exclusion-листе."""
+        symbol = ticker["symbol"]
+        if "/USDT" not in symbol:
+            return False
+        if self._static_coins:
+            return symbol in self._static_coins_set
+        base = symbol.split("/")[0].upper()
+        return base not in self._exclude_coins
+
     async def _collect_cycle(self) -> None:
         logger.info("Цикл сбора данных...")
         async with async_session() as session:
-            # 1. Сначала получаем тикеры со всех бирж (параллельно)
+            # 1. Получаем тикеры со всех бирж
             all_tickers: dict[str, list[dict]] = {}
             for connector in self._connectors:
                 try:
@@ -76,42 +87,56 @@ class MarketDataCollector:
                 except Exception as e:
                     logger.warning(f"{connector.exchange_id}: не удалось получить тикеры: {e}")
 
-            # 2. Вычисляем уникальные монеты ByBit (которых нет на Binance)
-            binance_symbols: set[str] = set()
-            if "binance" in all_tickers:
-                binance_tickers = self._filter_tickers(all_tickers["binance"])
-                binance_symbols = {t["symbol"] for t in binance_tickers}
+            # 2. Строим symbol → {exchange: ticker} для кросс-биржевой фильтрации
+            by_symbol: dict[str, dict[str, dict]] = {}
+            for exchange_id, tickers in all_tickers.items():
+                for t in tickers:
+                    by_symbol.setdefault(t["symbol"], {})[exchange_id] = t
 
-            bybit_shared: list[dict] = []
-            bybit_unique: list[dict] = []
-            if "bybit" in all_tickers:
-                all_bybit = self._filter_tickers(all_tickers["bybit"])
-                for t in all_bybit:
-                    if t["symbol"] in binance_symbols:
-                        bybit_shared.append(t)
-                    else:
-                        bybit_unique.append(t)
-                logger.info(
-                    f"bybit: {len(bybit_shared)} общих с binance, "
-                    f"{len(bybit_unique)} уникальных (будут собраны)"
-                )
+            # 3. Отбираем монеты, доступные на ByBit (торговая биржа)
+            #    Объём проверяется по OR: достаточно на любой из бирж
+            bybit_raw = all_tickers.get("bybit", [])
+            selected_binance: list[dict] = []
+            selected_bybit: list[dict] = []
 
-            # 3. Собираем данные
+            for t in bybit_raw:
+                symbol = t["symbol"]
+                tickers = by_symbol.get(symbol, {})
+                bybit_t = tickers.get("bybit")
+                if bybit_t is None:
+                    continue
+
+                if not self._passes_basic_filter(bybit_t):
+                    continue
+
+                # Объём: берём максимум из двух бирж (если монета есть на обеих)
+                bybit_vol = bybit_t.get("volume") or 0
+                binance_t = tickers.get("binance")
+                binance_vol = (binance_t.get("volume") or 0) if binance_t else 0
+
+                if max(bybit_vol, binance_vol) < self._min_volume:
+                    continue
+
+                if binance_t is not None:
+                    selected_binance.append(binance_t)
+                else:
+                    selected_bybit.append(bybit_t)
+
+            logger.info(
+                f"bybit: {len(selected_binance)} общих с binance, "
+                f"{len(selected_bybit)} уникальных (будут собраны)"
+            )
+
+            # 4. Собираем данные
             for connector in self._connectors:
                 try:
-                    if connector.exchange_id == "bybit":
-                        # ByBit: только уникальные монеты
-                        await self._collect_for_exchange(connector, session, bybit_unique)
-                    elif connector.exchange_id == "binance":
-                        # Binance: все монеты, которые есть на ByBit
-                        bybit_all = {t["symbol"] for t in (bybit_shared + bybit_unique)}
-                        filtered = [t for t in all_tickers.get("binance", [])
-                                    if t["symbol"] in bybit_all]
-                        selected = self._filter_tickers(filtered)
-                        await self._collect_for_exchange(connector, session, selected)
+                    if connector.exchange_id == "binance":
+                        await self._collect_for_exchange(connector, session, selected_binance)
+                    elif connector.exchange_id == "bybit":
+                        await self._collect_for_exchange(connector, session, selected_bybit)
                     else:
-                        selected = self._filter_tickers(all_tickers.get(connector.exchange_id, []))
-                        await self._collect_for_exchange(connector, session, selected)
+                        filtered = self._filter_tickers(all_tickers.get(connector.exchange_id, []))
+                        await self._collect_for_exchange(connector, session, filtered)
                 except Exception:
                     logger.exception(f"Ошибка сбора на {connector.exchange_id}")
 
