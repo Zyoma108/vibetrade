@@ -1,4 +1,4 @@
-.PHONY: run run-signal run-virtual test migrate-create migrate-up backtest-load backtest-run docker-build docker-up docker-down clean
+.PHONY: run run-signal run-virtual test migrate-create migrate-up backtest-load backtest-run backtest-run-live docker-build docker-up docker-down docker-logs docker-rebuild clean
 
 APP := .venv/bin/python -m src.main
 
@@ -28,6 +28,9 @@ backtest-load-month:
 
 backtest-run:
 	.venv/bin/python -m src.backtest.runner $(ARGS)
+
+backtest-run-live:
+	.venv/bin/python -m src.backtest.runner --db data/trading_bot.db $(ARGS)
 
 docker-build:
 	docker compose build

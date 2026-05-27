@@ -3,6 +3,7 @@
 
 Использование:
     python -m src.backtest.runner
+    python -m src.backtest.runner --db data/trading_bot.db --config config/test-config.yaml
 """
 
 import argparse
@@ -12,17 +13,17 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import numpy as np
-from sqlalchemy import select
+from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from src.analytics.detector import SetupDetector
+from src.analytics.detector import OI_TREND_BARS, SetupDetector
 from src.config import Settings
-from src.storage.models import Candle
+from src.storage.models import Candle, OpenInterest
 
 logger = logging.getLogger(__name__)
 
 BACKTEST_DB = Path("data/backtest.db")
-CYCLE_DELAY_BARS = 3  # проверять сетапы раз в N свечей (имитация цикла сканирования)
+CYCLE_DELAY_BARS = 3
 
 
 # ---------------------------------------------------------------------------
@@ -54,7 +55,6 @@ class SimPosition:
 
 
 def _bar(rows, idx):
-    """Безопасный доступ к списку свечей по индексу."""
     if 0 <= idx < len(rows):
         return rows[idx]
     return None
@@ -64,32 +64,32 @@ def _bar(rows, idx):
 # Main loop
 # ---------------------------------------------------------------------------
 
-async def run_backtest(config_path: str = "config/config.yaml") -> dict:
+async def run_backtest(
+    config_path: str = "config/config.yaml",
+    db_path: str = "data/backtest.db",
+) -> dict:
     """Запустить бэктест и вернуть статистику."""
     settings = Settings.from_yaml(config_path)
+    db_path = Path(db_path)
+    has_oi = (db_path.name == "trading_bot.db")  # в боевой БД есть OI
 
-    engine = create_async_engine(f"sqlite+aiosqlite:///{BACKTEST_DB}", echo=False)
+    engine = create_async_engine(f"sqlite+aiosqlite:///{db_path}", echo=False)
     session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
-    # Загружаем все свечи, группируем по символу
+    # Загружаем все свечи в память
     async with session_factory() as session:
         stmt = (
             select(Candle.symbol, Candle.timestamp, Candle.open, Candle.high,
                    Candle.low, Candle.close, Candle.volume)
-            .where(Candle.exchange == "binance")
             .order_by(Candle.symbol, Candle.timestamp)
         )
         result = await session.execute(stmt)
         rows = result.all()
 
-    # Группировка по символам
     symbols: dict[str, list] = {}
     for r in rows:
         symbols.setdefault(r[0], []).append(r)
 
-    logger.info(f"Загружено символов: {len(symbols)}")
-
-    # Ищем общий временной диапазон
     all_timestamps = sorted(set(r[1] for r in rows))
     if not all_timestamps:
         logger.error("Нет данных для бэктеста")
@@ -97,10 +97,10 @@ async def run_backtest(config_path: str = "config/config.yaml") -> dict:
 
     start_time = all_timestamps[0]
     end_time = all_timestamps[-1]
-    logger.info(f"Период: {start_time} → {end_time}")
-    logger.info(f"Всего временных срезов: {len(all_timestamps)}")
+    logger.info(f"БД: {db_path} | OI: {'✅' if has_oi else '❌'}")
+    logger.info(f"Символов: {len(symbols)} | Период: {start_time} → {end_time}")
+    logger.info(f"Временных срезов: {len(all_timestamps)}")
 
-    # Детектор (без боевой БД — только данные в памяти)
     detector = SetupDetector(settings.strategy, timeframe=settings.collectors.timeframe)
     cfg = settings.trading
 
@@ -108,10 +108,22 @@ async def run_backtest(config_path: str = "config/config.yaml") -> dict:
     closed_trades: list[SimPosition] = []
     signals_count = 0
 
-    # Проходим по каждому временному срезу (свече)
+    # Кеш OI-данных (exchange, symbol) -> [(timestamp, value), ...]
+    oi_cache: dict[tuple[str, str], list[tuple[datetime, float]]] = {}
+    if has_oi:
+        async with session_factory() as session:
+            oi_stmt = select(OpenInterest.exchange, OpenInterest.symbol,
+                             OpenInterest.timestamp, OpenInterest.value).order_by(
+                OpenInterest.exchange, OpenInterest.symbol, OpenInterest.timestamp)
+            oi_result = await session.execute(oi_stmt)
+            for ex, sym, ts, val in oi_result.all():
+                oi_cache.setdefault((ex, sym), []).append((ts, val))
+        logger.info(f"Загружено OI: {len(oi_cache)} монет")
+
+    # Проходим по каждому временному срезу
     for ts_idx, ts in enumerate(all_timestamps):
         if ts_idx < detector.config.baseline_bars + detector.config.sustain_bars:
-            continue  # недостаточно истории для детектора
+            continue
 
         # Проверяем открытые позиции на TP/SL/время
         for pos in list(positions):
@@ -122,15 +134,13 @@ async def run_backtest(config_path: str = "config/config.yaml") -> dict:
             if not sym_data:
                 continue
 
-            # Ищем свечу с текущим таймстемпом для этой монеты
             current_bar = None
-            bar_idx = -1
+            bar_idx_pos = -1
             for i, r in enumerate(sym_data):
                 if r[1] == ts:
                     current_bar = r
-                    bar_idx = i
+                    bar_idx_pos = i
                     break
-
             if not current_bar:
                 continue
 
@@ -138,21 +148,19 @@ async def run_backtest(config_path: str = "config/config.yaml") -> dict:
             low = current_bar[4]
             close = current_bar[5]
 
-            # Перевод стопа в б/у на полпути (без частичной фиксации)
+            # breakeven_at_halfway
             if cfg.breakeven_at_halfway and not pos.partial_closed:
                 trigger = pos.entry_price + (pos.tp_price - pos.entry_price) * (
-                    cfg.partial_close_pct / 100
-                )
+                    cfg.partial_close_pct / 100)
                 if high >= trigger:
                     pos.partial_closed = True
                     pos.sl_price = pos.entry_price
                     continue
 
-            # Частичное закрытие (+ стоп в б/у)
+            # Частичное закрытие
             if cfg.partial_close_enabled and not pos.partial_closed:
                 trigger = pos.entry_price + (pos.tp_price - pos.entry_price) * (
-                    cfg.partial_close_pct / 100
-                )
+                    cfg.partial_close_pct / 100)
                 if high >= trigger:
                     close_qty = pos.quantity / 2
                     partial_pnl = (trigger - pos.entry_price) * close_qty
@@ -195,7 +203,7 @@ async def run_backtest(config_path: str = "config/config.yaml") -> dict:
                 closed_trades.append(pos)
                 positions.remove(pos)
 
-        # Ищем сетапы только в «циклы сканирования» (имитация задержки)
+        # Ищем сетапы только в «циклы сканирования»
         if ts_idx % CYCLE_DELAY_BARS != 0:
             continue
         if len(positions) >= cfg.max_positions:
@@ -205,7 +213,6 @@ async def run_backtest(config_path: str = "config/config.yaml") -> dict:
             if len(positions) >= cfg.max_positions:
                 break
 
-            # Ищем индекс текущей свечи для этого символа
             bar_idx = -1
             for i, r in enumerate(sym_data):
                 if r[1] == ts:
@@ -218,7 +225,6 @@ async def run_backtest(config_path: str = "config/config.yaml") -> dict:
             if bar_idx < need_bars:
                 continue
 
-            # Проверяем кулдаун и дубликаты
             base = sym.split("/")[0].upper()
             if base in getattr(detector, '_exclude_coins', set()):
                 continue
@@ -232,7 +238,6 @@ async def run_backtest(config_path: str = "config/config.yaml") -> dict:
             ):
                 continue
 
-            # Собираем свечи до текущего момента
             candle_slice = []
             for j in range(bar_idx - need_bars - 10, bar_idx + 1):
                 bar = _bar(sym_data, j)
@@ -245,33 +250,50 @@ async def run_backtest(config_path: str = "config/config.yaml") -> dict:
             if len(candle_slice) < need_bars:
                 continue
 
-            # Детектор (только volume + price, без OI)
+            # Volume + price checks
             if not detector._check_volume_pattern(candle_slice):
                 continue
             direction = detector._check_price_trend(candle_slice)
             if direction != "long":
                 continue
-            # OI пропускаем — нет исторических данных
+
+            # OI check (если есть данные)
+            if has_oi:
+                oi_pass = False
+                for ex in ("bybit", "binance"):
+                    key = (ex, sym)
+                    if key not in oi_cache:
+                        continue
+                    # Берём OI точки до текущего timestamp
+                    oi_points = [v for t, v in oi_cache[key] if t <= ts]
+                    if len(oi_points) < OI_TREND_BARS:
+                        continue
+                    oi_vals = np.array(oi_points[-OI_TREND_BARS:])
+                    x = np.arange(len(oi_vals))
+                    slope = np.polyfit(x, oi_vals, 1)[0]
+                    mean_oi = np.mean(oi_vals)
+                    if mean_oi > 0:
+                        slope_pct = (slope * len(oi_vals)) / mean_oi * 100
+                        if slope_pct >= detector.config.oi_slope_min_pct:
+                            oi_pass = True
+                            break
+                if not oi_pass:
+                    continue
 
             signals_count += 1
 
-            # Открываем позицию
             entry_price = candle_slice[-1]["close"]
             tp = entry_price * (1 + cfg.take_profit_pct / 100)
             sl = entry_price * (1 - cfg.stop_loss_pct / 100)
             qty = cfg.position_size_usdt / entry_price
 
             pos = SimPosition(
-                symbol=sym,
-                entry_price=entry_price,
-                entry_time=ts,
-                quantity=qty,
-                tp_price=tp,
-                sl_price=sl,
+                symbol=sym, entry_price=entry_price, entry_time=ts,
+                quantity=qty, tp_price=tp, sl_price=sl,
             )
             positions.append(pos)
 
-    # Закрываем оставшиеся позиции по последней цене
+    # Закрываем оставшиеся позиции
     for pos in positions:
         sym_data = symbols.get(pos.symbol)
         if sym_data:
@@ -312,19 +334,15 @@ async def run_backtest(config_path: str = "config/config.yaml") -> dict:
         "worst": min(closed_trades, key=lambda t: t.pnl) if closed_trades else None,
         "period": f"{start_time} → {end_time}",
         "trades_list": closed_trades,
+        "has_oi": has_oi,
     }
 
 
-# ---------------------------------------------------------------------------
-# CLI
-# ---------------------------------------------------------------------------
-
 def main():
     parser = argparse.ArgumentParser(description="Бэктест торговой стратегии")
-    parser.add_argument(
-        "--config", type=str, default="config/config.yaml",
-        help="Путь к конфигу (можно указать отдельный конфиг для тестов)"
-    )
+    parser.add_argument("--config", type=str, default="config/config.yaml")
+    parser.add_argument("--db", type=str, default="data/backtest.db",
+                        help="Путь к БД (data/trading_bot.db — с OI данными)")
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -332,7 +350,7 @@ def main():
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
 
-    result = asyncio.run(run_backtest(args.config))
+    result = asyncio.run(run_backtest(args.config, args.db))
 
     if not result:
         print("Нет данных")
@@ -341,6 +359,7 @@ def main():
     print("\n" + "=" * 60)
     print("  РЕЗУЛЬТАТЫ БЭКТЕСТА")
     print("=" * 60)
+    print(f"  OI проверка:        {'✅ Да' if result['has_oi'] else '❌ Нет'}")
     print(f"  Период:            {result['period']}")
     print(f"  Сигналов:          {result['signals']}")
     print(f"  Сделок:            {result['trades']}")
@@ -356,7 +375,6 @@ def main():
         print(f"  Худшая:  {result['worst'].symbol} ${result['worst'].pnl:+.2f}")
     print("=" * 60)
 
-    # Детализация по сделкам
     print("\n  Последние 20 сделок:")
     for t in result["trades_list"][-20:]:
         emoji = "✅" if t.exit_reason == "tp" else ("🛑" if t.exit_reason == "sl" else "⏰")
