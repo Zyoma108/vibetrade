@@ -92,10 +92,6 @@ class SetupDetector(BaseDetector):
             if np.max(recent) / recent_median > SMOOTH_MAX_RATIO:
                 return False
 
-        # Объём не должен резко падать в последней свече
-        if recent[-1] < np.mean(recent[:2]) * 0.5:
-            return False
-
         return True
 
     # ------------------------------------------------------------------
