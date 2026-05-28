@@ -3,7 +3,10 @@ import re
 from pathlib import Path
 
 import yaml
+from dotenv import load_dotenv
 from pydantic import BaseModel, Field
+
+load_dotenv()
 
 
 class ExchangeConfig(BaseModel):

@@ -3,9 +3,9 @@ exchanges:
     enabled: true
   bybit:
     enabled: true
-    # api_key: "your-api-key"    # для реальной торговли
-    # secret: "your-secret"
-    # testnet: true              # true = testnet, false = mainnet
+    # api_key: "${BYBIT_API_KEY}"   # из .env файла
+    # secret: "${BYBIT_SECRET}"
+    # testnet: true                 # true = testnet, false = mainnet
 
 # coins: если список пуст — все монеты с бирж отбираются динамически
 #   по объёму и исключениям. Можно указать конкретные пары:

@@ -5,6 +5,8 @@ services:
     volumes:
       - ./config/config.yaml:/app/config/config.yaml:ro
       - ./data:/app/data
+    env_file:
+      - .env
     environment:
       - TZ=UTC
     restart: unless-stopped
