@@ -43,7 +43,7 @@ strategy:
   max_hourly_drop_pct: 10.0     # макс. падение за час (защита от рагпулов), 0 = выкл
 
 strategy_price_surge:                    # детектор пампов по чистой цене (только сигналы)
-  price_surge_pct: 10.0        # рост цены в % для сигнала
+  price_surge_pct: 5.0        # рост цены в % для сигнала
   price_surge_minutes: 9       # промежуток времени в минутах
 
 telegram:
