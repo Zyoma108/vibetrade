@@ -28,6 +28,7 @@ strategy:
     - XRP
   baseline_bars: 50             # свечей для расчёта нормального объёма
   volume_surge_mult: 2.0        # во сколько раз объём должен превысить норму
+  min_baseline_volume_usdt: 0    # мин. медиана объёма в USDT, 0 = выкл
   sustain_bars: 4               # сколько свечей подряд выше порога для сигнала
   oi_slope_min_pct: 2.0         # минимальный наклон OI, %
   price_growth_min_pct: 1.0     # минимальный рост цены за sustain-окно, %

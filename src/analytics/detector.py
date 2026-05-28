@@ -78,6 +78,15 @@ class SetupDetector(BaseDetector):
         if baseline <= 0:
             return False
 
+        # Фильтр низколиквидных монет: объём в USDT ниже порога
+        min_base_usdt = self.config.min_baseline_volume_usdt
+        if min_base_usdt > 0:
+            baseline_closes = np.array([c["close"] for c in candles[:self.config.baseline_bars]])
+            median_price = np.median(baseline_closes)
+            baseline_usdt = baseline * median_price
+            if baseline_usdt < min_base_usdt:
+                return False
+
         sustain = self.config.sustain_bars
         recent = volumes[-sustain:]
 

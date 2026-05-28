@@ -30,6 +30,9 @@ class StrategyConfig(BaseModel):
     volume_surge_mult: float = Field(
         default=2.0, description="Во сколько раз объём должен превышать норму"
     )
+    min_baseline_volume_usdt: float = Field(
+        default=0.0, description="Минимальная медиана объёма в USDT, 0 = фильтр выключен"
+    )
     sustain_bars: int = Field(
         default=4, description="Сколько свечей подряд должны быть выше порога"
     )
