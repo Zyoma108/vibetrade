@@ -42,10 +42,19 @@ strategy:
   price_growth_max_pct: 20.0    # максимальный рост цены (фильтр «уже поздно»), 0 = выкл
   max_hourly_drop_pct: 10.0     # макс. падение за час (защита от рагпулов), 0 = выкл
 
+strategy_price_surge:                    # детектор пампов по чистой цене (только сигналы)
+  price_surge_pct: 10.0        # рост цены в % для сигнала
+  price_surge_minutes: 9       # промежуток времени в минутах
+
 telegram:
   bot_token: "${TELEGRAM_BOT_TOKEN}"
   chat_ids:
     - "${TELEGRAM_CHAT_ID}"
+
+telegram_price_surge:                    # отдельный бот для strategy_price_surge
+  bot_token: "${TELEGRAM_PRICE_SURGE_BOT_TOKEN}"
+  chat_ids:
+    - "${TELEGRAM_PRICE_SURGE_CHAT_ID}"
 
 trading:
   mode: real                      # signal | virtual | real

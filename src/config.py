@@ -1,6 +1,7 @@
 import os
 import re
 from pathlib import Path
+from typing import Optional
 
 import yaml
 from dotenv import load_dotenv
@@ -51,6 +52,13 @@ class StrategyConfig(BaseModel):
     max_hourly_drop_pct: float = Field(
         default=10.0, description="Максимальное падение за час, % (защита от рагпулов, 0 = выкл)"
     )
+    # Параметры для PriceSurgeDetector (strategy_price_surge)
+    price_surge_pct: float = Field(
+        default=0.0, description="Рост цены для сигнала пампа, % (0 = детектор выключен)"
+    )
+    price_surge_minutes: int = Field(
+        default=9, description="Промежуток времени для замера роста цены, минут"
+    )
 
 
 class TelegramConfig(BaseModel):
@@ -78,7 +86,9 @@ class Settings(BaseModel):
     coins: list[str] = []  # пустой список = сканировать все монеты динамически
     collectors: CollectorsConfig = CollectorsConfig()
     strategy: StrategyConfig = StrategyConfig()
+    strategy_price_surge: Optional[StrategyConfig] = None   # вторая стратегия (только сигналы, без торговли)
     telegram: TelegramConfig = TelegramConfig()
+    telegram_price_surge: Optional[TelegramConfig] = None   # отдельный бот для сигналов strategy_price_surge
     trading: TradingConfig = TradingConfig()
 
     @classmethod

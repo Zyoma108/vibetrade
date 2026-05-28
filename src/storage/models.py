@@ -62,6 +62,18 @@ class Signal(Base):
     message: Mapped[str] = mapped_column(Text)
 
 
+class PriceSurgeSignal(Base):
+    """Сигналы детектора пампов (strategy_price_surge)."""
+
+    __tablename__ = "price_surge_signals"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    timestamp: Mapped[datetime] = mapped_column(index=True)
+    symbol: Mapped[str] = mapped_column(String(32), index=True)
+    change_pct: Mapped[float] = mapped_column(Float)
+    interval_minutes: Mapped[int] = mapped_column(Integer)
+
+
 class Trade(Base):
     """Фаза 2: исполненные сделки."""
 

@@ -154,14 +154,14 @@ class TelegramNotifier:
                 break
 
         if self._online:
-            await self._notify_all("🟢 Торговый бот запущен")
+            await self.notify_all("🟢 Торговый бот запущен")
         else:
             logger.warning("Telegram-бот не смог подключиться, уведомления отключены")
 
     async def stop(self) -> None:
         """Остановить бота."""
         if self._online:
-            await self._notify_all("🔴 Торговый бот остановлен")
+            await self.notify_all("🔴 Торговый бот остановлен")
         if self._polling_task and not self._polling_task.done():
             self._polling_task.cancel()
             try:
@@ -201,16 +201,16 @@ class TelegramNotifier:
             f"Статус: {status_line}\n\n"
             f"{signal.message}"
         )
-        if await self._notify_all(text):
+        if await self.notify_all(text):
             self._signals_sent += 1
             logger.info(f"Сигнал отправлен: {signal.symbol} {signal.direction}")
 
     async def send_message(self, text: str) -> None:
         """Отправить произвольное сообщение."""
         if self._online:
-            await self._notify_all(text)
+            await self.notify_all(text)
 
-    async def _notify_all(self, text: str) -> bool:
+    async def notify_all(self, text: str) -> bool:
         """Отправить сообщение всем чатам. Возвращает True если хотя бы одна отправка удалась."""
         if not self._online:
             return False

@@ -35,12 +35,19 @@ strategy:
   price_growth_max_pct: 5.0     # максимальный рост цены (фильтр «уже поздно»), 0 = выкл
   max_hourly_drop_pct: 10.0     # макс. падение за час (защита от рагпулов), 0 = выкл
 
+strategy_price_surge:                    # детектор пампов по чистой цене (только сигналы)
+  price_surge_pct: 10.0        # рост цены в % для сигнала
+  price_surge_minutes: 9       # промежуток времени в минутах
+
 telegram:
   bot_token: "${TELEGRAM_BOT_TOKEN}"
   chat_ids:
-    # Поддерживаются: числовой ID (строка), @username канала, отрицательный ID
-    # Как узнать ID канала: перешлите сообщение из канала боту @getidsbot
     - "@my_channel"
+
+telegram_price_surge:                    # отдельный бот для strategy_price_surge
+  bot_token: "${TELEGRAM_BOT_TOKEN_2}"
+  chat_ids:
+    - "@my_channel_2"
 
 trading:
   mode: signal                    # signal | virtual | real
