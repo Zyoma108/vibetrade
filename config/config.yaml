@@ -34,7 +34,7 @@ strategy:
     - WHITEWHALE
     - ESPORTS
   baseline_bars: 70             # свечей для расчёта нормального объёма
-  volume_surge_mult: 10.0       # во сколько раз объём должен превысить норму
+  volume_surge_mult: 6.0        # во сколько раз объём должен превысить норму
   min_baseline_volume_usdt: 5000  # мин. медиана объёма в USDT, 0 = выкл
   sustain_bars: 3               # сколько свечей подряд выше порога для сигнала
   oi_slope_min_pct: 1.0         # минимальный наклон OI, %
