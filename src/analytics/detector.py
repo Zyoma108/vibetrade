@@ -184,17 +184,19 @@ class SetupDetector(BaseDetector):
     # ------------------------------------------------------------------
 
     async def _get_active_symbols(self, session) -> list[tuple[str, str]]:
-        """Все пары (exchange, symbol), которые есть на торгуемой бирже (ByBit)."""
-        # Символы, доступные на ByBit
+        """Все пары (exchange, symbol), которые торгуются на ByBit."""
+        from src.storage.models import Ticker
+
+        # Символы, доступные на ByBit (из тикеров, не свечей)
         bybit_syms_stmt = (
-            select(Candle.symbol)
-            .where(Candle.exchange == "bybit")
+            select(Ticker.symbol)
+            .where(Ticker.exchange == "bybit")
             .distinct()
         )
         bybit_result = await session.execute(bybit_syms_stmt)
         bybit_symbols = set(bybit_result.scalars().all())
 
-        # Все уникальные пары биржа+символ
+        # Все уникальные пары биржа+символ (из свечей)
         stmt = (
             select(Candle.exchange, Candle.symbol)
             .distinct()

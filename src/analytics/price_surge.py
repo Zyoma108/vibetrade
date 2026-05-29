@@ -75,10 +75,12 @@ class PriceSurgeDetector(BaseDetector):
 
     async def _get_active_symbols(self, session) -> list[tuple[str, str]]:
         """Все пары (exchange, symbol) с данными."""
-        # Символы, доступные на ByBit
+        from src.storage.models import Ticker
+
+        # Символы, доступные на ByBit (из тикеров)
         bybit_stmt = (
-            select(Candle.symbol)
-            .where(Candle.exchange == "bybit")
+            select(Ticker.symbol)
+            .where(Ticker.exchange == "bybit")
             .distinct()
         )
         bybit_result = await session.execute(bybit_stmt)
