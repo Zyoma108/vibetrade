@@ -275,7 +275,14 @@ class Application:
                 ) or 0
 
                 # Рост за час
-                hour_bars = max(60 // (self.settings.collectors.timeframe.rstrip('mh') or 3), 1)
+                tf = self.settings.collectors.timeframe
+                if tf.endswith("m"):
+                    tf_min = int(tf[:-1])
+                elif tf.endswith("h"):
+                    tf_min = int(tf[:-1]) * 60
+                else:
+                    tf_min = 3
+                hour_bars = max(60 // tf_min, 1)
                 hour_rows = (await session.execute(
                     select(_Candle.open, _Candle.close)
                     .where(_Candle.symbol == sig.symbol)
