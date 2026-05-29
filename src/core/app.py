@@ -302,9 +302,9 @@ class Application:
                 if len(oi_vals) >= 2:
                     oi_change = (oi_vals[0] / oi_vals[-1] - 1) * 100
 
-                # Ссылка CoinGlass
+                # Ссылка CoinGlass (ByBit — торгуемая биржа)
                 pair = sig.symbol.split("/")[0] + "USDT"
-                link = f"https://www.coinglass.com/tv/Binance_{pair}"
+                link = f"https://www.coinglass.com/tv/Bybit_{pair}"
 
                 text = (
                     f'📈 <b><a href="{link}">{sig.symbol}</a></b> '
