@@ -3,8 +3,8 @@ exchanges:
     enabled: true
   bybit:
     enabled: true
-    api_key: "КЛЮЧ_УДАЛЕН"
-    secret: "КЛЮЧ_УДАЛЕН"
+    api_key: "${BYBIT_API_KEY}"
+    secret: "${BYBIT_SECRET}"
     testnet: false
 
 # coins: если список пуст — все монеты с бирж отбираются динамически
@@ -40,9 +40,9 @@ strategy:
   price_growth_max_pct: 10.0    # максимальный рост цены (фильтр «уже поздно»), 0 = выкл
 
 telegram:
-  bot_token: "КЛЮЧ_УДАЛЕНQ"
+  bot_token: "${TELEGRAM_BOT_TOKEN}"
   chat_ids:
-    - "КЛЮЧ_УДАЛЕН"
+    - "${TELEGRAM_CHAT_ID}"
 
 trading:
   mode: real                      # signal | virtual | real
