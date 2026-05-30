@@ -127,6 +127,11 @@ class MarketDataCollector:
                 f"{len(selected_bybit)} уникальных (будут собраны)"
             )
 
+            # 3.5. Сохраняем ВСЕ ByBit тикеры (нужны детектору для определения доступности)
+            for t in bybit_raw:
+                if self._passes_basic_filter(t):
+                    session.add(Ticker(**t))
+
             # 4. Собираем данные
             for connector in self._connectors:
                 try:
