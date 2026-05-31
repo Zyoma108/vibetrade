@@ -119,7 +119,7 @@ class PositionManager:
     # ==================================================================
 
     async def open_position(
-        self, session: AsyncSession, signal: Signal
+        self, session: AsyncSession, signal: Signal, signal_id: int | None = None
     ) -> tuple[Trade | None, str]:
         """Открыть позицию по сигналу.
         Возвращает (trade, status): status = 'opened' | 'limit' | 'duplicate' |
@@ -270,6 +270,7 @@ class PositionManager:
 
         # Запись в БД
         trade = Trade(
+            signal_id=signal_id,
             symbol=signal.symbol,
             direction=signal.direction,
             entry_price=entry_price,

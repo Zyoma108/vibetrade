@@ -37,7 +37,7 @@ strategy:
   sustain_bars: 3               # сколько свечей подряд выше порога для сигнала
   oi_slope_min_pct: 3.0         # минимальный наклон OI, %
   price_growth_min_pct: 0.5     # минимальный рост цены за sustain-окно, %
-  price_growth_max_pct: 10.0    # максимальный рост цены (фильтр «уже поздно»), 0 = выкл
+  price_growth_max_pct: 8.0     # максимальный рост цены (фильтр «уже поздно»), 0 = выкл
 
 telegram:
   bot_token: "${TELEGRAM_BOT_TOKEN}"

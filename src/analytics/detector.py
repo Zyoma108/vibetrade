@@ -101,6 +101,22 @@ class SetupDetector(BaseDetector):
             if np.max(recent) / recent_median > SMOOTH_MAX_RATIO:
                 return False
 
+            # Защита от свечи-выброса (distribution/climax):
+            # объём последней свечи не должен превышать медиану
+            # остальных sustain-свечей более чем в dump_volume_mult раз
+            dump_mult = self.config.dump_volume_mult
+            if dump_mult > 0 and len(recent) >= 2:
+                others = recent[:-1]  # все свечи sustain, кроме последней
+                others_median = np.median(others)
+                if others_median > 0:
+                    if recent[-1] / others_median > dump_mult:
+                        logger.info(
+                            f"Сигнал пропущен: свеча-выброс — объём последней "
+                            f"свечи (x{recent[-1] / others_median:.1f}) "
+                            f"> лимита x{dump_mult}"
+                        )
+                        return False
+
         return True
 
     # ------------------------------------------------------------------

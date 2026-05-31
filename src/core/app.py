@@ -220,11 +220,14 @@ class Application:
                     message=sig.message,
                 )
                 session.add(db_signal)
+                await session.flush()  # Получить db_signal.id до вызова open_position
 
                 # Открываем позицию (если торговля активна)
                 status = "disabled"
                 if self._positions:
-                    _trade, status = await self._positions.open_position(session, sig)
+                    _trade, status = await self._positions.open_position(
+                        session, sig, signal_id=db_signal.id
+                    )
 
                 # Сигнал в Telegram — всегда, с реальной причиной
                 if self._notifier:
