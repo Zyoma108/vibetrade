@@ -396,6 +396,7 @@ class PositionManager:
                     pos.direction == "short" and current_price <= trigger
                 ):
                     pos.partial_closed = True  # флаг «б/у уже переведён»
+                    new_sl_price = pos.entry_price * 1.01
                     session.add(pos)
                     if self.is_real:
                         try:
@@ -404,7 +405,7 @@ class PositionManager:
                                 side="buy" if pos.direction == "long" else "sell",
                                 amount=pos.quantity,
                                 tp_price=tp,
-                                sl_price=pos.entry_price,
+                                sl_price=new_sl_price,
                             )
                         except Exception as e:
                             logger.warning(f"Не удалось перевести стоп в б/у для {pos.symbol}: {e}")
