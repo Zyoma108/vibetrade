@@ -67,11 +67,11 @@ def _bar(rows, idx):
 async def run_backtest(
     config_path: str = "config/config.yaml",
     db_path: str = "data/backtest.db",
+    has_oi: bool = True
 ) -> dict:
     """Запустить бэктест и вернуть статистику."""
     settings = Settings.from_yaml(config_path)
     db_path = Path(db_path)
-    has_oi = (db_path.name == "trading_bot.db")  # в боевой БД есть OI
 
     engine = create_async_engine(f"sqlite+aiosqlite:///{db_path}", echo=False)
     session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
@@ -341,8 +341,8 @@ async def run_backtest(
 def main():
     parser = argparse.ArgumentParser(description="Бэктест торговой стратегии")
     parser.add_argument("--config", type=str, default="config/config.yaml")
-    parser.add_argument("--db", type=str, default="data/backtest.db",
-                        help="Путь к БД (data/trading_bot.db — с OI данными)")
+    parser.add_argument("--db", type=str, default="data/backtest.db")
+    parser.add_argument("--has_oi", type=bool, default=True)
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -350,7 +350,7 @@ def main():
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
 
-    result = asyncio.run(run_backtest(args.config, args.db))
+    result = asyncio.run(run_backtest(args.config, args.db, args.has_oi))
 
     if not result:
         print("Нет данных")
