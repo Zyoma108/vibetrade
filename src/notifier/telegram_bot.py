@@ -133,8 +133,26 @@ class TelegramNotifier:
         """Запустить polling бота (с retry при конфликте)."""
         self._start_time = datetime.now()
 
-        max_retries = 5
+        # Сначала сбрасываем webhook и pending updates —
+        # это заставляет Telegram освободить старые polling-сеансы
+        for attempt in range(3):
+            try:
+                await self._bot.delete_webhook(drop_pending_updates=True)
+                break
+            except Exception as e:
+                logger.warning(f"Не удалось сбросить webhook (попытка {attempt + 1}/3): {e}")
+                await asyncio.sleep(2)
+
+        max_retries = 8
+        base_delay = 8  # базовая задержка между попытками, секунд
+
         for attempt in range(1, max_retries + 1):
+            # Для повторных попыток — закрываем старую сессию и создаём свежий Bot
+            if attempt > 1:
+                await self._bot.session.close()
+                await asyncio.sleep(2)
+                self._bot = Bot(token=self._config.bot_token)
+
             self._polling_task = asyncio.create_task(
                 self._dp.start_polling(
                     self._bot,
@@ -145,13 +163,15 @@ class TelegramNotifier:
 
             # Ждём успешного коннекта или фейла
             connected = False
-            for _ in range(15):  # 15 × 2с = 30с макс ожидания
+            deadline = asyncio.get_event_loop().time() + 20  # 20 секунд на попытку
+            while asyncio.get_event_loop().time() < deadline:
                 await asyncio.sleep(2)
                 if self._polling_task.done():
                     exc = self._polling_task.exception()
                     if exc:
                         logger.warning(
-                            f"Telegram polling не запустился (попытка {attempt}/{max_retries}): {exc}"
+                            f"Telegram polling не запустился "
+                            f"(попытка {attempt}/{max_retries}): {exc}"
                         )
                     break
                 try:
@@ -164,7 +184,8 @@ class TelegramNotifier:
                     logger.warning("Telegram API недоступен, повторная попытка...")
                 except Exception as e:
                     logger.warning(
-                        f"Ошибка подключения к Telegram (попытка {attempt}/{max_retries}): {e}"
+                        f"Ошибка подключения к Telegram "
+                        f"(попытка {attempt}/{max_retries}): {e}"
                     )
                     break
 
@@ -180,14 +201,24 @@ class TelegramNotifier:
                     pass
 
             if attempt < max_retries:
-                delay = 5 * attempt  # 5с, 10с, 15с, 20с
-                logger.info(f"Повторная попытка через {delay}с...")
+                delay = base_delay * attempt  # 8с, 16с, 24с, 32с, ...
+                logger.info(
+                    f"Повторная попытка через {delay}с "
+                    f"(сброс сессии и пересоздание Bot)..."
+                )
                 await asyncio.sleep(delay)
 
         if self._online:
             await self.notify_all("🟢 Торговый бот запущен")
         else:
-            logger.warning("Telegram-бот не смог подключиться, уведомления отключены")
+            logger.error(
+                f"Telegram-бот не смог подключиться после {max_retries} попыток. "
+                f"Проверь:\n"
+                f"  1) Нет ли другого экземпляра бота с этим же токеном\n"
+                f"  2) Не запущен ли второй docker-контейнер: docker ps\n"
+                f"  3) Не запущена ли локальная копия: ps aux | grep python\n"
+                f"  4) Попробуй: docker-compose down && docker-compose up -d"
+            )
 
     async def stop(self) -> None:
         """Остановить бота."""
