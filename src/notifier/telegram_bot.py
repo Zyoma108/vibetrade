@@ -130,59 +130,28 @@ class TelegramNotifier:
         return self._online
 
     async def start(self) -> None:
-        """Запустить polling бота (с retry при конфликте)."""
+        """Запустить polling бота."""
         self._start_time = datetime.now()
+        self._polling_task = asyncio.create_task(self._dp.start_polling(self._bot))
 
-        max_retries = 5
-        for attempt in range(1, max_retries + 1):
-            self._polling_task = asyncio.create_task(
-                self._dp.start_polling(
-                    self._bot,
-                    drop_pending_updates=True,
-                    handle_signals=False,
-                )
-            )
-
-            # Ждём успешного коннекта или фейла
-            connected = False
-            for _ in range(15):  # 15 × 2с = 30с макс ожидания
-                await asyncio.sleep(2)
-                if self._polling_task.done():
-                    exc = self._polling_task.exception()
-                    if exc:
-                        logger.warning(
-                            f"Telegram polling не запустился (попытка {attempt}/{max_retries}): {exc}"
-                        )
-                    break
-                try:
-                    await self._bot.get_me()
-                    self._online = True
-                    connected = True
-                    logger.info("Telegram-бот запущен")
-                    break
-                except TelegramNetworkError:
-                    logger.warning("Telegram API недоступен, повторная попытка...")
-                except Exception as e:
-                    logger.warning(
-                        f"Ошибка подключения к Telegram (попытка {attempt}/{max_retries}): {e}"
-                    )
-                    break
-
-            if connected:
+        # Ждём успешного коннекта или первого фейла
+        for _ in range(30):
+            await asyncio.sleep(2)
+            if self._polling_task.done():
+                exc = self._polling_task.exception()
+                if exc:
+                    logger.warning(f"Telegram polling не запустился: {exc}")
                 break
-
-            # Отменяем неудачную попытку перед retry
-            if self._polling_task and not self._polling_task.done():
-                self._polling_task.cancel()
-                try:
-                    await self._polling_task
-                except (asyncio.CancelledError, Exception):
-                    pass
-
-            if attempt < max_retries:
-                delay = 5 * attempt  # 5с, 10с, 15с, 20с
-                logger.info(f"Повторная попытка через {delay}с...")
-                await asyncio.sleep(delay)
+            try:
+                await self._bot.get_me()
+                self._online = True
+                logger.info("Telegram-бот запущен")
+                break
+            except TelegramNetworkError:
+                logger.warning("Telegram API недоступен, повторная попытка...")
+            except Exception as e:
+                logger.warning(f"Ошибка подключения к Telegram: {e}")
+                break
 
         if self._online:
             await self.notify_all("🟢 Торговый бот запущен")
