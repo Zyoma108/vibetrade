@@ -3,12 +3,13 @@ import logging
 import signal
 from datetime import datetime, timezone
 
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.analytics.base import BaseDetector
+from src.analytics.data_provider import DataProvider
 from src.analytics.detector import SetupDetector
 from src.analytics.price_surge import PriceSurgeDetector
+from src.analytics.price_surge_service import PriceSurgeSignalProcessor
 from src.collectors.market_data import MarketDataCollector
 from src.config import Settings
 from src.connectors.exchange import ExchangeConnector
@@ -16,7 +17,7 @@ from src.executor.position_manager import PositionManager
 from src.notifier.telegram_bot import TelegramNotifier
 from src.storage.database import async_session, init_db
 from src.storage.stats import trade_stats
-from src.storage.models import PriceSurgeSignal, Signal as SignalModel
+from src.storage.models import Signal as SignalModel
 
 logger = logging.getLogger(__name__)
 
@@ -31,9 +32,10 @@ class Application:
         self._trading_connector: ExchangeConnector | None = None
         self._collector: MarketDataCollector | None = None
         self._detector: BaseDetector | None = None
-        self._detector_price_surge: BaseDetector | None = None
+        self._detector_price_surge: PriceSurgeDetector | None = None
         self._notifier: TelegramNotifier | None = None
         self._notifier_price_surge: TelegramNotifier | None = None
+        self._ps_processor: PriceSurgeSignalProcessor | None = None
         self._positions: PositionManager | None = None
 
     async def start(self) -> None:
@@ -141,6 +143,15 @@ class Application:
             self._notifier_price_surge = TelegramNotifier(self.settings.telegram_price_surge)
             await self._notifier_price_surge.start()
             logger.info("Telegram-бот Price Surge запущен")
+
+            if self._detector_price_surge:
+                self._ps_processor = PriceSurgeSignalProcessor(
+                    config=self.settings.strategy_price_surge,
+                    detector=self._detector_price_surge,
+                    notifier=self._notifier_price_surge,
+                    timeframe=self.settings.collectors.timeframe,
+                )
+                logger.info("PriceSurgeSignalProcessor инициализирован")
         elif self.settings.strategy_price_surge:
             logger.warning("Telegram Price Surge не настроен, сигналы strategy_price_surge не будут отправлены")
 
@@ -201,6 +212,15 @@ class Application:
     async def _on_collect_cycle_done(self, session: AsyncSession) -> None:
         """Вызывается после каждого цикла сбора данных."""
 
+        # Создаём общий DataProvider на цикл — оба детектора кешируют данные в нём
+        dp = DataProvider()
+        if self._detector:
+            self._detector.data_provider = dp
+        if self._detector_price_surge:
+            self._detector_price_surge.data_provider = dp
+        if self._ps_processor:
+            self._ps_processor.data_provider = dp
+
         # 1. Синхронизация позиций с биржей (каждый цикл, перед аналитикой)
         if self._positions:
             closed = await self._positions.update_positions(session)
@@ -234,91 +254,8 @@ class Application:
                     await self._notifier.send_signal(sig, status=status)
 
         # 3. Аналитика — price surge детектор (только сигналы)
-        if self._detector_price_surge and self._notifier_price_surge:
-            from datetime import timedelta as _timedelta
-            from sqlalchemy import desc as _desc, func as _func
-            from src.storage.models import Candle as _Candle, OpenInterest as _OI
-
-            ps_cfg = self.settings.strategy_price_surge
-            interval = ps_cfg.price_surge_minutes
-            window_bars = self._detector_price_surge._window_bars
-            signals_ps = await self._detector_price_surge.analyze(session)
-
-            for sig in signals_ps:
-                # Запрашиваем свечи для получения точных цен
-                c_rows = (await session.execute(
-                    select(_Candle.open, _Candle.close, _Candle.timestamp)
-                    .where(_Candle.symbol == sig.symbol)
-                    .order_by(_desc(_Candle.timestamp))
-                    .limit(window_bars + 1)
-                )).all()
-                if len(c_rows) < window_bars + 1:
-                    continue
-                c_rows = list(reversed(c_rows))
-                open_p = c_rows[0][0]
-                close_p = c_rows[-1][1]
-                change_pct = (close_p / open_p - 1) * 100 if open_p > 0 else 0
-
-                # Сохраняем в БД
-                ps_signal = PriceSurgeSignal(
-                    timestamp=datetime.now(tz=timezone.utc),
-                    symbol=sig.symbol,
-                    change_pct=change_pct,
-                    interval_minutes=interval,
-                )
-                session.add(ps_signal)
-
-                # Сигналов по тикеру за сутки
-                cutoff = datetime.now(tz=timezone.utc) - _timedelta(hours=24)
-                day_count = await session.scalar(
-                    select(_func.count()).select_from(PriceSurgeSignal).where(
-                        PriceSurgeSignal.symbol == sig.symbol,
-                        PriceSurgeSignal.timestamp >= cutoff,
-                    )
-                ) or 0
-
-                # Рост за час
-                tf = self.settings.collectors.timeframe
-                if tf.endswith("m"):
-                    tf_min = int(tf[:-1])
-                elif tf.endswith("h"):
-                    tf_min = int(tf[:-1]) * 60
-                else:
-                    tf_min = 3
-                hour_bars = max(60 // tf_min, 1)
-                hour_rows = (await session.execute(
-                    select(_Candle.open, _Candle.close)
-                    .where(_Candle.symbol == sig.symbol)
-                    .order_by(_desc(_Candle.timestamp))
-                    .limit(hour_bars + 1)
-                )).all()
-                hour_change = 0.0
-                if len(hour_rows) >= hour_bars + 1:
-                    hour_change = (hour_rows[0][1] / hour_rows[-1][0] - 1) * 100
-
-                # Изменение OI (последние 3 точки)
-                oi_vals = (await session.execute(
-                    select(_OI.value).where(_OI.symbol == sig.symbol)
-                    .order_by(_desc(_OI.timestamp)).limit(3)
-                )).scalars().all()
-                oi_change = 0.0
-                if len(oi_vals) >= 2:
-                    oi_change = (oi_vals[0] / oi_vals[-1] - 1) * 100
-
-                # Ссылка CoinGlass (ByBit — торгуемая биржа)
-                pair = sig.symbol.split("/")[0] + "USDT"
-                link = f"https://www.coinglass.com/tv/Bybit_{pair}"
-
-                text = (
-                    f'📈 <b><a href="{link}">{sig.symbol}</a></b> '
-                    f'+{change_pct:.1f}% за {interval} мин\n\n'
-                    f'Рост за {interval} мин: +{change_pct:.1f}%  |  '
-                    f'${open_p:.6f} → ${close_p:.6f}\n'
-                    f'Рост за 1 час: {hour_change:+.1f}%\n'
-                    f'Изменение OI: {oi_change:+.1f}%\n\n'
-                    f'Сигналов за сутки: {day_count}'
-                )
-                await self._notifier_price_surge.notify_all(text)
+        if self._ps_processor:
+            await self._ps_processor.process_and_notify(session)
 
         await session.commit()
 

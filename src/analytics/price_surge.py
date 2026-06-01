@@ -8,11 +8,11 @@
 import logging
 
 import numpy as np
-from sqlalchemy import desc, select
 
 from src.analytics.base import BaseDetector, Signal
+from src.analytics.data_provider import DataProvider
+from src.analytics.utils import timeframe_to_minutes
 from src.config import StrategyConfig
-from src.storage.models import Candle
 
 logger = logging.getLogger(__name__)
 
@@ -20,30 +20,41 @@ logger = logging.getLogger(__name__)
 class PriceSurgeDetector(BaseDetector):
     """Детектор пампов: чистое движение цены за промежуток времени."""
 
-    def __init__(self, config: StrategyConfig, timeframe: str = "3m"):
+    def __init__(
+        self,
+        config: StrategyConfig,
+        timeframe: str = "3m",
+        data_provider: DataProvider | None = None,
+    ):
         self.config = config
         self._exclude_coins = set(c.upper() for c in config.exclude_coins)
-        # Сколько свечей в промежутке
-        if timeframe.endswith("m"):
-            tf_min = int(timeframe[:-1])
-        elif timeframe.endswith("h"):
-            tf_min = int(timeframe[:-1]) * 60
-        else:
-            tf_min = 3
-        self._window_bars = max(config.price_surge_minutes // tf_min, 1)
+        self._window_bars = max(
+            config.price_surge_minutes // timeframe_to_minutes(timeframe), 1
+        )
+        self._dp = data_provider or DataProvider()
+
+    @property
+    def data_provider(self) -> DataProvider:
+        return self._dp
+
+    @data_provider.setter
+    def data_provider(self, dp: DataProvider) -> None:
+        self._dp = dp
 
     async def analyze(self, session) -> list[Signal]:
         if self.config.price_surge_pct <= 0:
             return []
 
-        symbols = await self._get_active_symbols(session)
+        symbols = await self._dp.get_active_symbols(session, self._exclude_coins)
         if not symbols:
             return []
 
         signals = []
         for exchange, symbol in symbols:
             try:
-                candles = await self._load_candles(session, exchange, symbol)
+                candles = await self._dp.load_candles(
+                    session, exchange, symbol, self._window_bars + 5
+                )
                 if len(candles) < self._window_bars + 1:
                     continue
 
@@ -72,47 +83,3 @@ class PriceSurgeDetector(BaseDetector):
                 logger.exception(f"Ошибка анализа {exchange}:{symbol}")
 
         return signals
-
-    async def _get_active_symbols(self, session) -> list[tuple[str, str]]:
-        """Все пары (exchange, symbol) с данными."""
-        from src.storage.models import Ticker
-
-        # Символы, доступные на ByBit (из тикеров)
-        bybit_stmt = (
-            select(Ticker.symbol)
-            .where(Ticker.exchange == "bybit")
-            .distinct()
-        )
-        bybit_result = await session.execute(bybit_stmt)
-        bybit_symbols = set(bybit_result.scalars().all())
-
-        stmt = (
-            select(Candle.exchange, Candle.symbol)
-            .distinct()
-            .order_by(Candle.exchange, Candle.symbol)
-        )
-        result = await session.execute(stmt)
-        return [
-            (ex, sym)
-            for ex, sym in result.all()
-            if sym in bybit_symbols
-            and sym.split("/")[0].upper() not in self._exclude_coins
-        ]
-
-    async def _load_candles(self, session, exchange: str, symbol: str) -> list[dict]:
-        limit = self._window_bars + 5
-        stmt = (
-            select(Candle)
-            .where(Candle.exchange == exchange, Candle.symbol == symbol)
-            .order_by(desc(Candle.timestamp))
-            .limit(limit)
-        )
-        result = await session.execute(stmt)
-        rows = result.scalars().all()
-
-        return [
-            {"open": r.open, "high": r.high, "low": r.low,
-             "close": r.close, "volume": r.volume}
-            for r in reversed(rows)
-            if r.volume > 0
-        ]

@@ -1,36 +1,39 @@
 import logging
 
 import numpy as np
-from sqlalchemy import desc, select
 
 from src.analytics.base import BaseDetector, Signal
+from src.analytics.data_provider import DataProvider
+from src.analytics.utils import OI_TREND_BARS, calculate_oi_slope_pct, timeframe_to_minutes
 from src.config import StrategyConfig
-from src.storage.models import Candle, OpenInterest
 
 logger = logging.getLogger(__name__)
-
-# Фиксированные параметры (редко меняются — не в конфиге)
-SMOOTH_MAX_RATIO = 5.0   # макс. отношение макс/медиана объёма в окне (отсекает спайки)
-OI_TREND_BARS = 3        # сколько последних точек OI для проверки тренда
 
 
 class SetupDetector(BaseDetector):
     """Детектор сетапов: плавный рост объёмов + OI → начало пампа."""
 
-    def __init__(self, config: StrategyConfig, timeframe: str = "3m"):
+    def __init__(
+        self,
+        config: StrategyConfig,
+        timeframe: str = "3m",
+        data_provider: DataProvider | None = None,
+    ):
         self.config = config
         self._exclude_coins = set(c.upper() for c in config.exclude_coins)
-        # Количество свечей в часе
-        if timeframe.endswith("m"):
-            tf_min = int(timeframe[:-1])
-        elif timeframe.endswith("h"):
-            tf_min = int(timeframe[:-1]) * 60
-        else:
-            tf_min = 3
-        self._hour_bars = max(60 // tf_min, 1)
+        self._hour_bars = max(60 // timeframe_to_minutes(timeframe), 1)
+        self._dp = data_provider or DataProvider()
+
+    @property
+    def data_provider(self) -> DataProvider:
+        return self._dp
+
+    @data_provider.setter
+    def data_provider(self, dp: DataProvider) -> None:
+        self._dp = dp
 
     async def analyze(self, session) -> list[Signal]:
-        symbols = await self._get_active_symbols(session)
+        symbols = await self._dp.get_active_symbols(session, self._exclude_coins)
         if not symbols:
             return []
 
@@ -38,17 +41,18 @@ class SetupDetector(BaseDetector):
         seen = set()
         for exchange, symbol in symbols:
             try:
-                candles = await self._load_candles(session, exchange, symbol)
+                limit = self.config.baseline_bars + self.config.sustain_bars + 10
+                candles = await self._dp.load_candles(session, exchange, symbol, limit)
                 if len(candles) < self.config.baseline_bars + self.config.sustain_bars:
                     continue
 
-                if not self._check_volume_pattern(candles):
+                if not self.check_volume_pattern(candles):
                     continue
 
                 if not await self._check_oi_trend(session, exchange, symbol):
                     continue
 
-                direction = self._check_price_trend(candles)
+                direction = self.check_price_trend(candles)
                 if direction is None:
                     continue
 
@@ -67,10 +71,10 @@ class SetupDetector(BaseDetector):
         return signals
 
     # ------------------------------------------------------------------
-    # Volume pattern
+    # Volume pattern (public — used by backtest)
     # ------------------------------------------------------------------
 
-    def _check_volume_pattern(self, candles: list[dict]) -> bool:
+    def check_volume_pattern(self, candles: list[dict]) -> bool:
         """Проверить плавный рост объёма над базовым уровнем."""
         volumes = np.array([c["volume"] for c in candles])
 
@@ -81,7 +85,9 @@ class SetupDetector(BaseDetector):
         # Фильтр низколиквидных монет: объём в USDT ниже порога
         min_base_usdt = self.config.min_baseline_volume_usdt
         if min_base_usdt > 0:
-            baseline_closes = np.array([c["close"] for c in candles[:self.config.baseline_bars]])
+            baseline_closes = np.array(
+                [c["close"] for c in candles[:self.config.baseline_bars]]
+            )
             median_price = np.median(baseline_closes)
             baseline_usdt = baseline * median_price
             if baseline_usdt < min_base_usdt:
@@ -98,7 +104,7 @@ class SetupDetector(BaseDetector):
         # Проверка на плавность: нет одиночного спайка
         recent_median = np.median(recent)
         if recent_median > 0:
-            if np.max(recent) / recent_median > SMOOTH_MAX_RATIO:
+            if np.max(recent) / recent_median > self.config.smooth_max_ratio:
                 return False
 
             # Защита от свечи-выброса (distribution/climax):
@@ -123,40 +129,27 @@ class SetupDetector(BaseDetector):
     # Open Interest trend
     # ------------------------------------------------------------------
 
-    async def _check_oi_trend(self, session, exchange: str, symbol: str) -> bool:
+    async def _check_oi_trend(
+        self, session, exchange: str, symbol: str
+    ) -> bool:
         """Проверить, что OI растёт (приток денег, а не перекладка)."""
-        stmt = (
-            select(OpenInterest)
-            .where(
-                OpenInterest.exchange == exchange,
-                OpenInterest.symbol == symbol,
-            )
-            .order_by(desc(OpenInterest.timestamp))
-            .limit(OI_TREND_BARS)
+        oi_values = await self._dp.load_oi_values(
+            session, exchange, symbol, OI_TREND_BARS
         )
-        result = await session.execute(stmt)
-        rows = result.scalars().all()
-
-        if len(rows) < OI_TREND_BARS:
+        if oi_values is None:
             return False
 
-        values = np.array([r.value for r in reversed(rows)])
-
-        x = np.arange(len(values))
-        slope = np.polyfit(x, values, 1)[0]
-
-        mean_oi = np.mean(values)
-        if mean_oi <= 0:
+        slope_pct = calculate_oi_slope_pct(np.array(oi_values))
+        if slope_pct is None:
             return False
 
-        slope_pct = (slope * len(values)) / mean_oi * 100
         return slope_pct >= self.config.oi_slope_min_pct
 
     # ------------------------------------------------------------------
-    # Price direction
+    # Price direction (public — used by backtest)
     # ------------------------------------------------------------------
 
-    def _check_price_trend(self, candles: list[dict]) -> str | None:
+    def check_price_trend(self, candles: list[dict]) -> str | None:
         """Только лонг: цена должна вырасти, но не слишком сильно
         (фильтр «памп уже состоялся»).
         Также защита от рагпулов: если за последний час падение > N%."""
@@ -190,67 +183,12 @@ class SetupDetector(BaseDetector):
 
         max_growth = self.config.price_growth_max_pct
         if max_growth > 0 and change_pct > max_growth:
-            logger.debug(f"Сигнал пропущен: рост {change_pct:.1f}% > лимита {max_growth}%")
+            logger.debug(
+                f"Сигнал пропущен: рост {change_pct:.1f}% > лимита {max_growth}%"
+            )
             return None
 
         return "long"
-
-    # ------------------------------------------------------------------
-    # Data loading
-    # ------------------------------------------------------------------
-
-    async def _get_active_symbols(self, session) -> list[tuple[str, str]]:
-        """Все пары (exchange, symbol), которые торгуются на ByBit."""
-        from src.storage.models import Ticker
-
-        # Символы, доступные на ByBit (из тикеров, не свечей)
-        bybit_syms_stmt = (
-            select(Ticker.symbol)
-            .where(Ticker.exchange == "bybit")
-            .distinct()
-        )
-        bybit_result = await session.execute(bybit_syms_stmt)
-        bybit_symbols = set(bybit_result.scalars().all())
-
-        # Все уникальные пары биржа+символ (из свечей)
-        stmt = (
-            select(Candle.exchange, Candle.symbol)
-            .distinct()
-            .order_by(Candle.exchange, Candle.symbol)
-        )
-        result = await session.execute(stmt)
-        return [
-            (ex, sym)
-            for ex, sym in result.all()
-            if sym in bybit_symbols
-            and sym.split("/")[0].upper() not in self._exclude_coins
-        ]
-
-    async def _load_candles(
-        self, session, exchange: str, symbol: str
-    ) -> list[dict]:
-        """Загрузить последние свечи для пары биржа+символ."""
-        limit = self.config.baseline_bars + self.config.sustain_bars + 10
-        stmt = (
-            select(Candle)
-            .where(Candle.exchange == exchange, Candle.symbol == symbol)
-            .order_by(desc(Candle.timestamp))
-            .limit(limit)
-        )
-        result = await session.execute(stmt)
-        rows = result.scalars().all()
-
-        return [
-            {
-                "open": r.open,
-                "high": r.high,
-                "low": r.low,
-                "close": r.close,
-                "volume": r.volume,
-            }
-            for r in reversed(rows)  # хронологический порядок
-            if r.volume > 0  # пропускаем незакрытые свечи (volume=0)
-        ]
 
     # ------------------------------------------------------------------
     # Signal
@@ -261,7 +199,9 @@ class SetupDetector(BaseDetector):
     ) -> Signal:
         sustain = self.config.sustain_bars
         volumes = [c["volume"] for c in candles[-sustain:]]
-        baseline = np.median([c["volume"] for c in candles[:self.config.baseline_bars]])
+        baseline = np.median(
+            [c["volume"] for c in candles[:self.config.baseline_bars]]
+        )
         surge = np.mean(volumes) / baseline if baseline > 0 else 0
 
         return Signal(

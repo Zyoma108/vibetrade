@@ -55,6 +55,9 @@ class StrategyConfig(BaseModel):
     dump_volume_mult: float = Field(
         default=3.0, description="Макс. отношение объёма последней свечи к медиане остальных свечей sustain-окна (защита от свечей-выбросов, 0 = выкл)"
     )
+    smooth_max_ratio: float = Field(
+        default=5.0, description="Макс. отношение макс/медиана объёма в окне (отсекает спайки, уменьшить для более жёсткого фильтра)"
+    )
     # Параметры для PriceSurgeDetector (strategy_price_surge)
     price_surge_pct: float = Field(
         default=0.0, description="Рост цены для сигнала пампа, % (0 = детектор выключен)"

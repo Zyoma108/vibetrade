@@ -16,7 +16,8 @@ import numpy as np
 from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from src.analytics.detector import OI_TREND_BARS, SetupDetector
+from src.analytics.detector import SetupDetector
+from src.analytics.utils import OI_TREND_BARS, calculate_oi_slope_pct
 from src.config import Settings
 from src.storage.models import Candle, OpenInterest
 
@@ -251,9 +252,9 @@ async def run_backtest(
                 continue
 
             # Volume + price checks
-            if not detector._check_volume_pattern(candle_slice):
+            if not detector.check_volume_pattern(candle_slice):
                 continue
-            direction = detector._check_price_trend(candle_slice)
+            direction = detector.check_price_trend(candle_slice)
             if direction != "long":
                 continue
 
@@ -269,14 +270,10 @@ async def run_backtest(
                     if len(oi_points) < OI_TREND_BARS:
                         continue
                     oi_vals = np.array(oi_points[-OI_TREND_BARS:])
-                    x = np.arange(len(oi_vals))
-                    slope = np.polyfit(x, oi_vals, 1)[0]
-                    mean_oi = np.mean(oi_vals)
-                    if mean_oi > 0:
-                        slope_pct = (slope * len(oi_vals)) / mean_oi * 100
-                        if slope_pct >= detector.config.oi_slope_min_pct:
-                            oi_pass = True
-                            break
+                    slope_pct = calculate_oi_slope_pct(oi_vals)
+                    if slope_pct is not None and slope_pct >= detector.config.oi_slope_min_pct:
+                        oi_pass = True
+                        break
                 if not oi_pass:
                     continue
 
