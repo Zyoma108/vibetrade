@@ -140,7 +140,7 @@ class MarketContext:
             "",
             f"{st_emoji} <b>OTHERS Supertrend</b> (1h, "
             f"{self.config.supertrend_atr_period},{self.config.supertrend_multiplier})",
-            f"OTHERS: {self._others_value:,.0f} | 1h: {others_s}",
+            f"OTHERS: ${self._others_value / 1e9:.2f}B | 1h: {others_s}",
             f"BTC 1h: {btcs}",
         ]
 
@@ -209,7 +209,7 @@ class MarketContext:
                 f"MarketContext: regime={self._regime} "
                 f"BTC_1h={self._btc_change_1h:+.1f}% "
                 f"ST={self._supertrend_color} "
-                f"OTHERS={self._others_value:,.0f} "
+                f"OTHERS=${self._others_value / 1e9:.2f}B "
                 f"bars={len(self._bars)}"
             )
 
