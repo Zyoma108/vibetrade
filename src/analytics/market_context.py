@@ -10,6 +10,7 @@ Determines the market regime (risk_on / cautious / risk_off) to:
 - Notify on trend changes via Telegram
 """
 
+import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 
@@ -255,11 +256,12 @@ class MarketContext:
             if prev > 0:
                 self._btc_change_1h = (current / prev - 1) * 100
 
-        # Fetch 1h candles for top altcoins and build proxy
+        # Fetch 1h candles for top altcoins (concurrent, limited by connector semaphore)
+        tasks = [self._fetch_1h_candles(s) for s in top_alts]
+        results = await asyncio.gather(*tasks)
         all_1h: dict[str, list[dict]] = {}
-        for symbol in top_alts:
-            candles = await self._fetch_1h_candles(symbol)
-            if candles:
+        for symbol, candles in zip(top_alts, results):
+            if candles is not None:
                 all_1h[symbol] = candles
 
         if not all_1h:
@@ -288,11 +290,14 @@ class MarketContext:
         """Fetch 1h OHLCV candles from the exchange. Returns chronological list."""
         try:
             raw = await self._connector.fetch_ohlcv(symbol, "1h", limit=_BARS_TO_FETCH)
-            if not raw or len(raw) < 2:
+            if not raw:
+                return None
+            if len(raw) < 2:
+                logger.debug(f"MarketContext: {symbol} — только {len(raw)} свечей 1h")
                 return None
             return raw  # Already chronological from connector
-        except Exception:
-            logger.debug(f"MarketContext: не удалось получить 1h свечи для {symbol}")
+        except Exception as e:
+            logger.warning(f"MarketContext: {symbol} — ошибка 1h свечей: {e}")
             return None
 
     # ------------------------------------------------------------------
