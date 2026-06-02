@@ -26,8 +26,11 @@ src/
 │   └── market_data.py         # MarketDataCollector — периодический сбор тикеров/свечей/OI
 ├── analytics/
 │   ├── base.py                # Signal (dataclass), BaseDetector (ABC)
+│   ├── utils.py               # Общие утилиты: timeframe_to_minutes, calculate_oi_slope_pct
+│   ├── data_provider.py       # DataProvider — единый слой загрузки данных с in-memory кешем
 │   ├── detector.py            # SetupDetector — основная стратегия (объём + OI + цена)
-│   └── price_surge.py         # PriceSurgeDetector — пампинг по чистой цене (только сигналы)
+│   ├── price_surge.py         # PriceSurgeDetector — пампинг по чистой цене (только сигналы)
+│   └── price_surge_service.py # PriceSurgeSignalProcessor — обогащение и отправка сигналов пампа
 ├── executor/
 │   └── position_manager.py    # PositionManager — открытие/закрытие/трекинг позиций
 ├── notifier/
@@ -82,12 +85,14 @@ Application.start()
 
 **Обработка после цикла** (`Application._on_collect_cycle_done`):
 
+0. Создаётся **общий `DataProvider`** на цикл — внедряется в оба детектора и `PriceSurgeSignalProcessor`
+   - Кеширует свечи и OI в памяти → один запрос к БД на символ, даже если оба детектора его анализируют
 1. `PositionManager.update_positions()` — проверка TP/SL/времени
 2. `SetupDetector.analyze()` → для каждого сигнала:
    - Сохранить Signal в БД
    - `PositionManager.open_position()` — попытка открыть позицию
    - `TelegramNotifier.send_signal()` — сигнал в Telegram с реальным статусом
-3. `PriceSurgeDetector.analyze()` → для каждого сигнала:
+3. `PriceSurgeSignalProcessor.process_and_notify()` → для каждого сигнала пампа:
    - Запросить цены/OI/часовой рост
    - Сохранить PriceSurgeSignal в БД
    - Отправить через отдельный Telegram-бот
@@ -98,19 +103,23 @@ Application.start()
 
 Алгоритм детекции (направление — только long):
 
-1. **Выборка символов** — все монеты, у которых есть свечи и тикер ByBit
-2. **Проверка объёма** (`_check_volume_pattern`):
+1. **Выборка символов** — через `DataProvider.get_active_symbols()`: все монеты с тикером ByBit и свечами
+2. **Проверка объёма** (`check_volume_pattern`, публичный метод):
    - Медиана объёма за `baseline_bars` свечей = норма
    - Если `min_baseline_volume_usdt > 0` → проверка медианы объёма × цена закрытия ≥ порог (фильтр низколиквидных)
    - Все `sustain_bars` последних свечей должны иметь объём ≥ `норма × volume_surge_mult`
-   - Smoothness-фильтр: `max / median_recent ≤ 5.0` (отсекает одиночные выбросы)
+   - Smoothness-фильтр: `max / median_recent ≤ smooth_max_ratio` (отсекает одиночные выбросы)
+   - Dump-фильтр: объём последней свечи ≤ медиана остальных sustain-свечей × `dump_volume_mult`
 3. **Проверка OI** (`_check_oi_trend`):
-   - 3 последних записи OI → линейная регрессия через `np.polyfit`
+   - 3 последних записи OI → `calculate_oi_slope_pct()` из `utils.py`
    - Наклон в % от среднего OI ≥ `oi_slope_min_pct` (растущий открытый интерес = приток капитала)
-4. **Проверка цены** (`_check_price_trend`):
-   - Рост за sustain-окно: `price_growth_min_pct ≤ рост ≤ price_growth_max_pct`
+4. **Проверка цены** (`check_price_trend`, публичный метод):
+   - Рост за sustain-окно: `price_growth_min_pct ≤ рост`
+   - **Exhaustion filter**: если рост > `exhaustion_gain_pct` И последняя свеча закрылась в верхних `exhaustion_pos_ratio` диапазона → сигнал блокируется (истощение покупателей)
+   - **Wick rejection filter** (опционально, `wick_rejection_ratio > 0`): если верхний фитиль > порога И объём падает И surge < `wick_rejection_min_surge` → сигнал блокируется (разворотная свеча)
+   - **Страховочный потолок**: рост > `price_growth_max_pct` → блок (экстремальный памп)
    - Защита от рагпулов: падение за час ≤ `max_hourly_drop_pct`
-5. **Уверенность** = `min(surge_multiple × 20, 95)`, где surge_multiple = текущая_цена / первая_цена_окна
+5. **Уверенность** = `min(surge_multiple × 20, 95)`, где surge_multiple = средний_объём_окна / медиана_базового
 
 **Ключевые параметры** (`config.yaml → strategy`):
 
@@ -121,7 +130,13 @@ Application.start()
 | `baseline_bars` | 70 | База для расчёта нормального объёма |
 | `oi_slope_min_pct` | 1.0% | Минимальный наклон OI |
 | `price_growth_min_pct` | 1.0% | Мин. рост цены за sustain-окно |
-| `price_growth_max_pct` | 20.0% | Макс. рост (фильтр «уже поздно») |
+| `price_growth_max_pct` | 12.0% | Страховочный потолок роста (0 = выкл) |
+| `exhaustion_gain_pct` | 5.0% | Порог роста для exhaustion-фильтра |
+| `exhaustion_pos_ratio` | 0.7 | Позиция закрытия свечи (0=low, 1=high) |
+| `wick_rejection_ratio` | 0.8 | Порог верхнего фитиля (0 = фильтр выключен) |
+| `wick_rejection_min_surge` | 100.0 | Мин. surge для обхода wick-фильтра |
+| `smooth_max_ratio` | 5.0 | Макс. отношение макс/медиана объёма |
+| `dump_volume_mult` | 3.0 | Защита от свечей-выбросов |
 | `max_hourly_drop_pct` | 10.0% | Защита от рагпулов |
 
 ### Вторая стратегия (`PriceSurgeDetector`) — чистый пампинг
@@ -130,7 +145,7 @@ Application.start()
 
 Алгоритм: `change_pct = (close[-1] / open[0] - 1) × 100` за окно `price_surge_minutes` минут. Если `change_pct ≥ price_surge_pct` → сигнал.
 
-В `Application._on_collect_cycle_done` для каждого сигнала дополнительно вычисляется:
+Обогащение сигналов вынесено в `PriceSurgeSignalProcessor.process_and_notify()`:
 - Точные цены открытия/закрытия за окно
 - Рост за 1 час
 - Изменение OI за 3 точки
@@ -213,7 +228,7 @@ SQLite в WAL-режиме (`data/trading_bot.db`). Миграции: Alembic + 
 - **Чёрный список символов** — если ByBit возвращает «sign the required agreement», символ добавляется в `_banned_symbols` до перезапуска.
 - **Порядок данных в детекторе** — свечи загружаются из БД в хронологическом порядке. Детектор ожидает, что они упорядочены по времени.
 - **OI сохраняется только при изменении** — это экономит место, но означает что `_check_oi_trend` работает с тремя точками изменения, а не с тремя последовательными свечами.
-- **Backtest привязан к приватным методам детектора** — `runner.py` вызывает `_check_volume_pattern` и `_check_price_trend` напрямую, а не через публичный `analyze()`.
+- **DataProvider кеширует на один цикл** — создаётся новый экземпляр в `_on_collect_cycle_done`, внедряется в оба детектора и processor. Кеш живёт до конца цикла, затем объект выбрасывается. Никакого TTL, никаких устаревших данных.
 - **Двойной механизм миграций** — Alembic для структуры + `ALTER TABLE` в `init_db()` для добавления колонок. При больших изменениях схемы лучше использовать только Alembic.
 
 ## Конфигурация и секреты
@@ -251,7 +266,8 @@ make test
 
 ## Ключевые точки расширения
 
-- **Новая стратегия** — реализовать `BaseDetector.analyze()`, добавить детектор в `Application.start()`
+- **Новая стратегия** — реализовать `BaseDetector.analyze()`, добавить детектор в `Application.start()`. Использовать `DataProvider` для загрузки данных (кеш на цикл).
+- **Новый фильтр в детекторе** — добавить метод в `SetupDetector`, вызвать из `check_price_trend` или `check_volume_pattern`. Добавить параметры в `StrategyConfig` с дефолтом 0 (= выкл).
+- **Новый сервис-обработчик** — по аналогии с `PriceSurgeSignalProcessor`: инкапсулирует обогащение сигналов, persistence и нотификации.
 - **Новая биржа** — добавить `ExchangeConfig` в `config.yaml`, ccxt поддерживает её из коробки
-- **Новый тип сигнала** — расширить `Signal.dataclass`
 - **Нотификации в другой канал** — реализовать аналог `TelegramNotifier` с тем же интерфейсом
