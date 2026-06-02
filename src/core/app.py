@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.analytics.base import BaseDetector
 from src.analytics.data_provider import DataProvider
 from src.analytics.detector import SetupDetector
+from src.analytics.market_context import MarketContext
 from src.analytics.price_surge import PriceSurgeDetector
 from src.analytics.price_surge_service import PriceSurgeSignalProcessor
 from src.collectors.market_data import MarketDataCollector
@@ -33,6 +34,7 @@ class Application:
         self._collector: MarketDataCollector | None = None
         self._detector: BaseDetector | None = None
         self._detector_price_surge: PriceSurgeDetector | None = None
+        self._market_ctx: MarketContext | None = None
         self._notifier: TelegramNotifier | None = None
         self._notifier_price_surge: TelegramNotifier | None = None
         self._ps_processor: PriceSurgeSignalProcessor | None = None
@@ -89,6 +91,10 @@ class Application:
                 )
             )
 
+        # Рыночный контекст (BTC + OTHERS Supertrend)
+        self._market_ctx = MarketContext(self.settings.market_context)
+        logger.info("MarketContext инициализирован")
+
         # Уведомления
         if self.settings.telegram.bot_token and self.settings.telegram.chat_ids:
             self._notifier = TelegramNotifier(self.settings.telegram)
@@ -135,6 +141,14 @@ class Application:
                 return "\n".join(lines)
 
             self._notifier.set_positions_provider(positions_provider)
+
+            # Провайдер тренда
+            async def trend_provider() -> str:
+                if not self._market_ctx:
+                    return "Рыночный контекст недоступен"
+                return self._market_ctx.trend_summary()
+
+            self._notifier.set_trend_provider(trend_provider)
         else:
             logger.warning("Telegram не настроен, уведомления отключены")
 
@@ -220,6 +234,24 @@ class Application:
             self._detector_price_surge.data_provider = dp
         if self._ps_processor:
             self._ps_processor.data_provider = dp
+
+        # 0. Обновление рыночного контекста (BTC + OTHERS Supertrend)
+        if self._market_ctx:
+            await self._market_ctx.update(session)
+
+            # Уведомление о смене тренда
+            if self._market_ctx.regime_changed and self._notifier:
+                await self._notifier.send_message(
+                    "🔄 <b>Смена рыночного режима!</b>\n\n"
+                    + self._market_ctx.trend_summary()
+                )
+
+        # Передаём контекст в PositionManager
+        if self._positions and self._market_ctx:
+            self._positions.market_regime = self._market_ctx.regime
+            self._positions.position_size_mult = (
+                self._market_ctx.position_size_multiplier()
+            )
 
         # 1. Синхронизация позиций с биржей (каждый цикл, перед аналитикой)
         if self._positions:

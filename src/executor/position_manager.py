@@ -27,6 +27,8 @@ class PositionManager:
         self._send_message = send_message
         self._connector = trading_connector  # None для virtual
         self._banned_symbols: set[str] = set()  # монеты с ошибками торговли
+        self.market_regime: str = "unknown"
+        self.position_size_mult: float = 1.0
 
     @property
     def is_real(self) -> bool:
@@ -125,6 +127,14 @@ class PositionManager:
         Возвращает (trade, status): status = 'opened' | 'limit' | 'duplicate' |
         'cooldown' | 'no_price' | 'error'."""
 
+        # Проверка рыночного режима
+        if self.market_regime == "risk_off":
+            logger.info(
+                f"Сигнал {signal.symbol} пропущен: "
+                f"risk-off режим (входы заблокированы)"
+            )
+            return None, "risk_off"
+
         # Проверка лимита
         open_count = await self._count_open(session)
         if open_count >= self.config.max_positions:
@@ -172,6 +182,9 @@ class PositionManager:
                 size_usdt = self.config.position_size_usdt
         else:
             size_usdt = self.config.position_size_usdt
+
+        # Применяем множитель рыночного режима
+        size_usdt *= self.position_size_mult
 
         quantity = size_usdt / entry_price
         tp_price = self._tp_price(entry_price, signal.direction)

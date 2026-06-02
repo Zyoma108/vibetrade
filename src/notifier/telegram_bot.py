@@ -29,6 +29,7 @@ class TelegramNotifier:
         self._polling_task: asyncio.Task | None = None
         self._stats_provider: Callable[[str], Coroutine] | None = None
         self._positions_provider: Callable[[], Coroutine] | None = None
+        self._trend_provider: Callable[[], Coroutine] | None = None
         self._setup_handlers()
 
     def set_stats_provider(self, provider: Callable[[str], Coroutine]) -> None:
@@ -36,6 +37,9 @@ class TelegramNotifier:
 
     def set_positions_provider(self, provider: Callable[[], Coroutine]) -> None:
         self._positions_provider = provider
+
+    def set_trend_provider(self, provider: Callable[[], Coroutine]) -> None:
+        self._trend_provider = provider
 
     def _is_authorized(self, chat: types.Chat) -> bool:
         """Проверить, что сообщение из разрешённого чата/канала."""
@@ -121,6 +125,16 @@ class TelegramNotifier:
             text = await self._positions_provider()
             await message.answer(text, parse_mode="HTML")
 
+        @self._dp.message(Command("trend"))
+        async def trend_handler(message: types.Message):
+            if not self._is_authorized(message.chat):
+                return
+            if not self._trend_provider:
+                await message.answer("Рыночный контекст недоступен")
+                return
+            text = await self._trend_provider()
+            await message.answer(text, parse_mode="HTML")
+
     @property
     def is_paused(self) -> bool:
         return self._paused
@@ -189,6 +203,7 @@ class TelegramNotifier:
             "no_price": "⚠️ Нет цены для входа",
             "error": "❌ Ошибка создания ордера",
             "disabled": "ℹ️ Торговля отключена",
+            "risk_off": "🔴 Рынок в risk-off, входы заблокированы",
         }
         status_line = status_labels.get(status, f"⚠️ {status}")
 

@@ -99,6 +99,15 @@ class TradingConfig(BaseModel):
     breakeven_at_halfway: bool = Field(default=False, description="Перевести стоп в б/у на полпути (без частичной фиксации)")
 
 
+class MarketContextConfig(BaseModel):
+    enabled: bool = Field(default=True, description="Включить рыночный контекст (BTC + OTHERS Supertrend)")
+    btc_drop_threshold_pct: float = Field(default=1.5, description="Порог падения BTC за час для cautious/risk-off, %")
+    supertrend_atr_period: int = Field(default=10, ge=3, le=50, description="Период ATR для Supertrend")
+    supertrend_multiplier: float = Field(default=3.0, ge=1.0, le=10.0, description="Множитель ATR для Supertrend")
+    altcoin_sample_size: int = Field(default=30, ge=10, le=100, description="Сколько топ-альтов для OTHERS proxy")
+    notify_on_change: bool = Field(default=True, description="Уведомлять в Telegram о смене тренда")
+
+
 class Settings(BaseModel):
     exchanges: dict[str, ExchangeConfig]
     coins: list[str] = []  # пустой список = сканировать все монеты динамически
@@ -108,6 +117,7 @@ class Settings(BaseModel):
     telegram: TelegramConfig = TelegramConfig()
     telegram_price_surge: Optional[TelegramConfig] = None   # отдельный бот для сигналов strategy_price_surge
     trading: TradingConfig = TradingConfig()
+    market_context: MarketContextConfig = MarketContextConfig()
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> "Settings":
