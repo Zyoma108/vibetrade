@@ -14,7 +14,7 @@ dependencies = [
     "pyyaml>=6.0",
     "structlog>=23.0",
     "pandas>=2.0",
-    "tvdatafeed>=0.1",
+    "tvdatafeed @ git+https://github.com/rongardF/tvdatafeed.git",
 ]
 
 [project.optional-dependencies]

@@ -239,7 +239,7 @@ class MarketContext:
         """Fetch OTHERS 1h from TradingView using tvdatafeed."""
         try:
             if self._tv is None:
-                from tvdatafeed import TvDatafeed, Interval
+                from tvDatafeed import TvDatafeed, Interval
                 self._tv = TvDatafeed()
                 self._tv_interval = Interval.in_1_hour
 
