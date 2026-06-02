@@ -181,9 +181,26 @@ class SetupDetector(BaseDetector):
         if change_pct < self.config.price_growth_min_pct:
             return None
 
+        # Exhaustion filter: цена уже сильно выросла И свеча закрылась у верха
+        # (покупатели выдохлись). Пропускаем только если свеча в середине/снизу —
+        # это pullback в восходящем движении.
+        ex_gain = self.config.exhaustion_gain_pct
+        ex_pos = self.config.exhaustion_pos_ratio
+        if ex_gain > 0 and change_pct > ex_gain:
+            last_candle = candles[-1]
+            candle_range = last_candle["high"] - last_candle["low"]
+            if candle_range > 0:
+                close_pos = (last_candle["close"] - last_candle["low"]) / candle_range
+                if close_pos > ex_pos:
+                    logger.info(
+                        f"Сигнал пропущен: истощение — рост {change_pct:.1f}% "
+                        f"(>{ex_gain}%) и свеча у верха (pos={close_pos:.2f} > {ex_pos})"
+                    )
+                    return None
+
         max_growth = self.config.price_growth_max_pct
         if max_growth > 0 and change_pct > max_growth:
-            logger.debug(
+            logger.info(
                 f"Сигнал пропущен: рост {change_pct:.1f}% > лимита {max_growth}%"
             )
             return None

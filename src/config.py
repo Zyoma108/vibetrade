@@ -47,7 +47,13 @@ class StrategyConfig(BaseModel):
         default=0.3, description="Минимальный рост цены за sustain-окно, %"
     )
     price_growth_max_pct: float = Field(
-        default=8.0, description="Максимальный рост цены за sustain-окно, % (0 = без лимита)"
+        default=12.0, description="Максимальный рост цены за sustain-окно, % (страховочный потолок, 0 = без лимита)"
+    )
+    exhaustion_gain_pct: float = Field(
+        default=5.0, description="Порог роста цены в % для exhaustion-фильтра (срабатывает вместе с exhaustion_pos_ratio)"
+    )
+    exhaustion_pos_ratio: float = Field(
+        default=0.7, description="Позиция закрытия последней свечи (0=low, 1=high), выше которой + exhaustion_gain = сигнал истощения"
     )
     max_hourly_drop_pct: float = Field(
         default=10.0, description="Максимальное падение за час, % (защита от рагпулов, 0 = выкл)"
