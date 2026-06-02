@@ -61,15 +61,20 @@ class PriceSurgeSignalProcessor:
         hour_bars = max(60 // tf_min, 1)
 
         for sig in signals:
-            # Fetch exact prices from candles for the window
-            c_rows = await self._dp.load_candles(
-                session, "bybit", sig.symbol, window_bars + 1
-            )
+            # Fetch exact prices from candles for the window (any exchange)
+            c_rows = (
+                await session.execute(
+                    select(Candle.open, Candle.close, Candle.timestamp)
+                    .where(Candle.symbol == sig.symbol)
+                    .order_by(desc(Candle.timestamp))
+                    .limit(window_bars + 1)
+                )
+            ).all()
             if len(c_rows) < window_bars + 1:
                 continue
-
-            open_p = c_rows[0]["open"]
-            close_p = c_rows[-1]["close"]
+            c_rows = list(reversed(c_rows))
+            open_p = c_rows[0][0]
+            close_p = c_rows[-1][1]
             change_pct = (close_p / open_p - 1) * 100 if open_p > 0 else 0
 
             # Persist to DB
