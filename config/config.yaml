@@ -33,20 +33,24 @@ strategy:
     - HOLO
     - WHITEWHALE
     - ESPORTS
-  baseline_bars: 70             # свечей для расчёта нормального объёма
+  baseline_bars: 70              # свечей для расчёта нормального объёма
   volume_surge_mult: 15.0        # во сколько раз объём должен превысить норму
   min_baseline_volume_usdt: 3000 # мин. медиана объёма в USDT, 0 = выкл
-  sustain_bars: 4               # сколько свечей подряд выше порога для сигнала
-  oi_slope_min_pct: 1.0         # минимальный наклон OI, %
-  price_growth_min_pct: 1.0     # минимальный рост цены за sustain-окно, %
-  price_growth_max_pct: 12.0    # страховочный потолок роста цены, 0 = выкл
-  exhaustion_gain_pct: 5.0     # порог роста для exhaustion-фильтра
-  exhaustion_pos_ratio: 0.7    # позиция закрытия свечи (0=low,1=high) для exhaustion
-  max_hourly_drop_pct: 10.0     # макс. падение за час (защита от рагпулов), 0 = выкл
+  sustain_bars: 4                # сколько свечей подряд выше порога для сигнала
+  oi_slope_min_pct: 1.0          # минимальный наклон OI, %
+  smooth_max_ratio: 5.0           # макс. отношение макс/медиана объёма (отсекает спайки)
+  dump_volume_mult: 3.0           # защита от свечей-выбросов, 0 = выкл
+  price_growth_min_pct: 1.0      # минимальный рост цены за sustain-окно, %
+  price_growth_max_pct: 12.0     # страховочный потолок роста цены, 0 = выкл
+  exhaustion_gain_pct: 5.0       # порог роста для exhaustion-фильтра
+  exhaustion_pos_ratio: 0.7      # позиция закрытия свечи (0=low, 1=high)
+  wick_rejection_ratio: 0        # макс. доля верхнего фитиля (0 = выкл)
+  wick_rejection_min_surge: 100.0 # миним. surge для обхода wick-фильтра
+  max_hourly_drop_pct: 10.0      # макс. падение за час (защита от рагпулов), 0 = выкл
 
 strategy_price_surge:                    # детектор пампов по чистой цене (только сигналы)
-  price_surge_pct: 5.0        # рост цены в % для сигнала
-  price_surge_minutes: 18       # промежуток времени в минутах
+  price_surge_pct: 5.0           # рост цены в % для сигнала
+  price_surge_minutes: 18        # промежуток времени в минутах
 
 telegram:
   bot_token: "${TELEGRAM_BOT_TOKEN}"

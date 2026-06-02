@@ -55,6 +55,12 @@ class StrategyConfig(BaseModel):
     exhaustion_pos_ratio: float = Field(
         default=0.7, description="Позиция закрытия последней свечи (0=low, 1=high), выше которой + exhaustion_gain = сигнал истощения"
     )
+    wick_rejection_ratio: float = Field(
+        default=0.8, description="Макс. доля верхнего фитиля в диапазоне свечи для отбраковки (0 = фильтр выключен)"
+    )
+    wick_rejection_min_surge: float = Field(
+        default=100.0, description="Минимальный surge-ratio для обхода wick-фильтра (исключительный объём)"
+    )
     max_hourly_drop_pct: float = Field(
         default=10.0, description="Максимальное падение за час, % (защита от рагпулов, 0 = выкл)"
     )

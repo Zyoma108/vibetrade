@@ -35,6 +35,8 @@ strategy:
   price_growth_max_pct: 12.0    # страховочный потолок роста цены, 0 = выкл
   exhaustion_gain_pct: 5.0     # порог роста для exhaustion-фильтра
   exhaustion_pos_ratio: 0.7    # позиция закрытия свечи (0=low,1=high) для exhaustion
+  wick_rejection_ratio: 0.8    # макс. доля верхнего фитиля (0 = выкл)
+  wick_rejection_min_surge: 100.0  # миним. surge для обхода wick-фильтра
   max_hourly_drop_pct: 10.0     # макс. падение за час (защита от рагпулов), 0 = выкл
 
 strategy_price_surge:                    # детектор пампов по чистой цене (только сигналы)
