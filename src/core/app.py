@@ -91,9 +91,13 @@ class Application:
                 )
             )
 
-        # Рыночный контекст (BTC + OTHERS Supertrend)
-        self._market_ctx = MarketContext(self.settings.market_context)
-        logger.info("MarketContext инициализирован")
+        # Рыночный контекст (BTC + OTHERS Supertrend) — использует свой коннектор к бирже
+        if self._connectors:
+            self._market_ctx = MarketContext(
+                self.settings.market_context,
+                connector=self._connectors[0],  # любой public-коннектор (без API-ключей)
+            )
+            logger.info("MarketContext инициализирован")
 
         # Уведомления
         if self.settings.telegram.bot_token and self.settings.telegram.chat_ids:
@@ -189,6 +193,19 @@ class Application:
                         "Не удалось синхронизировать позиции. "
                         "Бот продолжит работу в режиме сбора данных"
                     )
+
+        # Первичное обновление рыночного контекста и отправка в Telegram
+        if self._market_ctx and self.settings.market_context.enabled:
+            try:
+                async with async_session() as session:
+                    await self._market_ctx.update(session, force=True)
+                if self._market_ctx.ready and self._notifier:
+                    await self._notifier.send_message(
+                        "📊 <b>Рыночный контекст при старте</b>\n\n"
+                        + self._market_ctx.trend_summary()
+                    )
+            except Exception:
+                logger.exception("Не удалось обновить MarketContext при старте")
 
         # Сборщик данных
         self._collector = MarketDataCollector(
