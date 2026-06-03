@@ -102,7 +102,11 @@ class MarketContext:
 
     @property
     def regime_changed(self) -> bool:
-        return self._changed
+        """One-shot flag: returns True once per regime change, then resets."""
+        if self._changed:
+            self._changed = False
+            return True
+        return False
 
     def trend_summary(self) -> str:
         """Formatted trend info for /trend command."""
