@@ -29,6 +29,7 @@ src/
 │   ├── utils.py               # Общие утилиты: timeframe_to_minutes, calculate_oi_slope_pct
 │   ├── data_provider.py       # DataProvider — единый слой загрузки данных с in-memory кешем
 │   ├── detector.py            # SetupDetector — основная стратегия (объём + OI + цена)
+│   ├── market_context.py      # MarketContext — рыночный контекст (OTHERS Supertrend + BTC)
 │   ├── price_surge.py         # PriceSurgeDetector — пампинг по чистой цене (только сигналы)
 │   └── price_surge_service.py # PriceSurgeSignalProcessor — обогащение и отправка сигналов пампа
 ├── executor/
@@ -86,16 +87,56 @@ Application.start()
 **Обработка после цикла** (`Application._on_collect_cycle_done`):
 
 0. Создаётся **общий `DataProvider`** на цикл — внедряется в оба детектора и `PriceSurgeSignalProcessor`
-   - Кеширует свечи и OI в памяти → один запрос к БД на символ, даже если оба детектора его анализируют
+   - Кеширует свечи и OI в памяти → один запрос к БД на символ
+0. **`MarketContext.update()`** (throttled: раз в 30 мин) — OTHERS из TradingView + BTC с биржи → режим
+   - При смене режима → уведомление в Telegram
+   - Режим передаётся в `PositionManager` (блок входа в risk-off, 50% размера в cautious)
 1. `PositionManager.update_positions()` — проверка TP/SL/времени
 2. `SetupDetector.analyze()` → для каждого сигнала:
    - Сохранить Signal в БД
-   - `PositionManager.open_position()` — попытка открыть позицию
+   - `PositionManager.open_position()` — попытка открыть позицию (с учётом рыночного режима)
    - `TelegramNotifier.send_signal()` — сигнал в Telegram с реальным статусом
 3. `PriceSurgeSignalProcessor.process_and_notify()` → для каждого сигнала пампа:
    - Запросить цены/OI/часовой рост
    - Сохранить PriceSurgeSignal в БД
    - Отправить через отдельный Telegram-бот
+
+## Рыночный контекст (`MarketContext`)
+
+Оценивает глобальное состояние рынка и определяет режим торговли. Данные обновляются раз в 30 минут, в промежутках используется кешированный режим.
+
+### Источники данных
+
+| Индикатор | Источник | Таймфрейм | Что измеряет |
+|-----------|----------|-----------|-------------|
+| OTHERS index | TradingView (`CRYPTOCAP:OTHERS`) через `tvDatafeed` | 1h | Капитализация рынка без top-10 |
+| Supertrend | Вычисляется на OTHERS | 1h (10, 3.0) | Тренд альт-рынка |
+| BTC 1h change | Биржа (`fetch_ohlcv`) + тикеры из БД | 1h | Риск-режим (бегство в BTC или аппетит к риску) |
+
+### Режимы торговли
+
+| Режим | Условие | Вход в позиции | Размер позиции |
+|-------|---------|---------------|----------------|
+| 🟢 RISK-ON | BTC > −1.5% **И** OTHERS Supertrend зелёный | ✅ Да | 100% |
+| 🟡 CAUTIOUS | Один из сигналов негативный | ✅ Да | **50%** |
+| 🔴 RISK-OFF | BTC падает >1.5% **И** OTHERS Supertrend красный | ❌ Нет | 0% |
+
+При старте бота контекст обновляется принудительно и отправляется в Telegram. При смене режима — уведомление в реальном времени.
+
+### Команда `/trend`
+
+Возвращает: текущий режим с длительностью, Supertrend OTHERS, BTC 1h, OTHERS 1h, предыдущий режим.
+
+### Конфигурация (`config.yaml → market_context`)
+
+| Параметр | По умолчанию | Смысл |
+|----------|-------------|-------|
+| `enabled` | `true` | Включить/выключить |
+| `btc_drop_threshold_pct` | 1.5 | Порог падения BTC для cautious/risk-off |
+| `supertrend_atr_period` | 10 | Период ATR для Supertrend |
+| `supertrend_multiplier` | 3.0 | Множитель ATR (ширина канала) |
+| `altcoin_sample_size` | 30 | Запасной параметр (не используется с TradingView) |
+| `notify_on_change` | `true` | Уведомлять о смене тренда |
 
 ## Логика стратегий
 
