@@ -56,6 +56,7 @@ telegram_price_surge:                    # отдельный бот для stra
 market_context:
   enabled: true                   # включить рыночный контекст
   btc_drop_threshold_pct: 1.5     # порог падения BTC за час для cautious/risk-off, %
+  trend_threshold_pct: 1.0        # порог изменения цены за 4ч для определения тренда (bullish/bearish), %
   supertrend_atr_period: 10       # период ATR для Supertrend
   supertrend_multiplier: 3.0      # множитель ATR для Supertrend
   altcoin_sample_size: 30         # сколько топ-альтов для OTHERS proxy

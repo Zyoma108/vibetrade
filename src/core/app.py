@@ -256,10 +256,28 @@ class Application:
         if self._market_ctx:
             await self._market_ctx.update(session)
 
-            # Уведомление о смене тренда
+            # Уведомление о смене рыночного режима
             if self._market_ctx.regime_changed and self._notifier:
                 await self._notifier.send_message(
                     "🔄 <b>Смена рыночного режима!</b>\n\n"
+                    + self._market_ctx.trend_summary()
+                )
+
+            # Уведомление о смене тренда (для TP/трейлинг стопов)
+            if self._market_ctx.trend_changed and self._notifier:
+                prev_trend_emoji = {
+                    "bullish": "🟢 BULLISH",
+                    "bearish": "🔴 BEARISH",
+                    "neutral": "⚪ NEUTRAL",
+                }.get(self._market_ctx.prev_trend, str(self._market_ctx.prev_trend))
+                current_trend_emoji = {
+                    "bullish": "🟢 BULLISH",
+                    "bearish": "🔴 BEARISH",
+                    "neutral": "⚪ NEUTRAL",
+                }.get(self._market_ctx.trend, self._market_ctx.trend)
+                await self._notifier.send_message(
+                    f"📈 <b>Смена тренда!</b>\n\n"
+                    f"{prev_trend_emoji} → {current_trend_emoji}\n\n"
                     + self._market_ctx.trend_summary()
                 )
 

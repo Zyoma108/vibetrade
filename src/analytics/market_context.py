@@ -55,15 +55,23 @@ class MarketContext:
         self._regime_start: datetime = datetime.now(tz=timezone.utc)
         self._supertrend_color: str = "red"
         self._btc_change_1h: float = 0.0
+        self._btc_change_4h: float = 0.0
         self._others_value: float = 0.0
         self._others_change_1h: float = 0.0
+        self._others_change_4h: float = 0.0
+
+        # Trend (bullish/bearish/neutral) — for TP/trailing stop decisions
+        self._trend: str = "neutral"
+        self._trend_start: datetime = datetime.now(tz=timezone.utc)
 
         # Previous trend for notifications and /trend
         self._prev_regime: str | None = None
         self._prev_regime_start: datetime | None = None
         self._prev_regime_end: datetime | None = None
+        self._prev_trend: str | None = None
 
         self._changed = False
+        self._trend_changed_flag: bool = False
         self._ready = False
 
     # ------------------------------------------------------------------
@@ -85,6 +93,37 @@ class MarketContext:
     @property
     def btc_change_1h(self) -> float:
         return self._btc_change_1h
+
+    @property
+    def btc_change_4h(self) -> float:
+        return self._btc_change_4h
+
+    @property
+    def others_change_4h(self) -> float:
+        return self._others_change_4h
+
+    @property
+    def trend(self) -> str:
+        """Current trend: bullish, bearish, or neutral.
+
+        Used for TP/trailing stop decisions.
+        """
+        if not self._ready:
+            return "neutral"
+        return self._trend
+
+    @property
+    def prev_trend(self) -> str | None:
+        """Previous trend before the last change, for notifications."""
+        return self._prev_trend
+
+    @property
+    def trend_changed(self) -> bool:
+        """One-shot flag: returns True once per trend change, then resets."""
+        if self._trend_changed_flag:
+            self._trend_changed_flag = False
+            return True
+        return False
 
     def should_block_entries(self) -> bool:
         if not self._enabled or not self._ready:
@@ -117,15 +156,25 @@ class MarketContext:
                 f"Обновление раз в {_UPDATE_INTERVAL.seconds // 60} мин."
             )
 
-        btcs = (
+        btcs_1h = (
             f"🔻 {self._btc_change_1h:+.1f}%"
             if self._btc_change_1h < 0
             else f"🟢 +{self._btc_change_1h:.1f}%"
         )
-        others_s = (
+        btcs_4h = (
+            f"🔻 {self._btc_change_4h:+.1f}%"
+            if self._btc_change_4h < 0
+            else f"🟢 +{self._btc_change_4h:.1f}%"
+        )
+        others_1h = (
             f"🔻 {self._others_change_1h:+.1f}%"
             if self._others_change_1h < 0
             else f"🟢 +{self._others_change_1h:.1f}%"
+        )
+        others_4h = (
+            f"🔻 {self._others_change_4h:+.1f}%"
+            if self._others_change_4h < 0
+            else f"🟢 +{self._others_change_4h:.1f}%"
         )
         st_emoji = "🟢" if self._supertrend_color == "green" else "🔴"
         regime_emoji = {
@@ -133,19 +182,25 @@ class MarketContext:
             "cautious": "🟡 CAUTIOUS",
             "risk_off": "🔴 RISK-OFF",
         }.get(self._regime, "⚪ UNKNOWN")
+        trend_emoji = {
+            "bullish": "🟢 BULLISH",
+            "bearish": "🔴 BEARISH",
+            "neutral": "⚪ NEUTRAL",
+        }.get(self._trend, "⚪ NEUTRAL")
 
-        duration = self._format_duration(
+        regime_duration = self._format_duration(
             (datetime.now(tz=timezone.utc) - self._regime_start).total_seconds()
         )
 
         lines = [
             "📊 <b>Рыночный контекст</b>\n",
-            f"Режим: <b>{regime_emoji}</b> (⏱ {duration})",
+            f"Режим: <b>{regime_emoji}</b> (⏱ {regime_duration})",
+            f"Тренд: <b>{trend_emoji}</b>",
             "",
             f"{st_emoji} <b>OTHERS Supertrend</b> (1h, "
             f"{self.config.supertrend_atr_period},{self.config.supertrend_multiplier})",
-            f"OTHERS: ${self._others_value / 1e9:.2f}B | 1h: {others_s}",
-            f"BTC 1h: {btcs}",
+            f"OTHERS: ${self._others_value / 1e9:.2f}B | 1h: {others_1h} | 4h: {others_4h}",
+            f"BTC 1h: {btcs_1h} | 4h: {btcs_4h}",
         ]
 
         if self._prev_regime and self._prev_regime_start and self._prev_regime_end:
@@ -186,13 +241,17 @@ class MarketContext:
             # 2. Compute Supertrend on OTHERS bars
             self._compute_supertrend()
 
-            # 3. BTC 1h change from exchange
-            self._btc_change_1h = await self._calc_btc_change(session)
+            # 3. BTC 1h and 4h changes from exchange
+            self._btc_change_1h, self._btc_change_4h = \
+                await self._calc_btc_changes(session)
 
-            # 4. Determine regime
+            # 4. Determine regime (entry gating)
             new_regime = self._determine_regime()
 
-            # 5. Track changes
+            # 5. Determine trend (for TP/trailing stop decisions)
+            new_trend = self._determine_trend()
+
+            # 6. Track changes
             self._changed = False
             if new_regime != self._regime and self._regime != "unknown":
                 self._changed = True
@@ -208,12 +267,29 @@ class MarketContext:
             if self._changed or self._regime_start is None:
                 self._regime_start = now
 
+            # Track trend changes
+            self._trend_changed_flag = False
+            if new_trend != self._trend and self._trend != "neutral":
+                self._trend_changed_flag = True
+                self._prev_trend = self._trend
+                logger.info(
+                    f"Тренд сменился: {self._trend} → {new_trend} "
+                    f"(OTHERS_4h={self._others_change_4h:+.1f}%, "
+                    f"BTC_4h={self._btc_change_4h:+.1f}%, "
+                    f"ST={self._supertrend_color})"
+                )
+
+            self._trend = new_trend
+            if self._trend_changed_flag or self._trend == "neutral":
+                self._trend_start = now
+
             self._ready = True
             logger.info(
-                f"MarketContext: regime={self._regime} "
-                f"BTC_1h={self._btc_change_1h:+.1f}% "
+                f"MarketContext: regime={self._regime} trend={self._trend} "
+                f"BTC_1h={self._btc_change_1h:+.1f}% BTC_4h={self._btc_change_4h:+.1f}% "
                 f"ST={self._supertrend_color} "
                 f"OTHERS=${self._others_value / 1e9:.2f}B "
+                f"OTHERS_4h={self._others_change_4h:+.1f}% "
                 f"bars={len(self._bars)}"
             )
 
@@ -278,16 +354,24 @@ class MarketContext:
         return bars
 
     def _update_others_metrics(self) -> None:
-        """Update OTHERS value and 1h change from bars."""
+        """Update OTHERS value, 1h and 4h changes from bars."""
         if not self._bars:
             return
         latest = self._bars[-1]
         self._others_value = latest["close"]
+        # 1h change
         if len(self._bars) >= 2:
             prev_close = self._bars[-2]["close"]
             if prev_close > 0:
                 self._others_change_1h = (
                     (self._others_value / prev_close - 1) * 100
+                )
+        # 4h change
+        if len(self._bars) >= 5:
+            prev_4h_close = self._bars[-5]["close"]
+            if prev_4h_close > 0:
+                self._others_change_4h = (
+                    (self._others_value / prev_4h_close - 1) * 100
                 )
 
     # ------------------------------------------------------------------
@@ -360,47 +444,69 @@ class MarketContext:
     # BTC
     # ------------------------------------------------------------------
 
-    async def _calc_btc_change(self, session: AsyncSession) -> float:
-        """Calculate BTC/USDT change over the last hour.
+    async def _calc_btc_changes(self, session: AsyncSession) -> tuple[float, float]:
+        """Calculate BTC/USDT change over 1h and 4h.
 
-        Uses exchange OHLCV or ticker data (BTC is often excluded from candle collection).
+        Uses exchange OHLCV (5 bars of 1h) or ticker data as fallback.
+        Returns (change_1h, change_4h).
         """
-        # Try 1h candles from exchange
+        change_1h = 0.0
+        change_4h = 0.0
+
+        # Try 1h candles from exchange (fetch 5 to cover 4h)
         try:
             btc_candles = await self._connector.fetch_ohlcv(
-                "BTC/USDT", "1h", limit=2
+                "BTC/USDT", "1h", limit=5
             )
             if btc_candles and len(btc_candles) >= 2:
                 current = btc_candles[-1]["close"]
-                prev = btc_candles[-2]["close"]
-                if prev > 0:
-                    return (current / prev - 1) * 100
+                # 1h change
+                prev_1h = btc_candles[-2]["close"]
+                if prev_1h > 0:
+                    change_1h = (current / prev_1h - 1) * 100
+                # 4h change
+                if len(btc_candles) >= 5:
+                    prev_4h = btc_candles[-5]["close"]
+                    if prev_4h > 0:
+                        change_4h = (current / prev_4h - 1) * 100
+                return change_1h, change_4h
         except Exception:
             pass
 
-        # Fallback: use ticker prices from DB
+        # Fallback: use ticker prices from DB (1h only; 4h from tickers is unreliable)
         ticker_rows = (
             await session.execute(
                 select(Ticker.last, Ticker.timestamp)
                 .where(Ticker.symbol.in_(["BTC/USDT", "BTC/USDT:USDT"]))
                 .order_by(desc(Ticker.timestamp))
-                .limit(100)
+                .limit(200)
             )
         ).all()
         if len(ticker_rows) >= 2:
             current = ticker_rows[0][0]
             now = datetime.now(tz=timezone.utc)
-            cutoff = now - timedelta(hours=1)
+
+            # 1h change from tickers
+            cutoff_1h = now - timedelta(hours=1)
             for price, ts in ticker_rows:
-                if ts and ts <= cutoff and ts > now - timedelta(hours=2):
+                if ts and ts <= cutoff_1h and ts > now - timedelta(hours=2):
                     if price > 0 and current > 0:
-                        return (current / price - 1) * 100
-            # Rough: oldest in window
-            if len(ticker_rows) > 10:
+                        change_1h = (current / price - 1) * 100
+                        break
+            if change_1h == 0.0 and len(ticker_rows) > 10:
                 best = ticker_rows[-1][0]
                 if best > 0 and current > 0:
-                    return (current / best - 1) * 100
-        return 0.0
+                    change_1h = (current / best - 1) * 100
+
+            # 4h change from tickers
+            cutoff_4h = now - timedelta(hours=4)
+            for price, ts in ticker_rows:
+                if ts and ts <= cutoff_4h and ts > now - timedelta(hours=5):
+                    if price > 0 and current > 0:
+                        change_4h = (current / price - 1) * 100
+                        break
+
+        return change_1h, change_4h
 
     # ------------------------------------------------------------------
     # Regime logic
@@ -417,6 +523,28 @@ class MarketContext:
             return "cautious"
         else:
             return "risk_on"
+
+    def _determine_trend(self) -> str:
+        """Determine trend based on OTHERS Supertrend + 4h OTHERS/BTC changes.
+
+        Bullish: OTHERS ST green + OTHERS 4h >= threshold + BTC 4h >= threshold
+        Bearish: OTHERS ST red + OTHERS 4h <= -threshold + BTC 4h <= -threshold
+        Neutral: everything else.
+        """
+        threshold = self.config.trend_threshold_pct
+        st_bullish = self._supertrend_color == "green"
+
+        others_up = self._others_change_4h >= threshold
+        others_down = self._others_change_4h <= -threshold
+        btc_up = self._btc_change_4h >= threshold
+        btc_down = self._btc_change_4h <= -threshold
+
+        if st_bullish and others_up and btc_up:
+            return "bullish"
+        elif not st_bullish and others_down and btc_down:
+            return "bearish"
+        else:
+            return "neutral"
 
     # ------------------------------------------------------------------
     # Helpers

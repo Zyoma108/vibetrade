@@ -102,6 +102,7 @@ class TradingConfig(BaseModel):
 class MarketContextConfig(BaseModel):
     enabled: bool = Field(default=True, description="Включить рыночный контекст (BTC + OTHERS Supertrend)")
     btc_drop_threshold_pct: float = Field(default=1.5, description="Порог падения BTC за час для cautious/risk-off, %")
+    trend_threshold_pct: float = Field(default=1.0, ge=0.1, le=20.0, description="Порог изменения цены за 4 часа для определения тренда (bullish/bearish), %")
     supertrend_atr_period: int = Field(default=10, ge=3, le=50, description="Период ATR для Supertrend")
     supertrend_multiplier: float = Field(default=3.0, ge=1.0, le=10.0, description="Множитель ATR для Supertrend")
     altcoin_sample_size: int = Field(default=30, ge=10, le=100, description="Сколько топ-альтов для OTHERS proxy")
