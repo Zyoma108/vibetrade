@@ -121,7 +121,7 @@ class PriceSurgeSignalProcessor:
                 f"Изменение OI: {oi_change:+.1f}%\n\n"
                 f"Сигналов за сутки: {day_count}"
             )
-            await self.notifier.notify_all(text)
+            await self.notifier.notify_all(text, disable_preview=True)
 
     # ------------------------------------------------------------------
     # Helpers

@@ -225,7 +225,7 @@ class TelegramNotifier:
         if self._online:
             await self.notify_all(text)
 
-    async def notify_all(self, text: str) -> bool:
+    async def notify_all(self, text: str, disable_preview: bool = False) -> bool:
         """Отправить сообщение всем чатам. Возвращает True если хотя бы одна отправка удалась."""
         if not self._online:
             return False
@@ -233,7 +233,10 @@ class TelegramNotifier:
         for chat_id in self._config.chat_ids:
             for attempt in range(3):
                 try:
-                    await self._bot.send_message(chat_id, text, parse_mode="HTML")
+                    await self._bot.send_message(
+                        chat_id, text, parse_mode="HTML",
+                        disable_web_page_preview=disable_preview,
+                    )
                     success = True
                     break
                 except TelegramNetworkError:
