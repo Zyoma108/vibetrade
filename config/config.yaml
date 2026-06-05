@@ -33,6 +33,7 @@ strategy:
     - HOLO
     - WHITEWHALE
     - ESPORTS
+    - LA
   baseline_bars: 70              # свечей для расчёта нормального объёма
   volume_surge_mult: 15.0        # во сколько раз объём должен превысить норму
   min_baseline_volume_usdt: 3000 # мин. медиана объёма в USDT, 0 = выкл
@@ -78,8 +79,8 @@ trading:
   position_size_usdt: 10.0        # объём позиции в USDT (не маржа!)
   position_size_pct: 20.0         # % от депозита (0 = использовать position_size_usdt)
   leverage: 10                    # кредитное плечо
-  take_profit_pct: 12.0           # тейк-профит, %
-  stop_loss_pct: 4.0              # стоп-лосс, %
+  take_profit_pct: 15.0           # тейк-профит, %
+  stop_loss_pct: 5.0              # стоп-лосс, %
   max_hold_hours: 48.0            # макс. время удержания, часов
   partial_close_enabled: true     # частичная фиксация на полпути к TP (+ стоп в б/у)
   partial_close_pct: 50.0         # % пути до TP для закрытия / перевода в б/у
