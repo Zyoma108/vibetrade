@@ -269,11 +269,14 @@ class MarketContext:
 
             # Track trend changes
             self._trend_changed_flag = False
-            if new_trend != self._trend and self._trend != "neutral":
-                self._trend_changed_flag = True
-                self._prev_trend = self._trend
+            if new_trend != self._trend:
+                old_trend = self._trend
+                self._prev_trend = old_trend
+                # Suppress only the very first (startup) determination
+                if self._ready:
+                    self._trend_changed_flag = True
                 logger.info(
-                    f"Тренд сменился: {self._trend} → {new_trend} "
+                    f"Тренд сменился: {old_trend} → {new_trend} "
                     f"(OTHERS_4h={self._others_change_4h:+.1f}%, "
                     f"BTC_4h={self._btc_change_4h:+.1f}%, "
                     f"ST={self._supertrend_color})"
