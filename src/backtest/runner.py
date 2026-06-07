@@ -17,7 +17,7 @@ from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from src.analytics.detector import SetupDetector
-from src.analytics.utils import OI_TREND_BARS, calculate_oi_slope_pct
+from src.analytics.utils import OI_TREND_BARS, calculate_oi_slope_pct, timeframe_to_minutes
 from src.config import Settings
 from src.storage.models import Candle, OpenInterest
 
@@ -59,6 +59,29 @@ def _bar(rows, idx):
     if 0 <= idx < len(rows):
         return rows[idx]
     return None
+
+
+def _calculate_atr_from_slice(candles: list[dict], period: int = 14) -> float | None:
+    """Рассчитать ATR из слайса свечей (хронологический порядок)."""
+    if len(candles) < period + 1:
+        return None
+
+    tr_values = []
+    for i in range(1, len(candles)):
+        high = candles[i]["high"]
+        low = candles[i]["low"]
+        prev_close = candles[i - 1]["close"]
+        tr = max(
+            high - low,
+            abs(high - prev_close),
+            abs(low - prev_close),
+        )
+        tr_values.append(tr)
+
+    if not tr_values:
+        return None
+
+    return float(np.mean(tr_values[-period:]))
 
 
 # ---------------------------------------------------------------------------
@@ -158,8 +181,8 @@ async def run_backtest(
                     pos.sl_price = pos.entry_price
                     continue
 
-            # Частичное закрытие
-            if cfg.partial_close_enabled and not pos.partial_closed:
+            # Частичное закрытие (всегда включено)
+            if not pos.partial_closed:
                 trigger = pos.entry_price + (pos.tp_price - pos.entry_price) * (
                     cfg.partial_close_pct / 100)
                 if high >= trigger:
@@ -232,8 +255,8 @@ async def run_backtest(
             if any(p.symbol == sym for p in positions):
                 continue
 
-            cooldown_cutoff = ts - timedelta(hours=24)
-            if any(
+            cooldown_cutoff = ts - timedelta(hours=cfg.cooldown_hours)
+            if cfg.cooldown_hours > 0 and any(
                 t.symbol == sym and t.exit_time and t.exit_time >= cooldown_cutoff
                 for t in closed_trades
             ):
@@ -280,9 +303,29 @@ async def run_backtest(
             signals_count += 1
 
             entry_price = candle_slice[-1]["close"]
-            tp = entry_price * (1 + cfg.take_profit_pct / 100)
-            sl = entry_price * (1 - cfg.stop_loss_pct / 100)
-            qty = cfg.position_size_usdt / entry_price
+
+            # ATR-based TP/SL и размер позиции
+            if cfg.use_atr_stops:
+                atr_value = _calculate_atr_from_slice(
+                    candle_slice, period=cfg.atr_period
+                )
+                if atr_value and atr_value > 0:
+                    sl_distance = atr_value * cfg.atr_sl_multiplier
+                    tp_distance = atr_value * cfg.atr_tp_multiplier
+                    # Бюджет риска в долларах
+                    risk_budget = cfg.position_size_usdt * (cfg.stop_loss_pct / 100)
+                    qty = risk_budget / sl_distance
+                    tp = entry_price + tp_distance
+                    sl = entry_price - sl_distance
+                else:
+                    # Fallback на фиксированные проценты
+                    qty = cfg.position_size_usdt / entry_price
+                    tp = entry_price * (1 + cfg.take_profit_pct / 100)
+                    sl = entry_price * (1 - cfg.stop_loss_pct / 100)
+            else:
+                qty = cfg.position_size_usdt / entry_price
+                tp = entry_price * (1 + cfg.take_profit_pct / 100)
+                sl = entry_price * (1 - cfg.stop_loss_pct / 100)
 
             pos = SimPosition(
                 symbol=sym, entry_price=entry_price, entry_time=ts,

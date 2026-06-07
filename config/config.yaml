@@ -48,6 +48,7 @@ strategy:
   wick_rejection_ratio: 0        # макс. доля верхнего фитиля (0 = выкл)
   wick_rejection_min_surge: 100.0 # миним. surge для обхода wick-фильтра
   max_hourly_drop_pct: 10.0      # макс. падение за час (защита от рагпулов), 0 = выкл
+  cautious_volume_surge_mult_increase_pct: 50.0  # +50% к volume_surge_mult в CAUTIOUS режиме
 
 strategy_price_surge:                    # детектор пампов по чистой цене (только сигналы)
   price_surge_pct: 5.0           # рост цены в % для сигнала
@@ -79,9 +80,15 @@ trading:
   position_size_usdt: 10.0        # объём позиции в USDT (не маржа!)
   position_size_pct: 20.0         # % от депозита (0 = использовать position_size_usdt)
   leverage: 10                    # кредитное плечо
-  take_profit_pct: 15.0           # тейк-профит, %
-  stop_loss_pct: 5.0              # стоп-лосс, %
+  take_profit_pct: 15.0           # тейк-профит, % (не используется при use_atr_stops)
+  stop_loss_pct: 5.0              # бюджет риска в % от position_size_usdt
   max_hold_hours: 48.0            # макс. время удержания, часов
-  partial_close_enabled: true     # частичная фиксация на полпути к TP (+ стоп в б/у)
+  partial_close_enabled: true     # частичная фиксация (всегда включена)
   partial_close_pct: 50.0         # % пути до TP для закрытия / перевода в б/у
   breakeven_at_halfway: false     # перевести стоп в б/у на полпути (без частичной фиксации)
+  cooldown_hours: 1.0             # кулдаун после закрытия позиции (было 24ч)
+  # ATR-based стопы
+  use_atr_stops: true             # использовать ATR-based TP/SL
+  atr_period: 14                  # период ATR
+  atr_sl_multiplier: 1.5          # стоп-лосс = ATR × множитель
+  atr_tp_multiplier: 4.5          # тейк-профит = ATR × множитель (1:3 risk/reward с SL=1.5)

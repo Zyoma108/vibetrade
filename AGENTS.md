@@ -91,10 +91,12 @@ Application.start()
 0. **`MarketContext.update()`** (throttled: раз в 30 мин) — OTHERS из TradingView + BTC с биржи → режим
    - При смене режима → уведомление в Telegram
    - Режим передаётся в `PositionManager` (блок входа в risk-off, 50% размера в cautious)
+   - Режим передаётся в `SetupDetector.apply_regime_multiplier()` (×1.5 к `volume_surge_mult` в cautious)
 1. `PositionManager.update_positions()` — проверка TP/SL/времени
 2. `SetupDetector.analyze()` → для каждого сигнала:
    - Сохранить Signal в БД
    - `PositionManager.open_position()` — попытка открыть позицию (с учётом рыночного режима)
+   - Если позиция НЕ открыта → записать причину в `Signal.missed_reason`
    - `TelegramNotifier.send_signal()` — сигнал в Telegram с реальным статусом
 3. `PriceSurgeSignalProcessor.process_and_notify()` → для каждого сигнала пампа:
    - Запросить цены/OI/часовой рост
@@ -115,13 +117,13 @@ Application.start()
 
 ### Режимы торговли
 
-| Режим | Условие | Вход в позиции | Размер позиции |
-|-------|---------|---------------|----------------|
-| 🟢 RISK-ON | BTC > −1.5% **И** OTHERS Supertrend зелёный | ✅ Да | 100% |
-| 🟡 CAUTIOUS | Один из сигналов негативный | ✅ Да | **50%** |
-| 🔴 RISK-OFF | BTC падает >1.5% **И** OTHERS Supertrend красный | ❌ Нет | 0% |
+| Режим | Условие | Вход в позиции | Размер позиции | Volume surge порог |
+|-------|---------|---------------|----------------|-------------------|
+| 🟢 RISK-ON | BTC > −1.5% **И** OTHERS Supertrend зелёный | ✅ Да | 100% | ×1.0 (15.0) |
+| 🟡 CAUTIOUS | Один из сигналов негативный | ✅ Да | **50%** | **×1.5 (22.5)** |
+| 🔴 RISK-OFF | BTC падает >1.5% **И** OTHERS Supertrend красный | ❌ Нет | 0% | — |
 
-При старте бота контекст обновляется принудительно и отправляется в Telegram. При смене режима — уведомление в реальном времени.
+В CAUTIOUS режиме `volume_surge_mult` увеличивается на `cautious_volume_surge_mult_increase_pct`% (по умолчанию 50%) — бот берёт только самые сильные сетапы. Множитель применяется через `SetupDetector.apply_regime_multiplier()` каждый цикл.
 
 ### Команда `/trend`
 
@@ -179,6 +181,7 @@ Application.start()
 | `smooth_max_ratio` | 5.0 | Макс. отношение макс/медиана объёма |
 | `dump_volume_mult` | 3.0 | Защита от свечей-выбросов |
 | `max_hourly_drop_pct` | 10.0% | Защита от рагпулов |
+| `cautious_volume_surge_mult_increase_pct` | 50.0% | На сколько % увеличить `volume_surge_mult` в CAUTIOUS режиме (0 = без изменений) |
 
 ### Вторая стратегия (`PriceSurgeDetector`) — чистый пампинг
 
@@ -196,22 +199,51 @@ Application.start()
 ## Управление позициями (`PositionManager`)
 
 ### Открытие позиции
-1. **Guard-проверки**: лимит позиций, бан-лист, дубликат, кулдаун (24ч), нет цены
-2. **Размер позиции**: `position_size_pct`% от депозита ИЛИ фиксированный `position_size_usdt`
-3. **Real**: `set_leverage()` → `create_market_order(buy)` → ожидание 2с → запрос реальной цены → `set_tpsl()` (TP/SL на бирже)
-4. **Virtual**: запись в БД с расчётными уровнями TP/SL, отслеживание по цене
+1. **Guard-проверки**: лимит позиций, бан-лист, дубликат, кулдаун (`cooldown_hours`, по умолчанию 1ч), нет цены, risk_off
+2. **Размер позиции**:
+   - `position_size_pct`% от депозита ИЛИ фиксированный `position_size_usdt`
+   - При `use_atr_stops: true` (по умолчанию) размер позиции коррелируется с ATR:
+     - `quantity = risk_budget / (ATR × atr_sl_multiplier)`, где `risk_budget = size_usdt × stop_loss_pct / 100`
+     - Для волатильных монет (высокий ATR) позиция меньше, для спокойных — больше
+     - Риск в долларах на сделку всегда одинаковый
+   - При `use_atr_stops: false` (fallback) — фиксированный процент от цены входа
+3. **TP/SL**: при ATR-стопах `tp = entry + ATR × atr_tp_multiplier`, `sl = entry - ATR × atr_sl_multiplier`
+4. **Real**: `set_leverage()` → `create_market_order(buy)` → ожидание 2с → запрос реальной цены → `set_tpsl()` (TP/SL на бирже)
+5. **Virtual**: запись в БД с расчётными уровнями TP/SL, отслеживание по цене
 
 ### Мониторинг (каждый цикл)
 1. **Real**: сверка позиций с биржей (закрытые по TP/SL → запись реальной цены выхода)
-2. **Breakeven at halfway**: при достижении `partial_close_pct`% пути до TP → перенос SL в безубыток
-3. **Partial close**: при halfway → закрытие 50% позиции + SL в безубыток для остатка
+2. **Breakeven at halfway** (опционально, `breakeven_at_halfway`): при достижении `partial_close_pct`% пути до TP → перенос SL в безубыток
+3. **Partial close** (всегда включён): при halfway → закрытие 50% позиции + SL в безубыток для остатка. Сделки, дошедшие до halfway, больше не уходят в минус
 4. **Time exit**: превышение `max_hold_hours` → закрытие по рынку
 5. **Virtual TP/SL**: сравнение текущей цены с расчётными уровнями
 
 ### Финансовый учёт
-- `total_pnl` — суммарный PnL по всей позиции
+- `pnl` — суммарный PnL по всей позиции (включая частичные закрытия)
 - `partial_pnl` — PnL от частичного закрытия
 - Комиссия пока не учитывается
+
+### Конфигурация (`config.yaml → trading`)
+
+| Параметр | По умолчанию | Смысл |
+|----------|-------------|-------|
+| `cooldown_hours` | 1.0 | Кулдаун после закрытия позиции (0 = без кулдауна) |
+| `use_atr_stops` | `true` | Использовать ATR-based TP/SL вместо фиксированных процентов |
+| `atr_period` | 14 | Период ATR (количество свечей) |
+| `atr_sl_multiplier` | 1.5 | Стоп-лосс = ATR × множитель |
+| `atr_tp_multiplier` | 4.5 | Тейк-профит = ATR × множитель (1:3 risk/reward с SL=1.5) |
+| `take_profit_pct` | 15.0 | TP в % (только при `use_atr_stops: false`) |
+| `stop_loss_pct` | 5.0 | Бюджет риска в % от `position_size_usdt` |
+| `partial_close_enabled` | `true` | Частичная фиксация (всегда включена, игнорируется) |
+| `partial_close_pct` | 50.0 | % пути до TP для частичного закрытия |
+
+### ATR — детали расчёта
+
+- **Источник**: последние `atr_period + 1` свечей из БД (кеш коллектора, 3m таймфрейм)
+- **True Range**: `max(high - low, |high - prev_close|, |low - prev_close|)`
+- **ATR**: среднее арифметическое TR за `atr_period` баров (без Wilder-сглаживания)
+- **Fallback**: если свечей недостаточно → фиксированные проценты `take_profit_pct` / `stop_loss_pct`
+- **Поиск свечей**: сначала `bybit`, при недостатке — `binance`, в пределах 24 часов
 
 ## База данных
 
@@ -224,7 +256,7 @@ SQLite в WAL-режиме (`data/trading_bot.db`). Миграции: Alembic + 
 | `tickers` | Последний тикер (цена, объём) — exchange + symbol |
 | `candles` | OHLCV-свечи — уникальность по exchange + symbol + timestamp |
 | `open_interest` | OI — сохраняется только при изменении значения |
-| `signals` | Сигналы основной стратегии |
+| `signals` | Сигналы основной стратегии, включает `missed_reason` (причина пропуска) |
 | `price_surge_signals` | Сигналы PriceSurgeDetector |
 | `trades` | Торговые позиции (вход/выход, PnL, partial close, TP/SL статус) |
 
@@ -249,10 +281,13 @@ SQLite в WAL-режиме (`data/trading_bot.db`). Миграции: Alembic + 
 - `opened` — позиция открыта
 - `limit` — нет свободных слотов
 - `duplicate` — уже есть позиция по монете
-- `cooldown` — кулдаун 24ч после закрытия
+- `cooldown` — кулдаун после закрытия (длительность: `cooldown_hours`)
+- `risk_off` — входы заблокированы рыночным режимом
 - `no_price` — нет цены для расчёта
-- `error` — ошибка создания ордера
+- `error` — ошибка создания ордера / монета в чёрном списке
 - `disabled` — торговля выключена
+
+Причина пропуска записывается в БД в поле `signals.missed_reason`.
 
 ## Отказоустойчивость
 
@@ -271,6 +306,10 @@ SQLite в WAL-режиме (`data/trading_bot.db`). Миграции: Alembic + 
 - **OI сохраняется только при изменении** — это экономит место, но означает что `_check_oi_trend` работает с тремя точками изменения, а не с тремя последовательными свечами.
 - **DataProvider кеширует на один цикл** — создаётся новый экземпляр в `_on_collect_cycle_done`, внедряется в оба детектора и processor. Кеш живёт до конца цикла, затем объект выбрасывается. Никакого TTL, никаких устаревших данных.
 - **Двойной механизм миграций** — Alembic для структуры + `ALTER TABLE` в `init_db()` для добавления колонок. При больших изменениях схемы лучше использовать только Alembic.
+- **ATR-стопы и таймфрейм** — ATR рассчитывается по свечам из БД (3m). `atr_period=14` означает 14 баров = 42 минуты истории. При смене `collectors.timeframe` ATR будет использовать новый таймфрейм — период в минутах изменится.
+- **ATR fallback** — если у монеты недостаточно свечей в БД за 24 часа (< period+1), стопы рассчитываются по фиксированным процентам `take_profit_pct`/`stop_loss_pct`. Это может случиться для только что залистившихся монет.
+- **Partial close в бэктесте** — срабатывает только если цена достигает halfway-уровня. Сделки, где цена сразу пошла к SL, не получают защиты от частичной фиксации.
+- **CAUTIOUS volume_surge_mult в бэктесте** — не тестируется, так как MarketContext (TradingView) недоступен в исторических данных. Детектор всегда работает с `_regime_volume_mult = 1.0`.
 
 ## Конфигурация и секреты
 

@@ -23,6 +23,7 @@ class SetupDetector(BaseDetector):
         self._exclude_coins = set(c.upper() for c in config.exclude_coins)
         self._hour_bars = max(60 // timeframe_to_minutes(timeframe), 1)
         self._dp = data_provider or DataProvider()
+        self._regime_volume_mult: float = 1.0  # Множитель от рыночного режима
 
     @property
     def data_provider(self) -> DataProvider:
@@ -31,6 +32,18 @@ class SetupDetector(BaseDetector):
     @data_provider.setter
     def data_provider(self, dp: DataProvider) -> None:
         self._dp = dp
+
+    @property
+    def effective_volume_surge_mult(self) -> float:
+        """Эффективный порог объёма с учётом рыночного режима."""
+        return self.config.volume_surge_mult * self._regime_volume_mult
+
+    def apply_regime_multiplier(self, mult: float) -> None:
+        """Применить множитель рыночного режима к volume_surge_mult.
+        Вызывается из Application каждый цикл перед analyze().
+        mult = 1.0 для risk_on, 1.5 для cautious (изменяется через конфиг).
+        """
+        self._regime_volume_mult = mult
 
     async def analyze(self, session) -> list[Signal]:
         symbols = await self._dp.get_active_symbols(session, self._exclude_coins)
@@ -97,7 +110,7 @@ class SetupDetector(BaseDetector):
         recent = volumes[-sustain:]
 
         # Все последние свечи должны быть выше порога
-        threshold = baseline * self.config.volume_surge_mult
+        threshold = baseline * self.effective_volume_surge_mult
         if not np.all(recent >= threshold):
             return False
 

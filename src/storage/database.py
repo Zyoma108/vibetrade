@@ -56,6 +56,7 @@ async def init_db() -> None:
             ("tp_sl_set", "INTEGER DEFAULT 0"),
             ("partial_closed", "INTEGER DEFAULT 0"),
             ("partial_pnl", "FLOAT DEFAULT 0.0"),
+            ("missed_reason", "VARCHAR(32)"),
         ]:
             try:
                 await conn.exec_driver_sql(

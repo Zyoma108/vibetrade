@@ -77,6 +77,11 @@ class StrategyConfig(BaseModel):
     price_surge_minutes: int = Field(
         default=9, description="Промежуток времени для замера роста цены, минут"
     )
+    # Множитель volume_surge_mult для CAUTIOUS режима рынка
+    cautious_volume_surge_mult_increase_pct: float = Field(
+        default=50.0, ge=0.0, le=200.0,
+        description="На сколько % увеличить volume_surge_mult в CAUTIOUS режиме (0 = без изменений)"
+    )
 
 
 class TelegramConfig(BaseModel):
@@ -91,12 +96,18 @@ class TradingConfig(BaseModel):
     position_size_usdt: float = Field(default=100.0, ge=10, description="Объём позиции в USDT (не маржа)")
     position_size_pct: float = Field(default=0.0, ge=0.0, le=100.0, description="% от депозита на позицию (0 = использовать position_size_usdt)")
     leverage: int = Field(default=1, ge=1, le=100, description="Кредитное плечо")
-    take_profit_pct: float = Field(default=12.0, ge=0.5, description="Тейк-профит, %")
-    stop_loss_pct: float = Field(default=4.0, ge=0.5, description="Стоп-лосс, %")
+    take_profit_pct: float = Field(default=12.0, ge=0.5, description="Тейк-профит, % (не используется при use_atr_stops=true)")
+    stop_loss_pct: float = Field(default=4.0, ge=0.5, description="Стоп-лосс, % (при use_atr_stops — бюджет риска в % от position_size_usdt)")
     max_hold_hours: float = Field(default=24.0, ge=1.0, description="Максимальное время удержания позиции, часов")
-    partial_close_enabled: bool = Field(default=False, description="Частичная фиксация на полпути к TP")
+    partial_close_enabled: bool = Field(default=True, description="Частичная фиксация на полпути к TP (всегда включена)")
     partial_close_pct: float = Field(default=50.0, ge=10.0, le=90.0, description="% пути до TP для частичного закрытия / перевода в б/у")
     breakeven_at_halfway: bool = Field(default=False, description="Перевести стоп в б/у на полпути (без частичной фиксации)")
+    cooldown_hours: float = Field(default=1.0, ge=0.0, le=168.0, description="Кулдаун после закрытия позиции, часов (0 = без кулдауна)")
+    # ATR-based стопы
+    use_atr_stops: bool = Field(default=True, description="Использовать ATR-based TP/SL вместо фиксированных процентов")
+    atr_period: int = Field(default=14, ge=3, le=50, description="Период ATR для расчёта стопов")
+    atr_sl_multiplier: float = Field(default=1.5, ge=0.5, le=10.0, description="Множитель ATR для стоп-лосса")
+    atr_tp_multiplier: float = Field(default=4.5, ge=1.0, le=20.0, description="Множитель ATR для тейк-профита (1:3 risk/reward с SL=1.5)")
 
 
 class MarketContextConfig(BaseModel):

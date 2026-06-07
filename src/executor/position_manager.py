@@ -1,15 +1,16 @@
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Callable, Coroutine
 
+import numpy as np
 from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.analytics.base import Signal
 from src.config import TradingConfig
 from src.connectors.exchange import ExchangeConnector
-from src.storage.models import Ticker, Trade
+from src.storage.models import Candle, Ticker, Trade
 
 logger = logging.getLogger(__name__)
 
@@ -186,9 +187,46 @@ class PositionManager:
         # Применяем множитель рыночного режима
         size_usdt *= self.position_size_mult
 
-        quantity = size_usdt / entry_price
-        tp_price = self._tp_price(entry_price, signal.direction)
-        sl_price = self._sl_price(entry_price, signal.direction)
+        # ATR-based TP/SL и размер позиции
+        atr_value = None
+        if self.config.use_atr_stops:
+            atr_value = await self._calculate_atr(session, signal.symbol)
+            if atr_value is None or atr_value <= 0:
+                logger.warning(
+                    f"Не удалось рассчитать ATR для {signal.symbol}, "
+                    f"использую фиксированные проценты"
+                )
+
+        if atr_value and atr_value > 0:
+            # ATR-based стопы
+            sl_distance = atr_value * self.config.atr_sl_multiplier
+            tp_distance = atr_value * self.config.atr_tp_multiplier
+
+            # Бюджет риска в долларах
+            risk_budget = size_usdt * (self.config.stop_loss_pct / 100)
+
+            # Количество = бюджет риска / расстояние до стопа в долларах
+            # Это гарантирует одинаковый риск в долларах независимо от ATR монеты
+            quantity = risk_budget / sl_distance
+
+            tp_price = entry_price + tp_distance
+            sl_price = entry_price - sl_distance
+
+            actual_size = quantity * entry_price
+            logger.info(
+                f"ATR-стопы для {signal.symbol}: ATR=${atr_value:.6f} "
+                f"({atr_value/entry_price*100:.1f}% от цены), "
+                f"SL=${sl_distance:.6f} ({sl_distance/entry_price*100:.1f}%), "
+                f"TP=${tp_distance:.6f} ({tp_distance/entry_price*100:.1f}%), "
+                f"qty={quantity:.2f}, размер=${actual_size:.0f} "
+                f"(бюджет риска=${risk_budget:.2f})"
+            )
+        else:
+            # Фиксированные проценты (fallback)
+            quantity = size_usdt / entry_price
+            tp_price = self._tp_price(entry_price, signal.direction)
+            sl_price = self._sl_price(entry_price, signal.direction)
+
         tp_sl_ok = True  # virtual всегда True
 
         # Реальный ордер на бирже
@@ -231,6 +269,16 @@ class PositionManager:
 
                 tp_price = self._tp_price(entry_price, signal.direction)
                 sl_price = self._sl_price(entry_price, signal.direction)
+                # При ATR-стопах пересчитываем от фактической цены
+                if atr_value and atr_value > 0:
+                    sl_distance = atr_value * self.config.atr_sl_multiplier
+                    tp_distance = atr_value * self.config.atr_tp_multiplier
+                    tp_price = entry_price + tp_distance
+                    sl_price = entry_price - sl_distance
+                    logger.info(
+                        f"ATR TP/SL пересчитаны от цены заполнения: "
+                        f"TP=${tp_price:.6f}, SL=${sl_price:.6f}"
+                    )
 
                 # 4. Выставляем TP/SL от фактической цены
                 tp_sl_ok = False
@@ -296,14 +344,23 @@ class PositionManager:
 
         # Нотификация
         mode_label = "REAL" if self.is_real else "VIRTUAL"
-        margin = size_usdt / self.config.leverage
+        actual_size = quantity * entry_price
+        margin = actual_size / self.config.leverage
+        tp_pct = (tp_price / entry_price - 1) * 100
+        sl_pct = (1 - sl_price / entry_price) * 100
+        atr_info = ""
+        if atr_value and atr_value > 0:
+            atr_info = (
+                f"ATR: ${atr_value:.6f} ({atr_value/entry_price*100:.1f}%)\n"
+            )
         await self._notify(
             f"📈 <b>Открыта позиция [{mode_label}]</b> {signal.direction.upper()}\n"
             f"Монета: {signal.symbol}\n"
             f"Вход: ${entry_price:.6f}\n"
-            f"Объём: ${size_usdt:.0f} (маржа ${margin:.0f} на {self.config.leverage}x)\n"
-            f"TP: ${tp_price:.6f} (+{self.config.take_profit_pct}%)\n"
-            f"SL: ${sl_price:.6f} (-{self.config.stop_loss_pct}%)"
+            f"{atr_info}"
+            f"Объём: ${actual_size:.0f} (маржа ${margin:.0f} на {self.config.leverage}x)\n"
+            f"TP: ${tp_price:.6f} (+{tp_pct:.1f}%)\n"
+            f"SL: ${sl_price:.6f} (-{sl_pct:.1f}%)"
         )
 
         logger.info(
@@ -346,12 +403,19 @@ class PositionManager:
             if self.is_real and not pos.tp_sl_set:
                 try:
                     await asyncio.sleep(1)
+                    tp = self._tp_price(pos.entry_price, pos.direction)
+                    sl = self._sl_price(pos.entry_price, pos.direction)
+                    if self.config.use_atr_stops:
+                        atr = await self._calculate_atr(session, pos.symbol)
+                        if atr and atr > 0:
+                            tp = pos.entry_price + atr * self.config.atr_tp_multiplier
+                            sl = pos.entry_price - atr * self.config.atr_sl_multiplier
                     await self._connector.set_tpsl(  # type: ignore[union-attr]
                         symbol=pos.symbol,
                         side="buy",
                         amount=pos.quantity,
-                        tp_price=self._tp_price(pos.entry_price, pos.direction),
-                        sl_price=self._sl_price(pos.entry_price, pos.direction),
+                        tp_price=tp,
+                        sl_price=sl,
                     )
                     pos.tp_sl_set = True
                     session.add(pos)
@@ -431,12 +495,8 @@ class PositionManager:
                     logger.info(f"Стоп в б/у: {pos.symbol} @ {current_price:.6f}")
                     continue
 
-            # --- Частичное закрытие на полпути к TP (только живая позиция) ---
-            if (
-                self.config.partial_close_enabled
-                and not pos.partial_closed
-                and current_price
-            ):
+            # --- Частичное закрытие на полпути к TP (всегда включено) ---
+            if not pos.partial_closed and current_price:
                 tp = self._tp_price(pos.entry_price, pos.direction)
                 trigger = pos.entry_price + (tp - pos.entry_price) * (
                     self.config.partial_close_pct / 100
@@ -532,6 +592,76 @@ class PositionManager:
         mult = 1 - self.config.stop_loss_pct / 100
         return entry * mult if direction == "long" else entry / mult
 
+    async def _calculate_atr(
+        self, session: AsyncSession, symbol: str, exchange: str = "bybit"
+    ) -> float | None:
+        """Рассчитать ATR по последним свечам для символа.
+
+        Использует свечи из БД (сохранённые коллектором).
+        Возвращает ATR в абсолютных единицах цены или None.
+        """
+        period = self.config.atr_period
+        need_bars = period + 1  # нужно period+1 свечей для period значений TR
+
+        cutoff = datetime.now(tz=timezone.utc) - timedelta(hours=24)
+        stmt = (
+            select(Candle)
+            .where(
+                Candle.symbol == symbol,
+                Candle.exchange == exchange,
+                Candle.timestamp >= cutoff,
+            )
+            .order_by(Candle.timestamp.desc())
+            .limit(need_bars)
+        )
+        result = await session.execute(stmt)
+        candles = result.scalars().all()
+
+        if len(candles) < period:
+            # Пробуем другую биржу
+            for alt_exchange in ("binance", "bybit"):
+                if alt_exchange == exchange:
+                    continue
+                result = await session.execute(
+                    select(Candle)
+                    .where(
+                        Candle.symbol == symbol,
+                        Candle.exchange == alt_exchange,
+                        Candle.timestamp >= cutoff,
+                    )
+                    .order_by(Candle.timestamp.desc())
+                    .limit(need_bars)
+                )
+                candles = result.scalars().all()
+                if len(candles) >= period:
+                    break
+
+        if len(candles) < period:
+            return None
+
+        # Свечи в хронологическом порядке (от старых к новым)
+        candles_list = list(reversed(candles))
+
+        # True Range
+        tr_values = []
+        for i in range(1, len(candles_list)):
+            high = candles_list[i].high
+            low = candles_list[i].low
+            prev_close = candles_list[i - 1].close
+            tr = max(
+                high - low,
+                abs(high - prev_close),
+                abs(low - prev_close),
+            )
+            tr_values.append(tr)
+
+        if not tr_values:
+            return None
+
+        # Wilder's smoothed ATR (среднее арифметическое для простоты)
+        atr = np.mean(tr_values)
+        return float(atr)
+
     async def _count_open(self, session: AsyncSession) -> int:
         from sqlalchemy import func
         stmt = (
@@ -541,9 +671,10 @@ class PositionManager:
         return result.scalar() or 0
 
     async def _in_cooldown(self, session: AsyncSession, symbol: str) -> bool:
-        """Была ли по символу закрытая сделка за последние 24 часа."""
-        from datetime import timedelta
-        cutoff = datetime.now(tz=timezone.utc) - timedelta(hours=24)
+        """Была ли по символу закрытая сделка за последние N часов (из конфига)."""
+        if self.config.cooldown_hours <= 0:
+            return False
+        cutoff = datetime.now(tz=timezone.utc) - timedelta(hours=self.config.cooldown_hours)
         stmt = (
             select(Trade)
             .where(

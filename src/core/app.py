@@ -270,6 +270,18 @@ class Application:
                 self._market_ctx.position_size_multiplier()
             )
 
+        # Передаём рыночный режим в детектор (volume_surge_mult adjustment)
+        if self._detector and self._market_ctx:
+            regime = self._market_ctx.regime
+            if regime == "cautious":
+                increase_pct = (
+                    self.settings.strategy.cautious_volume_surge_mult_increase_pct
+                )
+                mult = 1.0 + increase_pct / 100.0
+                self._detector.apply_regime_multiplier(mult)
+            else:
+                self._detector.apply_regime_multiplier(1.0)
+
         # 1. Синхронизация позиций с биржей (каждый цикл, перед аналитикой)
         if self._positions:
             closed = await self._positions.update_positions(session)
@@ -297,6 +309,10 @@ class Application:
                     _trade, status = await self._positions.open_position(
                         session, sig, signal_id=db_signal.id
                     )
+
+                # Записываем причину пропуска в БД
+                if status != "opened":
+                    db_signal.missed_reason = status
 
                 # Сигнал в Telegram — всегда, с реальной причиной
                 if self._notifier:
