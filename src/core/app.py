@@ -263,24 +263,6 @@ class Application:
                     + self._market_ctx.trend_summary()
                 )
 
-            # Уведомление о смене тренда (для TP/трейлинг стопов)
-            if self._market_ctx.trend_changed and self._notifier:
-                prev_trend_emoji = {
-                    "bullish": "🟢 BULLISH",
-                    "bearish": "🔴 BEARISH",
-                    "neutral": "⚪ NEUTRAL",
-                }.get(self._market_ctx.prev_trend, str(self._market_ctx.prev_trend))
-                current_trend_emoji = {
-                    "bullish": "🟢 BULLISH",
-                    "bearish": "🔴 BEARISH",
-                    "neutral": "⚪ NEUTRAL",
-                }.get(self._market_ctx.trend, self._market_ctx.trend)
-                await self._notifier.send_message(
-                    f"📈 <b>Смена тренда!</b>\n\n"
-                    f"{prev_trend_emoji} → {current_trend_emoji}\n\n"
-                    + self._market_ctx.trend_summary()
-                )
-
         # Передаём контекст в PositionManager
         if self._positions and self._market_ctx:
             self._positions.market_regime = self._market_ctx.regime
