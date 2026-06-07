@@ -443,7 +443,14 @@ class PositionManager:
                 and not pos.partial_closed
                 and current_price
             ):
-                tp = self._tp_price(pos.entry_price, pos.direction)
+                # Рассчитываем TP так же как при входе: entry + ATR × risk_reward_ratio
+                atr = await self._calculate_atr(session, pos.symbol)
+                if atr and atr > 0:
+                    sl_distance = atr
+                else:
+                    sl_distance = pos.entry_price * 0.05
+                tp_distance = sl_distance * self.config.risk_reward_ratio
+                tp = pos.entry_price + tp_distance
                 trigger = pos.entry_price + (tp - pos.entry_price) * (
                     self.config.partial_close_pct / 100
                 )
@@ -474,7 +481,14 @@ class PositionManager:
 
             # --- Частичное закрытие на полпути к TP (всегда включено) ---
             if not pos.partial_closed and current_price:
-                tp = self._tp_price(pos.entry_price, pos.direction)
+                # Рассчитываем TP так же как при входе: entry + ATR × risk_reward_ratio
+                atr = await self._calculate_atr(session, pos.symbol)
+                if atr and atr > 0:
+                    sl_distance = atr
+                else:
+                    sl_distance = pos.entry_price * 0.05
+                tp_distance = sl_distance * self.config.risk_reward_ratio
+                tp = pos.entry_price + tp_distance
                 trigger = pos.entry_price + (tp - pos.entry_price) * (
                     self.config.partial_close_pct / 100
                 )
