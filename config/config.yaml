@@ -5,14 +5,6 @@ exchanges:
     enabled: true
     api_key: "${BYBIT_API_KEY}"
     secret: "${BYBIT_SECRET}"
-    testnet: false
-
-# coins: если список пуст — все монеты с бирж отбираются динамически
-#   по объёму и исключениям. Можно указать конкретные пары:
-# coins:
-#   - BTC/USDT
-#   - ETH/USDT
-coins: []
 
 collectors:
   interval_seconds: 45
@@ -45,8 +37,6 @@ strategy:
   price_growth_max_pct: 12.0     # страховочный потолок роста цены, 0 = выкл
   exhaustion_gain_pct: 5.0       # порог роста для exhaustion-фильтра
   exhaustion_pos_ratio: 0.7      # позиция закрытия свечи (0=low, 1=high)
-  wick_rejection_ratio: 0        # макс. доля верхнего фитиля (0 = выкл)
-  wick_rejection_min_surge: 100.0 # миним. surge для обхода wick-фильтра
   max_hourly_drop_pct: 10.0      # макс. падение за час (защита от рагпулов), 0 = выкл
   cautious_volume_surge_mult_increase_pct: 50.0  # +50% к volume_surge_mult в CAUTIOUS режиме
 
@@ -77,18 +67,12 @@ trading:
   mode: real                      # signal | virtual | real
   exchange: bybit                 # биржа для торговли
   max_positions: 10               # максимум одновременных позиций
-  position_size_usdt: 10.0        # объём позиции в USDT (не маржа!)
-  position_size_pct: 20.0         # % от депозита (0 = использовать position_size_usdt)
   leverage: 10                    # кредитное плечо
-  take_profit_pct: 15.0           # тейк-профит, % (не используется при use_atr_stops)
-  stop_loss_pct: 5.0              # бюджет риска в % от position_size_usdt
+  risk_per_trade_pct: 1.0         # % от депозита, которым рискуем за один стоп
+  risk_reward_ratio: 3.0          # соотношение TP/SL (3.0 = 1:3 risk/reward)
+  atr_period: 14                  # период ATR для расчёта стопа
   max_hold_hours: 48.0            # макс. время удержания, часов
   partial_close_enabled: true     # частичная фиксация (всегда включена)
   partial_close_pct: 50.0         # % пути до TP для закрытия / перевода в б/у
   breakeven_at_halfway: false     # перевести стоп в б/у на полпути (без частичной фиксации)
   cooldown_hours: 1.0             # кулдаун после закрытия позиции (было 24ч)
-  # ATR-based стопы
-  use_atr_stops: true             # использовать ATR-based TP/SL
-  atr_period: 14                  # период ATR
-  atr_sl_multiplier: 1.5          # стоп-лосс = ATR × множитель
-  atr_tp_multiplier: 4.5          # тейк-профит = ATR × множитель (1:3 risk/reward с SL=1.5)

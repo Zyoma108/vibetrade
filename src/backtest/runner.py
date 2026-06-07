@@ -305,27 +305,22 @@ async def run_backtest(
             entry_price = candle_slice[-1]["close"]
 
             # ATR-based TP/SL и размер позиции
-            if cfg.use_atr_stops:
-                atr_value = _calculate_atr_from_slice(
-                    candle_slice, period=cfg.atr_period
-                )
-                if atr_value and atr_value > 0:
-                    sl_distance = atr_value * cfg.atr_sl_multiplier
-                    tp_distance = atr_value * cfg.atr_tp_multiplier
-                    # Бюджет риска в долларах
-                    risk_budget = cfg.position_size_usdt * (cfg.stop_loss_pct / 100)
-                    qty = risk_budget / sl_distance
-                    tp = entry_price + tp_distance
-                    sl = entry_price - sl_distance
-                else:
-                    # Fallback на фиксированные проценты
-                    qty = cfg.position_size_usdt / entry_price
-                    tp = entry_price * (1 + cfg.take_profit_pct / 100)
-                    sl = entry_price * (1 - cfg.stop_loss_pct / 100)
+            atr_value = _calculate_atr_from_slice(
+                candle_slice, period=cfg.atr_period
+            )
+            if atr_value and atr_value > 0:
+                sl_distance = atr_value
             else:
-                qty = cfg.position_size_usdt / entry_price
-                tp = entry_price * (1 + cfg.take_profit_pct / 100)
-                sl = entry_price * (1 - cfg.stop_loss_pct / 100)
+                sl_distance = entry_price * 0.05  # fallback: SL = 5% от цены
+
+            tp_distance = sl_distance * cfg.risk_reward_ratio
+
+            # Бюджет риска: % от виртуального депозита $1000
+            virtual_balance = 1000.0
+            risk_budget = virtual_balance * (cfg.risk_per_trade_pct / 100)
+            qty = risk_budget / sl_distance
+            tp = entry_price + tp_distance
+            sl = entry_price - sl_distance
 
             pos = SimPosition(
                 symbol=sym, entry_price=entry_price, entry_time=ts,

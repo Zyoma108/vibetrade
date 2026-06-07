@@ -211,35 +211,6 @@ class SetupDetector(BaseDetector):
                     )
                     return None
 
-        # Wick rejection filter: огромный верхний фитиль + объём падает = разворот.
-        # Исключение: исключительный объём (surge > 100x) — фитиль может быть шумом.
-        wick_ratio = self.config.wick_rejection_ratio
-        if wick_ratio > 0:
-            last_candle = candles[-1]
-            prev_candle = candles[-2] if len(candles) >= 2 else None
-            candle_range = last_candle["high"] - last_candle["low"]
-            if candle_range > 0 and prev_candle is not None:
-                upper_wick = (last_candle["high"] - last_candle["close"]) / candle_range
-                vol_decel = last_candle["volume"] < prev_candle["volume"]
-                if upper_wick > wick_ratio and vol_decel:
-                    # Проверяем, не исключительный ли объём
-                    wick_min_surge = self.config.wick_rejection_min_surge
-                    if wick_min_surge > 0:
-                        volumes_arr = np.array([c["volume"] for c in candles])
-                        baseline = np.median(
-                            volumes_arr[:self.config.baseline_bars]
-                        )
-                        if baseline > 0:
-                            recent = volumes_arr[-self.config.sustain_bars:]
-                            surge = np.mean(recent) / baseline
-                            if surge < wick_min_surge:
-                                logger.info(
-                                    f"Сигнал пропущен: wick-отбраковка — "
-                                    f"фитиль {upper_wick:.2f} (>{wick_ratio}), "
-                                    f"объём падает, surge x{surge:.0f} (<{wick_min_surge}x)"
-                                )
-                                return None
-
         max_growth = self.config.price_growth_max_pct
         if max_growth > 0 and change_pct > max_growth:
             logger.info(

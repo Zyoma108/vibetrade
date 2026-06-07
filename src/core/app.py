@@ -67,10 +67,8 @@ class Application:
                 exchange_id=trading_exchange,
                 api_key=ex_cfg.api_key,
                 secret=ex_cfg.secret,
-                testnet=ex_cfg.testnet,
             )
-            net = "TESTNET" if ex_cfg.testnet else "MAINNET"
-            logger.info(f"Торговый коннектор: {trading_exchange} ({net})")
+            logger.info(f"Торговый коннектор: {trading_exchange}")
 
         # Аналитика
         self._detector = SetupDetector(
@@ -210,7 +208,6 @@ class Application:
         # Сборщик данных
         self._collector = MarketDataCollector(
             connectors=self._connectors,
-            static_coins=self.settings.coins,
             exclude_coins=self.settings.strategy.exclude_coins,
             min_volume_usdt=self.settings.strategy.min_volume_usdt,
             interval_seconds=self.settings.collectors.interval_seconds,

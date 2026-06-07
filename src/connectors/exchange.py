@@ -26,7 +26,6 @@ class ExchangeConnector:
         exchange_id: str,
         api_key: str = "",
         secret: str = "",
-        testnet: bool = False,
     ):
         exchange_class = getattr(ccxt, exchange_id)
         market_type = _DEFAULT_TYPE.get(exchange_id, "spot")
@@ -37,17 +36,14 @@ class ExchangeConnector:
         }
         if api_key and secret:
             config.update({"apiKey": api_key, "secret": secret})
-        if testnet:
-            config["test"] = True
 
         self._exchange = exchange_class(config)
         self.exchange_id = exchange_id
         self._semaphore = asyncio.Semaphore(5)
 
         if api_key:
-            net = "testnet" if testnet else "mainnet"
             logger.info(
-                f"{exchange_id}: trading connector создан ({net})"
+                f"{exchange_id}: trading connector создан (mainnet)"
             )
 
     @property

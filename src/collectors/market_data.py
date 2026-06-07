@@ -18,7 +18,6 @@ class MarketDataCollector:
     def __init__(
         self,
         connectors: list[ExchangeConnector],
-        static_coins: list[str],
         exclude_coins: list[str],
         min_volume_usdt: float,
         interval_seconds: int = 60,
@@ -26,8 +25,6 @@ class MarketDataCollector:
         on_cycle_done: Callable[[AsyncSession], Coroutine] | None = None,
     ):
         self._connectors = connectors
-        self._static_coins = static_coins
-        self._static_coins_set = set(static_coins)
         self._exclude_coins = set(name.upper() for name in exclude_coins)
         self._min_volume = min_volume_usdt
         self._interval = interval_seconds
@@ -68,8 +65,6 @@ class MarketDataCollector:
         symbol = ticker["symbol"]
         if "/USDT" not in symbol:
             return False
-        if self._static_coins:
-            return symbol in self._static_coins_set
         base = symbol.split("/")[0].upper()
         return base not in self._exclude_coins
 
@@ -209,22 +204,13 @@ class MarketDataCollector:
                 )
 
     def _filter_tickers(self, tickers: list[dict]) -> list[dict]:
+        """Динамический отбор: USDT-пары, объём >= min, не в exclusion list."""
         result = []
 
-        # Если задан статический список — используем только его
-        if self._static_coins:
-            static_set = set(self._static_coins)
-            for t in tickers:
-                if t["symbol"] in static_set:
-                    result.append(t)
-            return result
-
-        # Динамический отбор: USDT-пары, объём >= min, не в exclusion list
         for t in tickers:
             symbol = t["symbol"]
             volume = t.get("volume") or 0
 
-            # Только пары к USDT (не USDC, не BTC и т.д.)
             if "/USDT" not in symbol:
                 continue
 

@@ -166,66 +166,52 @@ class PositionManager:
             logger.warning(f"Нет цены для {signal.symbol}, позиция не открыта")
             return None, "no_price"
 
-        # Размер позиции: % от депозита или фиксированный USDT
-        if self.config.position_size_pct > 0 and self.is_real:
+        # Бюджет риска: % от депозита (real) или фикс. $1000 (virtual)
+        virtual_balance = 1000.0
+        if self.is_real:
             try:
                 balance = await self._connector.fetch_balance()  # type: ignore[union-attr]
                 total = float(balance.get("total", balance.get("free", 0)))
                 if total <= 0:
                     logger.warning("Баланс депозита = 0, позиция не открыта")
                     return None, "error"
-                size_usdt = total * self.config.position_size_pct / 100
-                logger.info(
-                    f"Баланс: ${total:.0f}, позиция {self.config.position_size_pct}% = ${size_usdt:.0f}"
-                )
             except Exception as e:
-                logger.warning(f"Не удалось получить баланс: {e}, используется фикс. размер")
-                size_usdt = self.config.position_size_usdt
+                logger.warning(f"Не удалось получить баланс: {e}, fallback ${virtual_balance:.0f}")
+                total = virtual_balance
         else:
-            size_usdt = self.config.position_size_usdt
+            total = virtual_balance
 
-        # Применяем множитель рыночного режима
-        size_usdt *= self.position_size_mult
+        # Применяем множитель рыночного режима к бюджету риска
+        risk_budget = total * (self.config.risk_per_trade_pct / 100) * self.position_size_mult
 
         # ATR-based TP/SL и размер позиции
-        atr_value = None
-        if self.config.use_atr_stops:
-            atr_value = await self._calculate_atr(session, signal.symbol)
-            if atr_value is None or atr_value <= 0:
-                logger.warning(
-                    f"Не удалось рассчитать ATR для {signal.symbol}, "
-                    f"использую фиксированные проценты"
-                )
-
-        if atr_value and atr_value > 0:
-            # ATR-based стопы
-            sl_distance = atr_value * self.config.atr_sl_multiplier
-            tp_distance = atr_value * self.config.atr_tp_multiplier
-
-            # Бюджет риска в долларах
-            risk_budget = size_usdt * (self.config.stop_loss_pct / 100)
-
-            # Количество = бюджет риска / расстояние до стопа в долларах
-            # Это гарантирует одинаковый риск в долларах независимо от ATR монеты
-            quantity = risk_budget / sl_distance
-
-            tp_price = entry_price + tp_distance
-            sl_price = entry_price - sl_distance
-
-            actual_size = quantity * entry_price
-            logger.info(
-                f"ATR-стопы для {signal.symbol}: ATR=${atr_value:.6f} "
-                f"({atr_value/entry_price*100:.1f}% от цены), "
-                f"SL=${sl_distance:.6f} ({sl_distance/entry_price*100:.1f}%), "
-                f"TP=${tp_distance:.6f} ({tp_distance/entry_price*100:.1f}%), "
-                f"qty={quantity:.2f}, размер=${actual_size:.0f} "
-                f"(бюджет риска=${risk_budget:.2f})"
+        atr_value = await self._calculate_atr(session, signal.symbol)
+        if atr_value is None or atr_value <= 0:
+            # Fallback: SL = 5% от цены входа
+            logger.warning(
+                f"Не удалось рассчитать ATR для {signal.symbol}, "
+                f"использую SL=5% от цены"
             )
+            sl_distance = entry_price * 0.05
         else:
-            # Фиксированные проценты (fallback)
-            quantity = size_usdt / entry_price
-            tp_price = self._tp_price(entry_price, signal.direction)
-            sl_price = self._sl_price(entry_price, signal.direction)
+            sl_distance = atr_value
+
+        tp_distance = sl_distance * self.config.risk_reward_ratio
+        quantity = risk_budget / sl_distance
+
+        tp_price = entry_price + tp_distance
+        sl_price = entry_price - sl_distance
+
+        actual_size = quantity * entry_price
+        atr_pct = (sl_distance / entry_price * 100) if entry_price > 0 else 0
+        tp_pct = (tp_distance / entry_price * 100) if entry_price > 0 else 0
+        logger.info(
+            f"Позиция {signal.symbol}: ATR={'$' + f'{atr_value:.6f}' if atr_value else 'N/A'} "
+            f"SL={sl_distance:.6f} ({atr_pct:.1f}% от цены), "
+            f"TP={tp_distance:.6f} ({tp_pct:.1f}%), "
+            f"qty={quantity:.2f}, размер=${actual_size:.0f} "
+            f"(риск=${risk_budget:.2f}, {self.config.risk_per_trade_pct}% от ${total:.0f})"
+        )
 
         tp_sl_ok = True  # virtual всегда True
 
@@ -267,18 +253,12 @@ class PositionManager:
                 except Exception as e:
                     logger.warning(f"Не удалось получить цену входа с биржи: {e}")
 
-                tp_price = self._tp_price(entry_price, signal.direction)
-                sl_price = self._sl_price(entry_price, signal.direction)
-                # При ATR-стопах пересчитываем от фактической цены
-                if atr_value and atr_value > 0:
-                    sl_distance = atr_value * self.config.atr_sl_multiplier
-                    tp_distance = atr_value * self.config.atr_tp_multiplier
-                    tp_price = entry_price + tp_distance
-                    sl_price = entry_price - sl_distance
-                    logger.info(
-                        f"ATR TP/SL пересчитаны от цены заполнения: "
-                        f"TP=${tp_price:.6f}, SL=${sl_price:.6f}"
-                    )
+                tp_price = entry_price + tp_distance
+                sl_price = entry_price - sl_distance
+                logger.info(
+                    f"TP/SL пересчитаны от цены заполнения: "
+                    f"TP=${tp_price:.6f}, SL=${sl_price:.6f}"
+                )
 
                 # 4. Выставляем TP/SL от фактической цены
                 tp_sl_ok = False
@@ -348,18 +328,14 @@ class PositionManager:
         margin = actual_size / self.config.leverage
         tp_pct = (tp_price / entry_price - 1) * 100
         sl_pct = (1 - sl_price / entry_price) * 100
-        atr_info = ""
-        if atr_value and atr_value > 0:
-            atr_info = (
-                f"ATR: ${atr_value:.6f} ({atr_value/entry_price*100:.1f}%)\n"
-            )
+        atr_str = f"ATR: ${atr_value:.6f} (1 ATR = {sl_pct:.1f}%)\n" if atr_value else ""
         await self._notify(
             f"📈 <b>Открыта позиция [{mode_label}]</b> {signal.direction.upper()}\n"
             f"Монета: {signal.symbol}\n"
             f"Вход: ${entry_price:.6f}\n"
-            f"{atr_info}"
+            f"{atr_str}"
             f"Объём: ${actual_size:.0f} (маржа ${margin:.0f} на {self.config.leverage}x)\n"
-            f"TP: ${tp_price:.6f} (+{tp_pct:.1f}%)\n"
+            f"TP: ${tp_price:.6f} (+{tp_pct:.1f}% | 1:{self.config.risk_reward_ratio})\n"
             f"SL: ${sl_price:.6f} (-{sl_pct:.1f}%)"
         )
 
@@ -403,13 +379,14 @@ class PositionManager:
             if self.is_real and not pos.tp_sl_set:
                 try:
                     await asyncio.sleep(1)
-                    tp = self._tp_price(pos.entry_price, pos.direction)
-                    sl = self._sl_price(pos.entry_price, pos.direction)
-                    if self.config.use_atr_stops:
-                        atr = await self._calculate_atr(session, pos.symbol)
-                        if atr and atr > 0:
-                            tp = pos.entry_price + atr * self.config.atr_tp_multiplier
-                            sl = pos.entry_price - atr * self.config.atr_sl_multiplier
+                    atr = await self._calculate_atr(session, pos.symbol)
+                    if atr and atr > 0:
+                        sl_distance = atr
+                    else:
+                        sl_distance = pos.entry_price * 0.05
+                    tp_distance = sl_distance * self.config.risk_reward_ratio
+                    tp = pos.entry_price + tp_distance
+                    sl = pos.entry_price - sl_distance
                     await self._connector.set_tpsl(  # type: ignore[union-attr]
                         symbol=pos.symbol,
                         side="buy",
@@ -567,8 +544,14 @@ class PositionManager:
 
             # --- Virtual: проверка TP/SL по цене ---
             if not self.is_real and current_price:
-                tp = self._tp_price(pos.entry_price, pos.direction)
-                sl = self._sl_price(pos.entry_price, pos.direction)
+                atr = await self._calculate_atr(session, pos.symbol)
+                if atr and atr > 0:
+                    sl_distance = atr
+                else:
+                    sl_distance = pos.entry_price * 0.05
+                tp_distance = sl_distance * self.config.risk_reward_ratio
+                tp = pos.entry_price + tp_distance
+                sl = pos.entry_price - sl_distance
 
                 if pos.direction == "long":
                     if current_price >= tp:
@@ -583,14 +566,6 @@ class PositionManager:
     # ==================================================================
     # Helpers
     # ==================================================================
-
-    def _tp_price(self, entry: float, direction: str) -> float:
-        mult = 1 + self.config.take_profit_pct / 100
-        return entry * mult if direction == "long" else entry / mult
-
-    def _sl_price(self, entry: float, direction: str) -> float:
-        mult = 1 - self.config.stop_loss_pct / 100
-        return entry * mult if direction == "long" else entry / mult
 
     async def _calculate_atr(
         self, session: AsyncSession, symbol: str, exchange: str = "bybit"

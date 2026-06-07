@@ -14,7 +14,6 @@ class ExchangeConfig(BaseModel):
     enabled: bool = True
     api_key: str = ""
     secret: str = ""
-    testnet: bool = False
 
 
 class CollectorsConfig(BaseModel):
@@ -55,12 +54,6 @@ class StrategyConfig(BaseModel):
     exhaustion_pos_ratio: float = Field(
         default=0.7, description="Позиция закрытия последней свечи (0=low, 1=high), выше которой + exhaustion_gain = сигнал истощения"
     )
-    wick_rejection_ratio: float = Field(
-        default=0.8, description="Макс. доля верхнего фитиля в диапазоне свечи для отбраковки (0 = фильтр выключен)"
-    )
-    wick_rejection_min_surge: float = Field(
-        default=100.0, description="Минимальный surge-ratio для обхода wick-фильтра (исключительный объём)"
-    )
     max_hourly_drop_pct: float = Field(
         default=10.0, description="Максимальное падение за час, % (защита от рагпулов, 0 = выкл)"
     )
@@ -93,21 +86,15 @@ class TradingConfig(BaseModel):
     mode: str = "signal"              # signal | virtual | real
     exchange: str = "bybit"           # биржа для торговли
     max_positions: int = Field(default=10, ge=1, description="Максимум одновременных позиций")
-    position_size_usdt: float = Field(default=100.0, ge=10, description="Объём позиции в USDT (не маржа)")
-    position_size_pct: float = Field(default=0.0, ge=0.0, le=100.0, description="% от депозита на позицию (0 = использовать position_size_usdt)")
     leverage: int = Field(default=1, ge=1, le=100, description="Кредитное плечо")
-    take_profit_pct: float = Field(default=12.0, ge=0.5, description="Тейк-профит, % (не используется при use_atr_stops=true)")
-    stop_loss_pct: float = Field(default=4.0, ge=0.5, description="Стоп-лосс, % (при use_atr_stops — бюджет риска в % от position_size_usdt)")
+    risk_per_trade_pct: float = Field(default=1.0, ge=0.1, le=100.0, description="% от депозита, которым рискуем за один стоп")
+    risk_reward_ratio: float = Field(default=3.0, ge=1.0, le=20.0, description="Соотношение TP/SL (3.0 = 1:3 risk/reward)")
+    atr_period: int = Field(default=14, ge=3, le=50, description="Период ATR для расчёта стопов")
     max_hold_hours: float = Field(default=24.0, ge=1.0, description="Максимальное время удержания позиции, часов")
     partial_close_enabled: bool = Field(default=True, description="Частичная фиксация на полпути к TP (всегда включена)")
     partial_close_pct: float = Field(default=50.0, ge=10.0, le=90.0, description="% пути до TP для частичного закрытия / перевода в б/у")
     breakeven_at_halfway: bool = Field(default=False, description="Перевести стоп в б/у на полпути (без частичной фиксации)")
     cooldown_hours: float = Field(default=1.0, ge=0.0, le=168.0, description="Кулдаун после закрытия позиции, часов (0 = без кулдауна)")
-    # ATR-based стопы
-    use_atr_stops: bool = Field(default=True, description="Использовать ATR-based TP/SL вместо фиксированных процентов")
-    atr_period: int = Field(default=14, ge=3, le=50, description="Период ATR для расчёта стопов")
-    atr_sl_multiplier: float = Field(default=1.5, ge=0.5, le=10.0, description="Множитель ATR для стоп-лосса")
-    atr_tp_multiplier: float = Field(default=4.5, ge=1.0, le=20.0, description="Множитель ATR для тейк-профита (1:3 risk/reward с SL=1.5)")
 
 
 class MarketContextConfig(BaseModel):
@@ -122,7 +109,6 @@ class MarketContextConfig(BaseModel):
 
 class Settings(BaseModel):
     exchanges: dict[str, ExchangeConfig]
-    coins: list[str] = []  # пустой список = сканировать все монеты динамически
     collectors: CollectorsConfig = CollectorsConfig()
     strategy: StrategyConfig = StrategyConfig()
     strategy_price_surge: Optional[StrategyConfig] = None   # вторая стратегия (только сигналы, без торговли)
