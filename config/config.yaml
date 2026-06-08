@@ -32,7 +32,7 @@ strategy:
   sustain_bars: 4                # сколько свечей подряд выше порога для сигнала
   oi_slope_min_pct: 1.0          # минимальный наклон OI, %
   smooth_max_ratio: 5.0           # макс. отношение макс/медиана объёма (отсекает спайки)
-  dump_volume_mult: 3.0           # защита от свечей-выбросов, 0 = выкл
+  dump_volume_mult: 0.0           # защита от свечей-выбросов, 0 = выкл
   price_growth_min_pct: 1.0      # минимальный рост цены за sustain-окно, %
   price_growth_max_pct: 12.0     # страховочный потолок роста цены, 0 = выкл
   exhaustion_gain_pct: 5.0       # порог роста для exhaustion-фильтра
@@ -73,6 +73,6 @@ trading:
   stop_loss_pct: 5.0              # стоп-лосс, % от цены входа
   max_hold_hours: 48.0            # макс. время удержания, часов
   partial_close_enabled: true     # частичная фиксация (всегда включена)
-  partial_close_pct: 50.0         # % пути до TP для закрытия / перевода в б/у
+  partial_close_pct: 40.0         # % пути до TP для закрытия / перевода в б/у
   breakeven_at_halfway: false     # перевести стоп в б/у на полпути (без частичной фиксации)
   cooldown_hours: 1.0             # кулдаун после закрытия позиции
