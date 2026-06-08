@@ -17,7 +17,7 @@ from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from src.analytics.detector import SetupDetector
-from src.analytics.utils import OI_TREND_BARS, calculate_oi_slope_pct, timeframe_to_minutes
+from src.analytics.utils import OI_TREND_BARS, calculate_oi_slope_pct
 from src.config import Settings
 from src.storage.models import Candle, OpenInterest
 
@@ -59,29 +59,6 @@ def _bar(rows, idx):
     if 0 <= idx < len(rows):
         return rows[idx]
     return None
-
-
-def _calculate_atr_from_slice(candles: list[dict], period: int = 14) -> float | None:
-    """Рассчитать ATR из слайса свечей (хронологический порядок)."""
-    if len(candles) < period + 1:
-        return None
-
-    tr_values = []
-    for i in range(1, len(candles)):
-        high = candles[i]["high"]
-        low = candles[i]["low"]
-        prev_close = candles[i - 1]["close"]
-        tr = max(
-            high - low,
-            abs(high - prev_close),
-            abs(low - prev_close),
-        )
-        tr_values.append(tr)
-
-    if not tr_values:
-        return None
-
-    return float(np.mean(tr_values[-period:]))
 
 
 # ---------------------------------------------------------------------------
@@ -304,15 +281,8 @@ async def run_backtest(
 
             entry_price = candle_slice[-1]["close"]
 
-            # ATR-based TP/SL и размер позиции
-            atr_value = _calculate_atr_from_slice(
-                candle_slice, period=cfg.atr_period
-            )
-            if atr_value and atr_value > 0:
-                sl_distance = atr_value
-            else:
-                sl_distance = entry_price * 0.05  # fallback: SL = 5% от цены
-
+            # TP/SL: фиксированные проценты от цены входа
+            sl_distance = entry_price * (cfg.stop_loss_pct / 100)
             tp_distance = sl_distance * cfg.risk_reward_ratio
 
             # Бюджет риска: % от виртуального депозита $1000

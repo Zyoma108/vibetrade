@@ -89,7 +89,7 @@ class TradingConfig(BaseModel):
     leverage: int = Field(default=1, ge=1, le=100, description="Кредитное плечо")
     risk_per_trade_pct: float = Field(default=1.0, ge=0.1, le=100.0, description="% от депозита, которым рискуем за один стоп")
     risk_reward_ratio: float = Field(default=3.0, ge=1.0, le=20.0, description="Соотношение TP/SL (3.0 = 1:3 risk/reward)")
-    atr_period: int = Field(default=14, ge=3, le=50, description="Период ATR для расчёта стопов")
+    stop_loss_pct: float = Field(default=5.0, ge=0.5, le=50.0, description="Стоп-лосс, % от цены входа")
     max_hold_hours: float = Field(default=24.0, ge=1.0, description="Максимальное время удержания позиции, часов")
     partial_close_enabled: bool = Field(default=True, description="Частичная фиксация на полпути к TP (всегда включена)")
     partial_close_pct: float = Field(default=50.0, ge=10.0, le=90.0, description="% пути до TP для частичного закрытия / перевода в б/у")

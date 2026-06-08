@@ -3,14 +3,13 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Coroutine
 
-import numpy as np
 from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.analytics.base import Signal
 from src.config import TradingConfig
 from src.connectors.exchange import ExchangeConnector
-from src.storage.models import Candle, Ticker, Trade
+from src.storage.models import Ticker, Trade
 
 logger = logging.getLogger(__name__)
 
@@ -184,18 +183,8 @@ class PositionManager:
         # Применяем множитель рыночного режима к бюджету риска
         risk_budget = total * (self.config.risk_per_trade_pct / 100) * self.position_size_mult
 
-        # ATR-based TP/SL и размер позиции
-        atr_value = await self._calculate_atr(session, signal.symbol)
-        if atr_value is None or atr_value <= 0:
-            # Fallback: SL = 5% от цены входа
-            logger.warning(
-                f"Не удалось рассчитать ATR для {signal.symbol}, "
-                f"использую SL=5% от цены"
-            )
-            sl_distance = entry_price * 0.05
-        else:
-            sl_distance = atr_value
-
+        # TP/SL: фиксированные проценты от цены входа
+        sl_distance = entry_price * (self.config.stop_loss_pct / 100)
         tp_distance = sl_distance * self.config.risk_reward_ratio
         quantity = risk_budget / sl_distance
 
@@ -203,11 +192,10 @@ class PositionManager:
         sl_price = entry_price - sl_distance
 
         actual_size = quantity * entry_price
-        atr_pct = (sl_distance / entry_price * 100) if entry_price > 0 else 0
         tp_pct = (tp_distance / entry_price * 100) if entry_price > 0 else 0
+        sl_pct = (sl_distance / entry_price * 100) if entry_price > 0 else 0
         logger.info(
-            f"Позиция {signal.symbol}: ATR={'$' + f'{atr_value:.6f}' if atr_value else 'N/A'} "
-            f"SL={sl_distance:.6f} ({atr_pct:.1f}% от цены), "
+            f"Позиция {signal.symbol}: SL={sl_distance:.6f} ({sl_pct:.1f}%), "
             f"TP={tp_distance:.6f} ({tp_pct:.1f}%), "
             f"qty={quantity:.2f}, размер=${actual_size:.0f} "
             f"(риск=${risk_budget:.2f}, {self.config.risk_per_trade_pct}% от ${total:.0f})"
@@ -253,8 +241,8 @@ class PositionManager:
                 except Exception as e:
                     logger.warning(f"Не удалось получить цену входа с биржи: {e}")
 
-                tp_price = entry_price + tp_distance
-                sl_price = entry_price - sl_distance
+                tp_price = self._tp_price(entry_price)
+                sl_price = self._sl_price(entry_price)
                 logger.info(
                     f"TP/SL пересчитаны от цены заполнения: "
                     f"TP=${tp_price:.6f}, SL=${sl_price:.6f}"
@@ -328,12 +316,10 @@ class PositionManager:
         margin = actual_size / self.config.leverage
         tp_pct = (tp_price / entry_price - 1) * 100
         sl_pct = (1 - sl_price / entry_price) * 100
-        atr_str = f"ATR: ${atr_value:.6f} (1 ATR = {sl_pct:.1f}%)\n" if atr_value else ""
         await self._notify(
             f"📈 <b>Открыта позиция [{mode_label}]</b> {signal.direction.upper()}\n"
             f"Монета: {signal.symbol}\n"
             f"Вход: ${entry_price:.6f}\n"
-            f"{atr_str}"
             f"Объём: ${actual_size:.0f} (маржа ${margin:.0f} на {self.config.leverage}x)\n"
             f"TP: ${tp_price:.6f} (+{tp_pct:.1f}% | 1:{self.config.risk_reward_ratio})\n"
             f"SL: ${sl_price:.6f} (-{sl_pct:.1f}%)"
@@ -379,14 +365,8 @@ class PositionManager:
             if self.is_real and not pos.tp_sl_set:
                 try:
                     await asyncio.sleep(1)
-                    atr = await self._calculate_atr(session, pos.symbol)
-                    if atr and atr > 0:
-                        sl_distance = atr
-                    else:
-                        sl_distance = pos.entry_price * 0.05
-                    tp_distance = sl_distance * self.config.risk_reward_ratio
-                    tp = pos.entry_price + tp_distance
-                    sl = pos.entry_price - sl_distance
+                    tp = self._tp_price(pos.entry_price)
+                    sl = self._sl_price(pos.entry_price)
                     await self._connector.set_tpsl(  # type: ignore[union-attr]
                         symbol=pos.symbol,
                         side="buy",
@@ -443,14 +423,7 @@ class PositionManager:
                 and not pos.partial_closed
                 and current_price
             ):
-                # Рассчитываем TP так же как при входе: entry + ATR × risk_reward_ratio
-                atr = await self._calculate_atr(session, pos.symbol)
-                if atr and atr > 0:
-                    sl_distance = atr
-                else:
-                    sl_distance = pos.entry_price * 0.05
-                tp_distance = sl_distance * self.config.risk_reward_ratio
-                tp = pos.entry_price + tp_distance
+                tp = self._tp_price(pos.entry_price)
                 trigger = pos.entry_price + (tp - pos.entry_price) * (
                     self.config.partial_close_pct / 100
                 )
@@ -481,14 +454,7 @@ class PositionManager:
 
             # --- Частичное закрытие на полпути к TP (всегда включено) ---
             if not pos.partial_closed and current_price:
-                # Рассчитываем TP так же как при входе: entry + ATR × risk_reward_ratio
-                atr = await self._calculate_atr(session, pos.symbol)
-                if atr and atr > 0:
-                    sl_distance = atr
-                else:
-                    sl_distance = pos.entry_price * 0.05
-                tp_distance = sl_distance * self.config.risk_reward_ratio
-                tp = pos.entry_price + tp_distance
+                tp = self._tp_price(pos.entry_price)
                 trigger = pos.entry_price + (tp - pos.entry_price) * (
                     self.config.partial_close_pct / 100
                 )
@@ -558,14 +524,8 @@ class PositionManager:
 
             # --- Virtual: проверка TP/SL по цене ---
             if not self.is_real and current_price:
-                atr = await self._calculate_atr(session, pos.symbol)
-                if atr and atr > 0:
-                    sl_distance = atr
-                else:
-                    sl_distance = pos.entry_price * 0.05
-                tp_distance = sl_distance * self.config.risk_reward_ratio
-                tp = pos.entry_price + tp_distance
-                sl = pos.entry_price - sl_distance
+                tp = self._tp_price(pos.entry_price)
+                sl = self._sl_price(pos.entry_price)
 
                 if pos.direction == "long":
                     if current_price >= tp:
@@ -581,75 +541,14 @@ class PositionManager:
     # Helpers
     # ==================================================================
 
-    async def _calculate_atr(
-        self, session: AsyncSession, symbol: str, exchange: str = "bybit"
-    ) -> float | None:
-        """Рассчитать ATR по последним свечам для символа.
+    def _tp_price(self, entry: float) -> float:
+        """TP: entry + stop_loss_pct% × risk_reward_ratio."""
+        sl_distance = entry * (self.config.stop_loss_pct / 100)
+        return entry + sl_distance * self.config.risk_reward_ratio
 
-        Использует свечи из БД (сохранённые коллектором).
-        Возвращает ATR в абсолютных единицах цены или None.
-        """
-        period = self.config.atr_period
-        need_bars = period + 1  # нужно period+1 свечей для period значений TR
-
-        cutoff = datetime.now(tz=timezone.utc) - timedelta(hours=24)
-        stmt = (
-            select(Candle)
-            .where(
-                Candle.symbol == symbol,
-                Candle.exchange == exchange,
-                Candle.timestamp >= cutoff,
-            )
-            .order_by(Candle.timestamp.desc())
-            .limit(need_bars)
-        )
-        result = await session.execute(stmt)
-        candles = result.scalars().all()
-
-        if len(candles) < period:
-            # Пробуем другую биржу
-            for alt_exchange in ("binance", "bybit"):
-                if alt_exchange == exchange:
-                    continue
-                result = await session.execute(
-                    select(Candle)
-                    .where(
-                        Candle.symbol == symbol,
-                        Candle.exchange == alt_exchange,
-                        Candle.timestamp >= cutoff,
-                    )
-                    .order_by(Candle.timestamp.desc())
-                    .limit(need_bars)
-                )
-                candles = result.scalars().all()
-                if len(candles) >= period:
-                    break
-
-        if len(candles) < period:
-            return None
-
-        # Свечи в хронологическом порядке (от старых к новым)
-        candles_list = list(reversed(candles))
-
-        # True Range
-        tr_values = []
-        for i in range(1, len(candles_list)):
-            high = candles_list[i].high
-            low = candles_list[i].low
-            prev_close = candles_list[i - 1].close
-            tr = max(
-                high - low,
-                abs(high - prev_close),
-                abs(low - prev_close),
-            )
-            tr_values.append(tr)
-
-        if not tr_values:
-            return None
-
-        # Wilder's smoothed ATR (среднее арифметическое для простоты)
-        atr = np.mean(tr_values)
-        return float(atr)
+    def _sl_price(self, entry: float) -> float:
+        """SL: entry − stop_loss_pct%."""
+        return entry * (1 - self.config.stop_loss_pct / 100)
 
     async def _count_open(self, session: AsyncSession) -> int:
         from sqlalchemy import func
