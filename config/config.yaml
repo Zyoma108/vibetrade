@@ -7,7 +7,7 @@ exchanges:
     secret: "${BYBIT_SECRET}"
 
 collectors:
-  interval_seconds: 45
+  interval_seconds: 15
   timeframe: 3m                  # таймфрейм свечей (1m, 5m, 15m, 1h)
 
 strategy:
