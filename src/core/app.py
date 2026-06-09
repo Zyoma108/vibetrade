@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.analytics.base import BaseDetector
-from src.analytics.data_provider import DataProvider
+from src.analytics.data_provider import CandleCache, DataProvider
 from src.analytics.detector import SetupDetector
 from src.analytics.market_context import MarketContext
 from src.analytics.price_surge import PriceSurgeDetector
@@ -39,6 +39,7 @@ class Application:
         self._notifier_price_surge: TelegramNotifier | None = None
         self._ps_processor: PriceSurgeSignalProcessor | None = None
         self._positions: PositionManager | None = None
+        self._candle_cache = CandleCache()
 
     async def start(self) -> None:
         logger.info("Запуск приложения...")
@@ -240,8 +241,8 @@ class Application:
     async def _on_collect_cycle_done(self, session: AsyncSession) -> None:
         """Вызывается после каждого цикла сбора данных."""
 
-        # Создаём общий DataProvider на цикл — оба детектора кешируют данные в нём
-        dp = DataProvider()
+        # Создаём общий DataProvider на цикл — с персистентным кешем свечей
+        dp = DataProvider(candle_cache=self._candle_cache)
         if self._detector:
             self._detector.data_provider = dp
         if self._detector_price_surge:
