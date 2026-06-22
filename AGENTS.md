@@ -38,7 +38,7 @@ src/
 │   └── telegram_bot.py        # TelegramNotifier — бот с командами и отправкой сигналов
 ├── storage/
 │   ├── database.py            # engine, async_session, init_db (с авто-ALTER TABLE)
-│   ├── models.py              # ORM-модели: Candle, Ticker, OpenInterest, Signal, Trade, PriceSurgeSignal
+│   ├── models.py              # ORM: Candle, Ticker, OpenInterest, Signal, Trade, PriceSurgeSignal, MarketContextSnapshot
 │   └── stats.py               # trade_stats() — сбор статистики для команды /stats
 ├── backtest/
 │   ├── loader.py              # Загрузка исторических данных в data/backtest.db
@@ -49,6 +49,10 @@ src/
 │   ├── analyze_performance.py  # Комплексный анализ на нескольких БД (свип + комбинации)
 │   ├── test_blowoff_filter.py  # Тест фильтра памп-энд-дампов
 │   └── test_improved_filters.py # Тест расширенных фильтров (breadth, extended price)
+tests/
+│   ├── test_data_provider.py     # Тесты DataProvider и CandleCache
+│   ├── test_detector.py          # Тесты SetupDetector (volume pattern, price trend)
+│   └── test_position_manager.py  # Тесты PositionManager (Circuit Breaker, TP/SL, позиции)
 config/
 ├── config.yaml                # Боевая конфигурация
 ├── config.example.yaml        # Пример с комментариями
@@ -98,6 +102,7 @@ Application.start()
    - При смене режима → уведомление в Telegram
    - Режим передаётся в `PositionManager` (блок входа в risk-off, 50% размера в cautious)
    - Режим передаётся в `SetupDetector.apply_regime_multiplier()` (×1.5 к `volume_surge_mult` в cautious)
+   - **Сохраняется снимок в `market_context_snapshots`** для использования в бэктестах
 1. `PositionManager.update_positions()` — проверка TP/SL/времени
 2. `SetupDetector.analyze()` → для каждого сигнала:
    - Сохранить Signal в БД
@@ -180,13 +185,14 @@ Application.start()
 | `volume_surge_mult` | 15.0 | Во сколько раз объём превышает норму |
 | `sustain_bars` | 4 | Сколько свечей подряд выше порога |
 | `baseline_bars` | 70 | База для расчёта нормального объёма |
-| `oi_slope_min_pct` | 1.0% | Минимальный наклон OI |
+| `min_baseline_volume_usdt` | 3000 | Мин. медиана объёма в USDT (фильтр низкой ликвидности) |
+| `oi_slope_min_pct` | 2.0% | Минимальный наклон OI |
 | `price_growth_min_pct` | 1.0% | Мин. рост цены за sustain-окно |
 | `price_growth_max_pct` | 12.0% | Страховочный потолок роста (0 = выкл) |
 | `exhaustion_gain_pct` | 5.0% | Порог роста для exhaustion-фильтра |
 | `exhaustion_pos_ratio` | 0.7 | Позиция закрытия свечи (0=low, 1=high) |
 | `smooth_max_ratio` | 5.0 | Макс. отношение макс/медиана объёма |
-| `dump_volume_mult` | 3.0 | Защита от свечей-выбросов |
+| `dump_volume_mult` | 0.0 | Защита от свечей-выбросов (0 = выкл) |
 | `max_hourly_drop_pct` | 10.0% | Защита от рагпулов |
 | `cautious_volume_surge_mult_increase_pct` | 50.0% | На сколько % увеличить `volume_surge_mult` в CAUTIOUS режиме (0 = без изменений) |
 
@@ -232,7 +238,7 @@ Application.start()
 | `risk_per_trade_pct` | 1.0 | % от депозита, которым рискуем за один стоп |
 | `risk_reward_ratio` | 3.0 | Соотношение TP/SL (3.0 = 1:3 risk/reward) |
 | `stop_loss_pct` | 5.0 | Стоп-лосс, % от цены входа |
-| `max_hold_hours` | 24.0 | Макс. время удержания позиции |
+| `max_hold_hours` | 48.0 | Макс. время удержания позиции |
 | `partial_close_enabled` | `true` | Частичная фиксация (всегда включена, игнорируется) |
 | `partial_close_pct` | 50.0 | % пути до TP для частичного закрытия |
 | `cooldown_hours` | 1.0 | Кулдаун после закрытия позиции (0 = без кулдауна) |
