@@ -125,6 +125,10 @@ Application.start()
 
 В CAUTIOUS режиме `volume_surge_mult` увеличивается на `cautious_volume_surge_mult_increase_pct`% (по умолчанию 50%) — бот берёт только самые сильные сетапы. Множитель применяется через `SetupDetector.apply_regime_multiplier()` каждый цикл.
 
+### Сохранение в БД
+
+Каждый цикл (после `MarketContext.update()`) текущее состояние сохраняется в таблицу `market_context_snapshots` через метод `MarketContext.get_snapshot()`. Это позволяет бэктестам загружать историю рыночного контекста и симулировать фильтрацию по режиму (risk_off → блок входа, cautious → повышенный volume_surge_mult). Если таблица отсутствует в БД — бэктест логирует предупреждение и продолжает без режимной фильтрации.
+
 ### Команда `/trend`
 
 Возвращает: текущий режим с длительностью, Supertrend OTHERS, BTC 1h, OTHERS 1h, предыдущий режим.
@@ -196,8 +200,8 @@ Application.start()
 ## Управление позициями (`PositionManager`)
 
 ### Открытие позиции
-1. **Guard-проверки**: лимит позиций, бан-лист, дубликат, кулдаун (`cooldown_hours`, по умолчанию 1ч), нет цены, risk_off
-2. **Бюджет риска**: `баланс × risk_per_trade_pct / 100` (real — с биржи, virtual — $1000), с множителем рыночного режима
+1. **Guard-проверки**: risk_off, circuit_breaker, лимит позиций, бан-лист, дубликат, кулдаун (`cooldown_hours`, по умолчанию 1ч), нет цены
+2. **Бюджет риска**: `баланс × risk_per_trade_pct / 100 × position_size_mult × cb_mult` (real — с биржи, virtual — $1000), где `position_size_mult` — множитель рыночного режима, `cb_mult` — множитель Circuit Breaker
 3. **TP/SL**: `sl = entry × (1 − stop_loss_pct/100)`, `tp = entry + (entry × stop_loss_pct/100) × risk_reward_ratio`
 4. **Размер позиции**: `quantity = risk_budget / (entry × stop_loss_pct/100)`
 5. **Real**: `set_leverage()` → `create_market_order(buy)` → ожидание 2с → запрос реальной цены → `set_tpsl()` (TP/SL на бирже)
@@ -226,6 +230,21 @@ Application.start()
 | `partial_close_enabled` | `true` | Частичная фиксация (всегда включена, игнорируется) |
 | `partial_close_pct` | 50.0 | % пути до TP для частичного закрытия |
 | `cooldown_hours` | 1.0 | Кулдаун после закрытия позиции (0 = без кулдауна) |
+| `circuit_breaker_enabled` | `true` | Включить Circuit Breaker — защиту от серий убытков |
+| `circuit_breaker_loss_streak_reduce` | 3 | После N убытков подряд уменьшить размер позиции |
+| `circuit_breaker_reduce_mult_pct` | 50.0 | Множитель размера при срабатывании, % |
+| `circuit_breaker_loss_streak_stop` | 5 | После N убытков подряд полностью остановить торговлю |
+| `circuit_breaker_stop_minutes` | 60 | На сколько минут остановить торговлю |
+
+### Circuit Breaker (защита от серий убытков)
+
+Встроен в `PositionManager`. Отслеживает количество убыточных сделок подряд. При достижении порогов:
+
+1. **3 убытка подряд** (`circuit_breaker_loss_streak_reduce`) → размер позиции уменьшается до `circuit_breaker_reduce_mult_pct`% (по умолчанию 50%)
+2. **5 убытков подряд** (`circuit_breaker_loss_streak_stop`) → полная остановка торговли на `circuit_breaker_stop_minutes` минут (по умолчанию 60)
+3. **Любая прибыльная сделка** → сброс счётчика, возобновление нормальной торговли
+
+Статус `circuit_breaker_stop` возвращается `open_position()` и записывается в `signals.missed_reason`. Бэктест-раннер симулирует ту же логику.
 
 ### Расчёт позиции
 
@@ -250,6 +269,7 @@ SQLite в WAL-режиме (`data/trading_bot.db`). Миграции: Alembic + 
 | `signals` | Сигналы основной стратегии, включает `missed_reason` (причина пропуска) |
 | `price_surge_signals` | Сигналы PriceSurgeDetector |
 | `trades` | Торговые позиции (вход/выход, PnL, partial close, TP/SL статус) |
+| `market_context_snapshots` | Снимки рыночного контекста (regime, trend, Supertrend, BTC/OTHERS) |
 
 ## Telegram-боты
 
@@ -276,6 +296,7 @@ SQLite в WAL-режиме (`data/trading_bot.db`). Миграции: Alembic + 
 - `risk_off` — входы заблокированы рыночным режимом
 - `no_price` — нет цены для расчёта
 - `error` — ошибка создания ордера / монета в чёрном списке
+- `circuit_breaker_stop` — Circuit Breaker: полная остановка после серии убытков
 - `disabled` — торговля выключена
 
 Причина пропуска записывается в БД в поле `signals.missed_reason`.
@@ -298,7 +319,7 @@ SQLite в WAL-режиме (`data/trading_bot.db`). Миграции: Alembic + 
 - **DataProvider кеширует на один цикл** — создаётся новый экземпляр в `_on_collect_cycle_done`, внедряется в оба детектора и processor. Кеш живёт до конца цикла, затем объект выбрасывается. Никакого TTL, никаких устаревших данных.
 - **Двойной механизм миграций** — Alembic для структуры + `ALTER TABLE` в `init_db()` для добавления колонок. При больших изменениях схемы лучше использовать только Alembic.
 - **Partial close в бэктесте** — срабатывает только если цена достигает halfway-уровня. Сделки, где цена сразу пошла к SL, не получают защиты от частичной фиксации.
-- **CAUTIOUS volume_surge_mult в бэктесте** — не тестируется, так как MarketContext (TradingView) недоступен в исторических данных. Детектор всегда работает с `_regime_volume_mult = 1.0`.
+- **MarketContext в бэктесте** — если в БД есть таблица `market_context_snapshots` (записи от live-бота), бэктест загружает их и применяет: risk_off блокирует входы, cautious повышает `volume_surge_mult`. Если таблицы нет — логируется предупреждение, бэктест продолжает без режимной фильтрации.
 
 ## Конфигурация и секреты
 
@@ -336,6 +357,12 @@ make migrate-up
 
 # Тесты
 make test
+
+# Анализ пропущенных сигналов
+.venv/bin/python scripts/analyze_missed_signals.py    # Поиск монет с сильными движениями без сигналов
+.venv/bin/python scripts/analyze_performance.py        # Комплексный бэктест-анализ (параметр-свип + комбинации)
+.venv/bin/python scripts/test_blowoff_filter.py        # Тест фильтра "blow-off top" против памп-энд-дампов
+.venv/bin/python scripts/test_improved_filters.py      # Тест расширенных фильтров (market breadth, extended price)
 ```
 
 ## Подбор параметров (`scripts/backtest_sweep.py`)
