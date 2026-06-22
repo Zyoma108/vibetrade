@@ -43,6 +43,12 @@ src/
 ├── backtest/
 │   ├── loader.py              # Загрузка исторических данных в data/backtest.db
 │   └── runner.py              # Симуляция стратегии на исторических свечах
+├── scripts/
+│   ├── backtest_sweep.py       # Подбор оптимальных параметров стратегии
+│   ├── analyze_missed_signals.py # Поиск пропущенных сетапов (сильные движения без сигналов)
+│   ├── analyze_performance.py  # Комплексный анализ на нескольких БД (свип + комбинации)
+│   ├── test_blowoff_filter.py  # Тест фильтра памп-энд-дампов
+│   └── test_improved_filters.py # Тест расширенных фильтров (breadth, extended price)
 config/
 ├── config.yaml                # Боевая конфигурация
 ├── config.example.yaml        # Пример с комментариями
