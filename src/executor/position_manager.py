@@ -30,6 +30,10 @@ class PositionManager:
         self.market_regime: str = "unknown"
         self.position_size_mult: float = 1.0
 
+        # Circuit Breaker: защита от серий убытков
+        self._consecutive_losses: int = 0
+        self._circuit_breaker_until: datetime | None = None  # полная остановка до этого времени
+
     @property
     def is_real(self) -> bool:
         return self._connector is not None and self._connector.has_credentials
@@ -120,12 +124,59 @@ class PositionManager:
     # OPENING
     # ==================================================================
 
+    def _check_circuit_breaker(self) -> str | None:
+        """Проверить, не заблокирована ли торговля Circuit Breaker'ом.
+
+        Returns:
+            None — можно торговать
+            'circuit_breaker_stop' — полная остановка
+            'circuit_breaker_reduce' — размер позиции уменьшен (торгуем дальше)
+        """
+        if not self.config.circuit_breaker_enabled:
+            return None
+
+        now = datetime.now(tz=timezone.utc)
+
+        # Полная остановка?
+        if self._circuit_breaker_until is not None:
+            if now < self._circuit_breaker_until:
+                return "circuit_breaker_stop"
+            # Таймер истёк — сбрасываем
+            self._circuit_breaker_until = None
+            self._consecutive_losses = 0
+            logger.info("Circuit Breaker: таймер остановки истёк, торговля возобновлена")
+
+        # Уменьшение размера?
+        if self._consecutive_losses >= self.config.circuit_breaker_loss_streak_stop:
+            # Полная остановка
+            self._circuit_breaker_until = now + timedelta(
+                minutes=self.config.circuit_breaker_stop_minutes
+            )
+            logger.warning(
+                f"Circuit Breaker: {self._consecutive_losses} убытков подряд → "
+                f"ПОЛНАЯ ОСТАНОВКА на {self.config.circuit_breaker_stop_minutes} мин "
+                f"(до {self._circuit_breaker_until.strftime('%H:%M:%S')})"
+            )
+            return "circuit_breaker_stop"
+
+        if self._consecutive_losses >= self.config.circuit_breaker_loss_streak_reduce:
+            return "circuit_breaker_reduce"
+
+        return None
+
+    def _get_circuit_breaker_position_mult(self) -> float:
+        """Множитель размера позиции от Circuit Breaker."""
+        cb_status = self._check_circuit_breaker()
+        if cb_status == "circuit_breaker_reduce":
+            return self.config.circuit_breaker_reduce_mult_pct / 100.0
+        return 1.0
+
     async def open_position(
         self, session: AsyncSession, signal: Signal, signal_id: int | None = None
     ) -> tuple[Trade | None, str]:
         """Открыть позицию по сигналу.
         Возвращает (trade, status): status = 'opened' | 'limit' | 'duplicate' |
-        'cooldown' | 'no_price' | 'error'."""
+        'cooldown' | 'no_price' | 'error' | 'circuit_breaker_stop'."""
 
         # Проверка рыночного режима
         if self.market_regime == "risk_off":
@@ -134,6 +185,16 @@ class PositionManager:
                 f"risk-off режим (входы заблокированы)"
             )
             return None, "risk_off"
+
+        # Circuit Breaker
+        cb_status = self._check_circuit_breaker()
+        if cb_status == "circuit_breaker_stop":
+            logger.info(
+                f"Сигнал {signal.symbol} пропущен: "
+                f"Circuit Breaker — полная остановка "
+                f"({self._consecutive_losses} убытков подряд)"
+            )
+            return None, "circuit_breaker_stop"
 
         # Проверка лимита
         open_count = await self._count_open(session)
@@ -180,8 +241,15 @@ class PositionManager:
         else:
             total = virtual_balance
 
-        # Применяем множитель рыночного режима к бюджету риска
-        risk_budget = total * (self.config.risk_per_trade_pct / 100) * self.position_size_mult
+        # Применяем множители рыночного режима и Circuit Breaker к бюджету риска
+        cb_mult = self._get_circuit_breaker_position_mult()
+        risk_budget = total * (self.config.risk_per_trade_pct / 100) * self.position_size_mult * cb_mult
+
+        if cb_mult < 1.0:
+            logger.info(
+                f"Circuit Breaker: размер позиции {signal.symbol} уменьшен "
+                f"до {cb_mult*100:.0f}% ({self._consecutive_losses} убытков подряд)"
+            )
 
         # TP/SL: фиксированные проценты от цены входа
         sl_distance = entry_price * (self.config.stop_loss_pct / 100)
@@ -623,6 +691,28 @@ class PositionManager:
         # Если закрыто биржей — определяем TP или SL по PnL
         if reason == "tp_sl_exchange":
             reason = "tp" if (trade.pnl or 0) > 0 else "sl"
+
+        # Circuit Breaker: обновляем счётчик убытков подряд
+        if self.config.circuit_breaker_enabled:
+            if (trade.pnl or 0) <= 0:
+                self._consecutive_losses += 1
+                logger.warning(
+                    f"Circuit Breaker: {self._consecutive_losses} убытков подряд "
+                    f"(PnL=${trade.pnl:+.2f} на {trade.symbol})"
+                )
+                if self._consecutive_losses >= self.config.circuit_breaker_loss_streak_reduce:
+                    mult = self.config.circuit_breaker_reduce_mult_pct
+                    logger.warning(
+                        f"Circuit Breaker: размер позиций уменьшен до {mult:.0f}%"
+                    )
+            else:
+                if self._consecutive_losses > 0:
+                    logger.info(
+                        f"Circuit Breaker: серия из {self._consecutive_losses} убытков "
+                        f"прервана прибылью ${trade.pnl:+.2f} на {trade.symbol}"
+                    )
+                self._consecutive_losses = 0
+                self._circuit_breaker_until = None
 
         labels = {
             "tp": ("✅", "Тейк-профит"),

@@ -95,6 +95,11 @@ class TradingConfig(BaseModel):
     partial_close_pct: float = Field(default=50.0, ge=10.0, le=90.0, description="% пути до TP для частичного закрытия / перевода в б/у")
     breakeven_at_halfway: bool = Field(default=False, description="Перевести стоп в б/у на полпути (без частичной фиксации)")
     cooldown_hours: float = Field(default=1.0, ge=0.0, le=168.0, description="Кулдаун после закрытия позиции, часов (0 = без кулдауна)")
+    circuit_breaker_enabled: bool = Field(default=True, description="Включить защиту от серий убытков (Circuit Breaker)")
+    circuit_breaker_loss_streak_reduce: int = Field(default=3, ge=1, le=20, description="После скольких убытков подряд уменьшить размер позиции")
+    circuit_breaker_reduce_mult_pct: float = Field(default=50.0, ge=10.0, le=90.0, description="Множитель размера позиции при срабатывании, %")
+    circuit_breaker_loss_streak_stop: int = Field(default=5, ge=1, le=50, description="После скольких убытков подряд полностью остановить торговлю")
+    circuit_breaker_stop_minutes: int = Field(default=60, ge=10, le=1440, description="На сколько минут остановить торговлю при полном срабатывании")
 
 
 class MarketContextConfig(BaseModel):

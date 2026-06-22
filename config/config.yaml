@@ -30,7 +30,7 @@ strategy:
   volume_surge_mult: 15.0        # во сколько раз объём должен превысить норму
   min_baseline_volume_usdt: 3000 # мин. медиана объёма в USDT, 0 = выкл
   sustain_bars: 4                # сколько свечей подряд выше порога для сигнала
-  oi_slope_min_pct: 1.0          # минимальный наклон OI, %
+  oi_slope_min_pct: 2.0          # минимальный наклон OI, % (1→2: жёстче подтверждение)
   smooth_max_ratio: 5.0           # макс. отношение макс/медиана объёма (отсекает спайки)
   dump_volume_mult: 0.0           # защита от свечей-выбросов, 0 = выкл
   price_growth_min_pct: 1.0      # минимальный рост цены за sustain-окно, %
@@ -76,3 +76,8 @@ trading:
   partial_close_pct: 40.0         # % пути до TP для закрытия / перевода в б/у
   breakeven_at_halfway: false     # перевести стоп в б/у на полпути (без частичной фиксации)
   cooldown_hours: 1.0             # кулдаун после закрытия позиции
+  circuit_breaker_enabled: true   # защита от серий убытков (Circuit Breaker)
+  circuit_breaker_loss_streak_reduce: 3  # после N убытков подряд уменьшить размер позиции
+  circuit_breaker_reduce_mult_pct: 50.0  # множитель размера позиции при срабатывании, %
+  circuit_breaker_loss_streak_stop: 5    # после N убытков подряд полностью остановить
+  circuit_breaker_stop_minutes: 60       # на сколько минут остановить торговлю

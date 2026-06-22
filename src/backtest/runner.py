@@ -109,6 +109,10 @@ async def run_backtest(
     closed_trades: list[SimPosition] = []
     signals_count = 0
 
+    # Circuit Breaker state
+    cb_losses = 0
+    cb_stop_until: datetime | None = None
+
     # Кеш OI-данных (exchange, symbol) -> [(timestamp, value), ...]
     oi_cache: dict[tuple[str, str], list[tuple[datetime, float]]] = {}
     if has_oi:
@@ -206,6 +210,10 @@ async def run_backtest(
                 pos.closed = True
                 closed_trades.append(pos)
                 positions.remove(pos)
+                # Circuit Breaker: сброс счётчика при прибыли
+                if cfg.circuit_breaker_enabled:
+                    cb_losses = 0
+                    cb_stop_until = None
                 continue
 
             # SL
@@ -217,6 +225,9 @@ async def run_backtest(
                 pos.closed = True
                 closed_trades.append(pos)
                 positions.remove(pos)
+                # Circuit Breaker: увеличиваем счётчик убытков
+                if cfg.circuit_breaker_enabled:
+                    cb_losses += 1
                 continue
 
             # Выход по времени
@@ -229,12 +240,38 @@ async def run_backtest(
                 pos.closed = True
                 closed_trades.append(pos)
                 positions.remove(pos)
+                # Circuit Breaker: по PnL
+                if cfg.circuit_breaker_enabled:
+                    if pos.pnl > 0:
+                        cb_losses = 0
+                        cb_stop_until = None
+                    else:
+                        cb_losses += 1
 
         # Ищем сетапы только в «циклы сканирования»
         if ts_idx % CYCLE_DELAY_BARS != 0:
             continue
         if len(positions) >= cfg.max_positions:
             continue
+
+        # Circuit Breaker: проверка полной остановки
+        cb_mult = 1.0
+        if cfg.circuit_breaker_enabled:
+            if cb_stop_until is not None:
+                if ts < cb_stop_until:
+                    continue
+                # Таймер истёк — сбрасываем
+                cb_stop_until = None
+                cb_losses = 0
+            if cb_losses >= cfg.circuit_breaker_loss_streak_stop:
+                cb_stop_until = ts + timedelta(minutes=cfg.circuit_breaker_stop_minutes)
+                logger.warning(
+                    f"Circuit Breaker: {cb_losses} убытков подряд → "
+                    f"ПОЛНАЯ ОСТАНОВКА до {cb_stop_until}"
+                )
+                continue
+            if cb_losses >= cfg.circuit_breaker_loss_streak_reduce:
+                cb_mult = cfg.circuit_breaker_reduce_mult_pct / 100.0
 
         # Применяем множитель рыночного режима к детектору
         if regime == "cautious":
@@ -320,7 +357,7 @@ async def run_backtest(
 
             # Бюджет риска: % от виртуального депозита $1000
             virtual_balance = 1000.0
-            risk_budget = virtual_balance * (cfg.risk_per_trade_pct / 100)
+            risk_budget = virtual_balance * (cfg.risk_per_trade_pct / 100) * cb_mult
             qty = risk_budget / sl_distance
             tp = entry_price + tp_distance
             sl = entry_price - sl_distance
