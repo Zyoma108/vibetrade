@@ -18,7 +18,7 @@ from src.executor.position_manager import PositionManager
 from src.notifier.telegram_bot import TelegramNotifier
 from src.storage.database import async_session, init_db
 from src.storage.stats import trade_stats
-from src.storage.models import Signal as SignalModel
+from src.storage.models import MarketContextSnapshot, Signal as SignalModel
 
 logger = logging.getLogger(__name__)
 
@@ -260,6 +260,10 @@ class Application:
                     "🔄 <b>Смена рыночного режима!</b>\n\n"
                     + self._market_ctx.trend_summary()
                 )
+
+        # Сохраняем снимок рыночного контекста в БД (для бэктестов)
+        if self._market_ctx and self._market_ctx.ready:
+            session.add(MarketContextSnapshot(**self._market_ctx.get_snapshot()))
 
         # Передаём контекст в PositionManager
         if self._positions and self._market_ctx:

@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import Float, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, Float, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -94,3 +94,23 @@ class Trade(Base):
     tp_sl_set: Mapped[bool] = mapped_column(default=False)  # выставлены ли TP/SL на бирже
     partial_closed: Mapped[bool] = mapped_column(default=False)  # выполнено ли частичное закрытие
     partial_pnl: Mapped[float | None] = mapped_column(Float, nullable=True, default=0.0)  # PnL от частичных закрытий
+
+
+class MarketContextSnapshot(Base):
+    """Снимок рыночного контекста (BTC/OTHERS/режим/тренд) на момент времени."""
+
+    __tablename__ = "market_context_snapshots"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    timestamp: Mapped[datetime] = mapped_column(index=True)
+    regime: Mapped[str] = mapped_column(String(16))          # risk_on / cautious / risk_off / unknown
+    regime_start: Mapped[datetime] = mapped_column()
+    trend: Mapped[str] = mapped_column(String(16))            # bullish / bearish / neutral
+    trend_start: Mapped[datetime] = mapped_column()
+    supertrend_color: Mapped[str] = mapped_column(String(8))  # green / red
+    btc_change_1h: Mapped[float] = mapped_column(Float)
+    btc_change_4h: Mapped[float] = mapped_column(Float)
+    others_value: Mapped[float] = mapped_column(Float)
+    others_change_1h: Mapped[float] = mapped_column(Float)
+    others_change_4h: Mapped[float] = mapped_column(Float)
+    ready: Mapped[bool] = mapped_column(Boolean)

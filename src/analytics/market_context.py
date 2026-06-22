@@ -125,6 +125,23 @@ class MarketContext:
             return True
         return False
 
+    def get_snapshot(self) -> dict:
+        """Текущее состояние рыночного контекста для сохранения в БД."""
+        return {
+            "timestamp": datetime.now(tz=timezone.utc),
+            "regime": self._regime,
+            "regime_start": self._regime_start,
+            "trend": self._trend,
+            "trend_start": self._trend_start,
+            "supertrend_color": self._supertrend_color,
+            "btc_change_1h": self._btc_change_1h,
+            "btc_change_4h": self._btc_change_4h,
+            "others_value": self._others_value,
+            "others_change_1h": self._others_change_1h,
+            "others_change_4h": self._others_change_4h,
+            "ready": self._ready,
+        }
+
     def should_block_entries(self) -> bool:
         if not self._enabled or not self._ready:
             return False

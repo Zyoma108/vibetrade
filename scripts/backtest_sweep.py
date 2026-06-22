@@ -76,7 +76,7 @@ async def run_backtest_with_config(cfg: Settings, db_path: str, has_oi: bool) ->
 
     from src.analytics.detector import SetupDetector
     from src.analytics.utils import OI_TREND_BARS, calculate_oi_slope_pct
-    from src.storage.models import Candle, OpenInterest
+    from src.storage.models import Candle, MarketContextSnapshot, OpenInterest
     from src.backtest.runner import SimPosition
 
     db_path = Path(db_path)
@@ -119,8 +119,31 @@ async def run_backtest_with_config(cfg: Settings, db_path: str, has_oi: bool) ->
             for ex, sym, ts, val in oi_result.all():
                 oi_cache.setdefault((ex, sym), []).append((ts, val))
 
+    # Загружаем снимки рыночного контекста
+    mc_snapshots: list[tuple[datetime, "MarketContextSnapshot"]] = []
+    try:
+        async with session_factory() as session:
+            mc_stmt = (
+                select(MarketContextSnapshot)
+                .order_by(MarketContextSnapshot.timestamp)
+            )
+            mc_result = await session.execute(mc_stmt)
+            for row in mc_result.scalars().all():
+                mc_snapshots.append((row.timestamp, row))
+    except Exception:
+        pass  # Старая БД без market_context_snapshots — фильтрация отключена
+
     for ts_idx, ts in enumerate(all_timestamps):
         if ts_idx < detector.config.baseline_bars + detector.config.sustain_bars:
+            continue
+
+        # Определяем режим рынка на этот момент времени
+        regime = "unknown"
+        for mc_ts, mc_row in reversed(mc_snapshots):
+            if mc_ts <= ts:
+                regime = mc_row.regime
+                break
+        if regime == "risk_off":
             continue
 
         for pos in list(positions):
@@ -197,6 +220,13 @@ async def run_backtest_with_config(cfg: Settings, db_path: str, has_oi: bool) ->
             continue
         if len(positions) >= trading_cfg.max_positions:
             continue
+
+        # Применяем множитель рыночного режима к детектору
+        if regime == "cautious":
+            increase_pct = detector.config.cautious_volume_surge_mult_increase_pct
+            detector.apply_regime_multiplier(1.0 + increase_pct / 100.0)
+        else:
+            detector.apply_regime_multiplier(1.0)
 
         for sym, sym_data in symbols.items():
             if len(positions) >= trading_cfg.max_positions:
@@ -322,6 +352,7 @@ async def run_backtest_with_config(cfg: Settings, db_path: str, has_oi: bool) ->
         "period": f"{all_timestamps[0]} → {all_timestamps[-1]}",
         "trades_list": closed_trades,
         "has_oi": has_oi,
+        "has_mc": len(mc_snapshots) > 0,
     }
 
 
