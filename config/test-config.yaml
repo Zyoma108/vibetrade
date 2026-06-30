@@ -37,7 +37,7 @@ telegram:
     - "${TELEGRAM_CHAT_ID}"
 
 trading:
-  mode: real                      # signal | virtual | real
+  mode: real                      # signal | real
   exchange: bybit                 # биржа для торговли
   max_positions: 10               # максимум одновременных позиций
   leverage: 10                    # кредитное плечо

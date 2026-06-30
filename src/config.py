@@ -83,7 +83,7 @@ class TelegramConfig(BaseModel):
 
 
 class TradingConfig(BaseModel):
-    mode: str = "signal"              # signal | virtual | real
+    mode: str = "signal"              # signal | real
     exchange: str = "bybit"           # биржа для торговли
     max_positions: int = Field(default=10, ge=1, description="Максимум одновременных позиций")
     leverage: int = Field(default=1, ge=1, le=100, description="Кредитное плечо")

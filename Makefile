@@ -1,4 +1,4 @@
-.PHONY: run run-signal run-virtual test migrate-create migrate-up backtest-load backtest-run backtest-run-live docker-build docker-up docker-down docker-logs docker-rebuild clean
+.PHONY: run run-signal test migrate-create migrate-up backtest-load backtest-run backtest-run-live docker-build docker-up docker-down docker-logs docker-rebuild clean
 
 APP := .venv/bin/python -m src.main
 
@@ -7,9 +7,6 @@ run:
 
 run-signal:
 	$(APP) --config config/config.yaml --mode signal
-
-run-virtual:
-	$(APP) --config config/config.yaml --mode virtual
 
 test:
 	.venv/bin/pytest -v

@@ -23,7 +23,7 @@ from src.storage.models import Trade
 
 def _config(**overrides) -> TradingConfig:
     params = {
-        "mode": "virtual",
+        "mode": "real",
         "max_positions": 10,
         "leverage": 10,
         "risk_per_trade_pct": 1.0,
@@ -255,19 +255,13 @@ class TestPositionSizing:
     """Tests for risk budget calculation with market regime + circuit breaker."""
 
     @pytest.mark.asyncio
-    async def test_virtual_balance_risk_budget_formula(self):
-        """For virtual mode: risk = $1000 × risk_pct × regime_mult × cb_mult."""
+    async def test_risk_budget_formula(self):
+        """Risk = balance × risk_pct × regime_mult × cb_mult."""
         pm = _pm(risk_per_trade_pct=1.0)
-        # No CB, no regime multiplier
         pm.position_size_mult = 1.0
-
-        # The formula tested indirectly: virtual_balance=1000, risk=1%,
-        # risk_budget = 1000 * 0.01 * 1.0 * cb_mult
-        # With cb_mult=1.0: risk_budget = $10
-        # SL=5% at entry=$1.0: sl_distance=$0.05, qty=$10/0.05=200
         cb = pm._get_circuit_breaker_position_mult()
-        virtual = 1000.0
-        risk = virtual * (pm.config.risk_per_trade_pct / 100) * pm.position_size_mult * cb
+        balance = 1000.0
+        risk = balance * (pm.config.risk_per_trade_pct / 100) * pm.position_size_mult * cb
         assert risk == pytest.approx(10.0)
 
     @pytest.mark.asyncio
@@ -277,8 +271,8 @@ class TestPositionSizing:
         pm._consecutive_losses = 3
         cb = pm._get_circuit_breaker_position_mult()
         assert cb == 0.5
-        virtual = 1000.0
-        risk = virtual * (pm.config.risk_per_trade_pct / 100) * pm.position_size_mult * cb
+        balance = 1000.0
+        risk = balance * (pm.config.risk_per_trade_pct / 100) * pm.position_size_mult * cb
         assert risk == pytest.approx(5.0)
 
     @pytest.mark.asyncio
@@ -288,8 +282,8 @@ class TestPositionSizing:
         pm.market_regime = "cautious"
         pm.position_size_mult = 0.5
         cb = pm._get_circuit_breaker_position_mult()
-        virtual = 1000.0
-        risk = virtual * (pm.config.risk_per_trade_pct / 100) * pm.position_size_mult * cb
+        balance = 1000.0
+        risk = balance * (pm.config.risk_per_trade_pct / 100) * pm.position_size_mult * cb
         assert risk == pytest.approx(5.0)
 
     @pytest.mark.asyncio
@@ -301,8 +295,8 @@ class TestPositionSizing:
         pm.position_size_mult = 0.5
         cb = pm._get_circuit_breaker_position_mult()
         assert cb == 0.5
-        virtual = 1000.0
-        risk = virtual * (pm.config.risk_per_trade_pct / 100) * pm.position_size_mult * cb
+        balance = 1000.0
+        risk = balance * (pm.config.risk_per_trade_pct / 100) * pm.position_size_mult * cb
         assert risk == pytest.approx(2.5)
 
 
@@ -421,9 +415,6 @@ class TestInitialState:
         assert pm.position_size_mult == 1.0
         assert len(pm._banned_symbols) == 0
 
-    def test_is_real_false_for_virtual(self):
-        pm = _pm()
-        assert pm.is_real is False
 
 
 # ---------------------------------------------------------------------------

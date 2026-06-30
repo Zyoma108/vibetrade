@@ -172,26 +172,25 @@ class Application:
         elif self.settings.strategy_price_surge:
             logger.warning("Telegram Price Surge не настроен, сигналы strategy_price_surge не будут отправлены")
 
-        # Торговля (virtual или real)
-        if mode in ("virtual", "real"):
+        # Торговля
+        if mode == "real":
             self._positions = PositionManager(
                 config=self.settings.trading,
                 send_message=self._notifier.send_message if self._notifier else None,
                 trading_connector=self._trading_connector,
             )
-            logger.info(f"Менеджер позиций запущен (режим: {mode})")
+            logger.info("Менеджер позиций запущен (real)")
 
-            # Синхронизация с биржей при старте (real)
-            if mode == "real":
-                try:
-                    async with async_session() as session:
-                        await self._positions.sync_positions(session)
-                        await session.commit()
-                except Exception:
-                    logger.exception(
-                        "Не удалось синхронизировать позиции. "
-                        "Бот продолжит работу в режиме сбора данных"
-                    )
+            # Синхронизация с биржей при старте
+            try:
+                async with async_session() as session:
+                    await self._positions.sync_positions(session)
+                    await session.commit()
+            except Exception:
+                logger.exception(
+                    "Не удалось синхронизировать позиции. "
+                    "Бот продолжит работу в режиме сбора данных"
+                )
 
         # Первичное обновление рыночного контекста и отправка в Telegram
         if self._market_ctx and self.settings.market_context.enabled:

@@ -53,7 +53,7 @@ market_context:
   notify_on_change: true          # уведомления о смене тренда в Telegram
 
 trading:
-  mode: signal                    # signal | virtual | real
+  mode: signal                    # signal | real
   exchange: bybit                 # биржа для торговли
   max_positions: 10               # максимум одновременных позиций
   leverage: 1                     # кредитное плечо
