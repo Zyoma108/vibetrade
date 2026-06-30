@@ -344,7 +344,201 @@ class TestPriceTrend:
 
 
 # ---------------------------------------------------------------------------
-# Exhaustion edge cases
+# Exhaustion filter v2 — extreme pump from baseline
+# ---------------------------------------------------------------------------
+
+
+class TestExhaustionV2:
+    """Exhaustion v2: блокирует экстремальный памп от baseline (независимо от close_pos)."""
+
+    def test_extreme_pump_from_baseline_blocks(self):
+        """Price spiked 40% above baseline median → blocked even with low close_pos."""
+        d = _detector(
+            baseline_bars=70, sustain_bars=4,
+            price_growth_min_pct=0.1,
+            exhaustion_gain_pct=5.0,  # extreme threshold = 5 * 6 = 30%
+            exhaustion_pos_ratio=0.7,
+        )
+        # 74 candles: baseline 70 at price ≈ 1.0, sustain 4 at price ≈ 1.02
+        # But max high in sustain window spiked to 1.45 (45% above baseline)
+        candles = _candles(74, price=1.0)
+        # Last 4 candles: normal growth but with a spike candle
+        candles[-4]["open"] = 1.00
+        candles[-4]["close"] = 1.005
+        candles[-4]["high"] = 1.45  # extreme spike!
+        candles[-4]["low"] = 0.999
+        candles[-3]["open"] = 1.02
+        candles[-3]["close"] = 1.025
+        candles[-3]["high"] = 1.03
+        candles[-3]["low"] = 1.01
+        candles[-2]["open"] = 1.025
+        candles[-2]["close"] = 1.02
+        candles[-2]["high"] = 1.03
+        candles[-2]["low"] = 1.01
+        # Last candle: closed LOW (dump started), v1 would miss
+        candles[-1]["open"] = 1.02
+        candles[-1]["high"] = 1.025
+        candles[-1]["low"] = 0.995
+        candles[-1]["close"] = 0.998  # close_pos = (0.998-0.995)/(1.025-0.995) = 0.1 < 0.7
+        assert d.check_price_trend(candles) is None
+
+    def test_moderate_pump_from_baseline_passes(self):
+        """Price spiked only 15% above baseline → passes (below 30% extreme threshold)."""
+        d = _detector(
+            baseline_bars=70, sustain_bars=4,
+            price_growth_min_pct=0.1,
+            exhaustion_gain_pct=5.0,  # extreme threshold = 30%
+            exhaustion_pos_ratio=0.7,
+        )
+        candles = _candles(74, price=1.0)
+        # Max high = 1.15 (15% above baseline median) → below 30% threshold
+        candles[-4]["open"] = 1.00
+        candles[-4]["close"] = 1.005
+        candles[-4]["high"] = 1.15
+        candles[-4]["low"] = 0.999
+        candles[-3]["open"] = 1.005
+        candles[-3]["close"] = 1.01
+        candles[-3]["high"] = 1.02
+        candles[-3]["low"] = 1.00
+        candles[-2]["open"] = 1.01
+        candles[-2]["close"] = 1.015
+        candles[-2]["high"] = 1.02
+        candles[-2]["low"] = 1.005
+        candles[-1]["open"] = 1.015
+        candles[-1]["close"] = 1.02
+        candles[-1]["high"] = 1.025
+        candles[-1]["low"] = 1.01
+        # change_pct over sustain = (1.02 / 1.00 - 1) * 100 = 2% (< 5% exhaustion v1)
+        # extreme_pump = (1.15 / 1.0 - 1) * 100 = 15% (< 30% v2)
+        assert d.check_price_trend(candles) == "long"
+
+    def test_extreme_pump_disabled_when_exhaustion_gain_zero(self):
+        """exhaustion_gain_pct=0 → v2 also disabled (guarded by ex_gain > 0)."""
+        d = _detector(
+            baseline_bars=70, sustain_bars=4,
+            price_growth_min_pct=0.1,
+            exhaustion_gain_pct=0.0,  # disabled
+            exhaustion_pos_ratio=0.7,
+        )
+        candles = _candles(74, price=1.0)
+        # 100% spike from baseline
+        candles[-4]["open"] = 1.00
+        candles[-4]["close"] = 1.005
+        candles[-4]["high"] = 2.00
+        candles[-4]["low"] = 0.999
+        candles[-3]["open"] = 1.005
+        candles[-3]["close"] = 1.01
+        candles[-3]["high"] = 1.02
+        candles[-3]["low"] = 1.00
+        candles[-2]["open"] = 1.01
+        candles[-2]["close"] = 1.015
+        candles[-2]["high"] = 1.02
+        candles[-2]["low"] = 1.005
+        candles[-1]["open"] = 1.015
+        candles[-1]["close"] = 1.02
+        candles[-1]["high"] = 1.025
+        candles[-1]["low"] = 1.01
+        assert d.check_price_trend(candles) == "long"
+
+    def test_pump_and_dump_before_signal_caught(self):
+        """Классический pump-and-dump: памп внутри sustain, дамп до сигнала,
+        last candle close_pos низкий. v1 пропускает, v2 ловит."""
+        d = _detector(
+            baseline_bars=70, sustain_bars=4,
+            price_growth_min_pct=0.1,
+            exhaustion_gain_pct=5.0,  # extreme threshold = 30%
+            exhaustion_pos_ratio=0.7,
+        )
+        candles = _candles(74, price=1.0)
+        # Имитация POPCAT-подобного сценария но с более сильным пампом
+        # baseline median ≈ 1.0
+        # Candle -4: PUMP, high=1.50 (+50% от baseline)
+        candles[-4]["open"] = 1.00
+        candles[-4]["high"] = 1.50
+        candles[-4]["low"] = 0.99
+        candles[-4]["close"] = 1.45
+        # Candle -3: peak continuation
+        candles[-3]["open"] = 1.45
+        candles[-3]["high"] = 1.48
+        candles[-3]["low"] = 1.35
+        candles[-3]["close"] = 1.38
+        # Candle -2: dump starts
+        candles[-2]["open"] = 1.38
+        candles[-2]["high"] = 1.40
+        candles[-2]["low"] = 1.15
+        candles[-2]["close"] = 1.18
+        # Candle -1 (signal): dump continues, close at bottom
+        candles[-1]["open"] = 1.18
+        candles[-1]["high"] = 1.20
+        candles[-1]["low"] = 1.02
+        candles[-1]["close"] = 1.03
+        # change_pct over sustain = (1.03 / 1.00 - 1) * 100 = 3% (< 5%, v1 misses)
+        # close_pos = (1.03 - 1.02) / (1.20 - 1.02) = 0.056 (< 0.7, v1 misses)
+        # extreme_pump = (1.50 / 1.0 - 1) * 100 = 50% (> 30%, v2 catches!)
+        assert d.check_price_trend(candles) is None
+
+    def test_extreme_pump_at_threshold_boundary(self):
+        """Памп на границе порога: 29% проходит, 31% блокируется."""
+        d = _detector(
+            baseline_bars=70, sustain_bars=4,
+            price_growth_min_pct=0.1,
+            exhaustion_gain_pct=5.0,  # extreme threshold = 30%
+            exhaustion_pos_ratio=0.7,
+        )
+        # 29% — проходит (ниже порога)
+        candles = _candles(74, price=1.0)
+        candles[-4]["open"] = 1.00
+        candles[-4]["close"] = 1.005
+        candles[-4]["high"] = 1.29
+        candles[-4]["low"] = 0.999
+        for i in range(-3, 0):
+            candles[i]["open"] = 1.01
+            candles[i]["close"] = 1.015
+            candles[i]["high"] = 1.02
+            candles[i]["low"] = 1.00
+        assert d.check_price_trend(candles) == "long"
+
+        # 31% — блокируется (выше порога)
+        candles[-4]["high"] = 1.31
+        assert d.check_price_trend(candles) is None
+
+    def test_v1_and_v2_independent(self):
+        """v1 (orderly exhaustion) и v2 (extreme pump) работают независимо:
+        v1 может пропустить (pullback), но v2 ловит экстремальный памп."""
+        d = _detector(
+            baseline_bars=70, sustain_bars=4,
+            price_growth_min_pct=0.1,
+            exhaustion_gain_pct=5.0,
+            exhaustion_pos_ratio=0.7,
+        )
+        candles = _candles(74, price=1.0)
+        # v1 condition: change_pct > 5% (over sustain) → сделаем небольшой рост 6%
+        # Но close_pos низкий → v1 НЕ блокирует (pullback)
+        candles[-4]["open"] = 1.00
+        candles[-4]["high"] = 1.70  # +70% extreme pump — v2 должно сработать
+        candles[-4]["low"] = 0.99
+        candles[-4]["close"] = 1.01
+        candles[-3]["open"] = 1.01
+        candles[-3]["close"] = 1.03
+        candles[-3]["high"] = 1.04
+        candles[-3]["low"] = 1.00
+        candles[-2]["open"] = 1.03
+        candles[-2]["close"] = 1.05
+        candles[-2]["high"] = 1.06
+        candles[-2]["low"] = 1.02
+        candles[-1]["open"] = 1.05
+        candles[-1]["close"] = 1.06
+        candles[-1]["high"] = 1.07
+        candles[-1]["low"] = 1.04
+        # change_pct = (1.06 / 1.00 - 1) * 100 = 6% (> 5%)
+        # close_pos = (1.06 - 1.04) / (1.07 - 1.04) = 0.02/0.03 = 0.67 (< 0.7)
+        # v1: change_pct > 5% но close_pos < 0.7 → пропускает
+        # v2: (1.70 / 1.0 - 1) * 100 = 70% > 30% → БЛОК
+        assert d.check_price_trend(candles) is None
+
+
+# ---------------------------------------------------------------------------
+# Exhaustion edge cases (v1)
 # ---------------------------------------------------------------------------
 
 

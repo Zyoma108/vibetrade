@@ -194,7 +194,7 @@ class SetupDetector(BaseDetector):
         if change_pct < self.config.price_growth_min_pct:
             return None
 
-        # Exhaustion filter: цена уже сильно выросла И свеча закрылась у верха
+        # Exhaustion filter v1: цена выросла за sustain-окно И свеча закрылась у верха
         # (покупатели выдохлись). Пропускаем только если свеча в середине/снизу —
         # это pullback в восходящем движении.
         ex_gain = self.config.exhaustion_gain_pct
@@ -210,6 +210,26 @@ class SetupDetector(BaseDetector):
                         f"(>{ex_gain}%) и свеча у верха (pos={close_pos:.2f} > {ex_pos})"
                     )
                     return None
+
+        # Exhaustion filter v2: экстремальный памп от baseline (pump-and-dump).
+        # Если цена улетала > ex_gain * 5 (по умолчанию 25%) выше медианы baseline —
+        # блокируем независимо от close_pos. Ловит случаи, когда памп и дамп
+        # произошли до/внутри sustain-окна и последняя свеча уже развернулась.
+        extreme_mult = 6.0  # ex_gain * 6 = 30% — экстремальный памп от baseline
+        extreme_threshold = ex_gain * extreme_mult
+        if ex_gain > 0 and extreme_threshold > 0:
+            baseline_closes = np.array(
+                [c["close"] for c in candles[: self.config.baseline_bars]]
+            )
+            baseline_median = np.median(baseline_closes)
+            recent_highs = np.array([c["high"] for c in candles[-sustain:]])
+            extreme_pump_pct = (np.max(recent_highs) / baseline_median - 1) * 100
+            if extreme_pump_pct > extreme_threshold:
+                logger.info(
+                    f"Сигнал пропущен: экстремальный памп {extreme_pump_pct:.1f}% "
+                    f"от baseline (>{extreme_threshold:.0f}%) — вероятный pump-and-dump"
+                )
+                return None
 
         max_growth = self.config.price_growth_max_pct
         if max_growth > 0 and change_pct > max_growth:
