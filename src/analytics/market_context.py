@@ -145,7 +145,14 @@ class MarketContext:
     def should_block_entries(self) -> bool:
         if not self._enabled or not self._ready:
             return False
-        return self._regime == "risk_off"
+        if self._regime == "risk_off":
+            return True
+        # CAUTIOUS + ST=red: блокировать входы — по данным аудита
+        # за июнь 2026, 5/5 сделок в этом режиме убыточны и в реальности,
+        # и в бэктесте (ни одна не дошла до TP).
+        if self._regime == "cautious" and self._supertrend_color == "red":
+            return True
+        return False
 
     def position_size_multiplier(self) -> float:
         if not self._enabled or not self._ready:
