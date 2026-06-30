@@ -358,6 +358,7 @@ make docker-down
 # Бэктест
 make backtest-load        # Загрузка 7 дней истории
 make backtest-run ARGS="--days 30"  # Прогон на истории
+make backtest-run-live                # Бэктест на живой БД + сравнение с реальными сделками
 
 # Поиск оптимальных параметров (подбор конфигурации)
 .venv/bin/python scripts/backtest_sweep.py   # Прогон 37 конфигураций на trading_bot_*.db

@@ -56,16 +56,33 @@ class SetupDetector(BaseDetector):
             try:
                 limit = self.config.baseline_bars + self.config.sustain_bars + 10
                 candles = await self._dp.load_candles(session, exchange, symbol, limit)
-                if len(candles) < self.config.baseline_bars + self.config.sustain_bars:
+                min_bars = self.config.baseline_bars + self.config.sustain_bars
+                if len(candles) < min_bars:
                     continue
 
-                if not self.check_volume_pattern(candles):
+                # Проверяем volume pattern с lookback:
+                # если текущее окно не проходит — пробуем сдвинутые
+                # (компенсация timing'а: цикл мог попасть между свечей)
+                vol_window = None
+                if self.check_volume_pattern(candles):
+                    vol_window = candles
+                else:
+                    for shift in range(1, 4):  # -1, -2, -3 свечи
+                        shifted = candles[:-shift]
+                        if len(shifted) >= min_bars and self.check_volume_pattern(shifted):
+                            vol_window = shifted
+                            logger.info(
+                                f"Сетап {symbol}: volume найден со сдвигом -{shift} свечей"
+                            )
+                            break
+
+                if vol_window is None:
                     continue
 
                 if not await self._check_oi_trend(session, exchange, symbol):
                     continue
 
-                direction = self.check_price_trend(candles)
+                direction = self.check_price_trend(vol_window)
                 if direction is None:
                     continue
 
@@ -74,7 +91,7 @@ class SetupDetector(BaseDetector):
                     continue
                 seen.add(symbol)
 
-                signal = self._build_signal(symbol, direction, candles)
+                signal = self._build_signal(symbol, direction, vol_window)
                 signals.append(signal)
                 logger.info(f"Сетап найден: {symbol} {direction} ({exchange})")
 
