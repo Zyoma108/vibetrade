@@ -60,7 +60,8 @@ class Signal(Base):
     direction: Mapped[str] = mapped_column(String(16))  # long / short
     confidence: Mapped[int] = mapped_column(Integer)
     message: Mapped[str] = mapped_column(Text)
-    missed_reason: Mapped[str | None] = mapped_column(String(32), nullable=True, default=None)  # limit / duplicate / cooldown / risk_off / error / no_price
+    missed_reason: Mapped[str | None] = mapped_column(String(32), nullable=True, default=None)  # limit / duplicate / cooldown / risk_off / error
+    missed_detail: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)  # детали ошибки (исключение, причина) / no_price
 
 
 class PriceSurgeSignal(Base):

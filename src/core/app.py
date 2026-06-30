@@ -306,14 +306,16 @@ class Application:
 
                 # Открываем позицию (если торговля активна)
                 status = "disabled"
+                detail = None
                 if self._positions:
-                    _trade, status = await self._positions.open_position(
+                    _trade, status, detail = await self._positions.open_position(
                         session, sig, signal_id=db_signal.id
                     )
 
                 # Записываем причину пропуска в БД
                 if status != "opened":
                     db_signal.missed_reason = status
+                    db_signal.missed_detail = detail
 
                 # Сигнал в Telegram — всегда, с реальной причиной
                 if self._notifier:

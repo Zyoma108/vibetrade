@@ -346,7 +346,7 @@ class TestOpenPositionRejections:
     async def test_risk_off_rejection(self):
         pm = _pm()
         pm.market_regime = "risk_off"
-        trade, status = await pm.open_position(AsyncMock(), _signal())
+        trade, status, detail = await pm.open_position(AsyncMock(), _signal())
         assert trade is None
         assert status == "risk_off"
 
@@ -355,21 +355,21 @@ class TestOpenPositionRejections:
         pm = _pm()
         pm._consecutive_losses = 5
         pm._circuit_breaker_until = datetime.now(tz=timezone.utc) + timedelta(hours=1)
-        trade, status = await pm.open_position(AsyncMock(), _signal())
+        trade, status, detail = await pm.open_position(AsyncMock(), _signal())
         assert trade is None
         assert status == "circuit_breaker_stop"
 
     @pytest.mark.asyncio
     async def test_limit_reached_rejection(self):
         pm = _pm(max_positions=2)
-        # Patch _count_open to return max_positions (limit hit)
         async def mock_count_open(_session):
             return 2
         pm._count_open = mock_count_open  # type: ignore[method-assign]
 
-        trade, status = await pm.open_position(AsyncMock(), _signal())
+        trade, status, detail = await pm.open_position(AsyncMock(), _signal())
         assert trade is None
         assert status == "limit"
+        assert detail is not None
 
     @pytest.mark.asyncio
     async def test_duplicate_symbol_rejection(self):
@@ -377,12 +377,11 @@ class TestOpenPositionRejections:
         async def mock_count_open(_session):
             return 0
         pm._count_open = mock_count_open  # type: ignore[method-assign]
-        # Patch _has_position to return True
         async def mock_has_position(_session, _symbol):
             return True
         pm._has_position = mock_has_position  # type: ignore[method-assign]
 
-        trade, status = await pm.open_position(AsyncMock(), _signal("TEST/USDT:USDT"))
+        trade, status, detail = await pm.open_position(AsyncMock(), _signal("TEST/USDT:USDT"))
         assert trade is None
         assert status == "duplicate"
 
@@ -394,14 +393,90 @@ class TestOpenPositionRejections:
             return 0
         pm._count_open = mock_count_open  # type: ignore[method-assign]
 
-        trade, status = await pm.open_position(AsyncMock(), _signal("TEST/USDT:USDT"))
+        trade, status, detail = await pm.open_position(AsyncMock(), _signal("TEST/USDT:USDT"))
         assert trade is None
         assert status == "error"
+        assert detail == "banned_symbol"
 
 
 # ---------------------------------------------------------------------------
 # Initial state
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# Error cascade protection
+# ---------------------------------------------------------------------------
+
+
+class TestErrorCascade:
+    """_track_error / _reset_errors — защита от каскада ошибок."""
+
+    def test_first_error_no_cooldown(self):
+        """Одна ошибка — ещё нет кулдауна."""
+        pm = _pm()
+        pm._track_error("TEST/USDT:USDT")
+        assert pm._error_counts["TEST/USDT:USDT"] == 1
+        assert "TEST/USDT:USDT" not in pm._error_cooldown_until
+
+    def test_third_error_triggers_cooldown(self):
+        """Три ошибки подряд → кулдаун 4 часа."""
+        pm = _pm()
+        for _ in range(3):
+            pm._track_error("TEST/USDT:USDT")
+        assert pm._error_counts["TEST/USDT:USDT"] == 3
+        assert "TEST/USDT:USDT" in pm._error_cooldown_until
+        until = pm._error_cooldown_until["TEST/USDT:USDT"]
+        expected = datetime.now(tz=timezone.utc) + timedelta(hours=4)
+        assert abs((until - expected).total_seconds()) < 5
+
+    def test_fourth_error_stays_in_cooldown(self):
+        """Четвёртая ошибка — счётчик растёт, кулдаун остаётся."""
+        pm = _pm()
+        for _ in range(4):
+            pm._track_error("TEST/USDT:USDT")
+        assert pm._error_counts["TEST/USDT:USDT"] == 4
+        assert "TEST/USDT:USDT" in pm._error_cooldown_until
+
+    def test_reset_clears_counter_and_cooldown(self):
+        """Успешная сделка сбрасывает счётчик ошибок."""
+        pm = _pm()
+        for _ in range(5):
+            pm._track_error("TEST/USDT:USDT")
+        pm._reset_errors("TEST/USDT:USDT")
+        assert "TEST/USDT:USDT" not in pm._error_counts
+        assert "TEST/USDT:USDT" not in pm._error_cooldown_until
+
+    def test_different_symbols_independent(self):
+        """Ошибки по разным символам считаются независимо."""
+        pm = _pm()
+        pm._track_error("A/USDT:USDT")
+        pm._track_error("A/USDT:USDT")
+        pm._track_error("B/USDT:USDT")
+        assert pm._error_counts["A/USDT:USDT"] == 2
+        assert pm._error_counts["B/USDT:USDT"] == 1
+        assert "A/USDT:USDT" not in pm._error_cooldown_until  # < 3
+
+    @pytest.mark.asyncio
+    async def test_cooldown_blocks_signal(self):
+        """Сигнал в кулдауне возвращает error с detail."""
+        pm = _pm()
+        # Имитируем 3 ошибки и кулдаун
+        pm._error_counts["TEST/USDT:USDT"] = 3
+        pm._error_cooldown_until["TEST/USDT:USDT"] = (
+            datetime.now(tz=timezone.utc) + timedelta(hours=2)
+        )
+
+        async def mock_count_open(_session):
+            return 0
+        pm._count_open = mock_count_open  # type: ignore[method-assign]
+
+        trade, status, detail = await pm.open_position(
+            AsyncMock(), _signal("TEST/USDT:USDT")
+        )
+        assert trade is None
+        assert status == "error"
+        assert detail and "error_cooldown" in detail
 
 
 class TestInitialState:

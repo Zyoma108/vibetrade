@@ -34,6 +34,10 @@ class PositionManager:
         self._consecutive_losses: int = 0
         self._circuit_breaker_until: datetime | None = None  # полная остановка до этого времени
 
+        # Защита от каскада ошибок по символу
+        self._error_counts: dict[str, int] = {}  # symbol → кол-во ошибок подряд
+        self._error_cooldown_until: dict[str, datetime] = {}  # symbol → не пытаться до
+
     @property
     def _has_connector(self) -> bool:
         return self._connector is not None and self._connector.has_credentials
@@ -173,10 +177,11 @@ class PositionManager:
 
     async def open_position(
         self, session: AsyncSession, signal: Signal, signal_id: int | None = None
-    ) -> tuple[Trade | None, str]:
+    ) -> tuple[Trade | None, str, str | None]:
         """Открыть позицию по сигналу.
-        Возвращает (trade, status): status = 'opened' | 'limit' | 'duplicate' |
-        'cooldown' | 'no_price' | 'error' | 'circuit_breaker_stop'."""
+        Возвращает (trade, status, detail): status = 'opened' | 'limit' | 'duplicate' |
+        'cooldown' | 'no_price' | 'error' | 'circuit_breaker_stop'.
+        detail — описание ошибки (только если status != 'opened')."""
 
         # Проверка рыночного режима
         if self.market_regime == "risk_off":
@@ -184,7 +189,7 @@ class PositionManager:
                 f"Сигнал {signal.symbol} пропущен: "
                 f"risk-off режим (входы заблокированы)"
             )
-            return None, "risk_off"
+            return None, "risk_off", None
 
         # Circuit Breaker
         cb_status = self._check_circuit_breaker()
@@ -194,7 +199,7 @@ class PositionManager:
                 f"Circuit Breaker — полная остановка "
                 f"({self._consecutive_losses} убытков подряд)"
             )
-            return None, "circuit_breaker_stop"
+            return None, "circuit_breaker_stop", None
 
         # Проверка лимита
         open_count = await self._count_open(session)
@@ -203,28 +208,38 @@ class PositionManager:
                 f"Сигнал {signal.symbol} пропущен: "
                 f"{open_count}/{self.config.max_positions} позиций открыто"
             )
-            return None, "limit"
+            return None, "limit", f"max_positions={self.config.max_positions}"
+
+        # Проверка — кулдаун после серии ошибок по символу (защита от каскада)
+        cooldown_until = self._error_cooldown_until.get(signal.symbol)
+        if cooldown_until is not None and datetime.now(tz=timezone.utc) < cooldown_until:
+            logger.info(
+                f"Сигнал {signal.symbol} пропущен: "
+                f"кулдаун после {self._error_counts.get(signal.symbol, 0)} ошибок "
+                f"(до {cooldown_until.strftime('%H:%M')})"
+            )
+            return None, "error", f"error_cooldown:{self._error_counts.get(signal.symbol, 0)}"
 
         # Проверка — монета в чёрном списке (ошибки торговли)
         if signal.symbol in self._banned_symbols:
             logger.info(f"Сигнал {signal.symbol} пропущен: монета в чёрном списке")
-            return None, "error"
+            return None, "error", "banned_symbol"
 
         # Проверка — нет ли уже позиции по этой монете
         if await self._has_position(session, signal.symbol):
             logger.info(f"Сигнал {signal.symbol} пропущен: уже есть позиция")
-            return None, "duplicate"
+            return None, "duplicate", None
 
         # Проверка кулдауна после TP/SL (сутки)
         if await self._in_cooldown(session, signal.symbol):
             logger.info(f"Сигнал {signal.symbol} пропущен: кулдаун после закрытия")
-            return None, "cooldown"
+            return None, "cooldown", None
 
         # Цена входа из последнего тикера
         entry_price = await self._get_current_price(session, signal.symbol)
         if entry_price is None or entry_price <= 0:
             logger.warning(f"Нет цены для {signal.symbol}, позиция не открыта")
-            return None, "no_price"
+            return None, "no_price", None
 
         # Бюджет риска: % от депозита с биржи
         try:
@@ -232,10 +247,10 @@ class PositionManager:
             total = float(balance.get("total", balance.get("free", 0)))
             if total <= 0:
                 logger.warning("Баланс депозита = 0, позиция не открыта")
-                return None, "error"
+                return None, "error", f"zero_balance: total={total}"
         except Exception as e:
             logger.warning(f"Не удалось получить баланс: {e}")
-            return None, "error"
+            return None, "error", f"balance_fetch: {e}"
 
         # Применяем множители рыночного режима и Circuit Breaker к бюджету риска
         cb_mult = self._get_circuit_breaker_position_mult()
@@ -340,7 +355,7 @@ class PositionManager:
                         f"Монета: {signal.symbol}\n"
                         f"Цена ушла за SL до его установки"
                     )
-                    return None, "error"
+                    return None, "error", f"emergency_close_sl_breach: {e}"
                 else:
                     logger.warning(
                         f"TP/SL для {signal.symbol} "
@@ -381,13 +396,15 @@ class PositionManager:
             # ByBit требует подписать соглашение — пропускаем без шума
             if "sign the required agreement" in err or "110126" in err:
                 self._banned_symbols.add(signal.symbol)
+                self._track_error(signal.symbol)
                 logger.info(
                     f"ByBit не даёт торговать {signal.symbol}: "
                     f"нужно подписать соглашение на сайте (добавлен в чёрный список)"
                 )
-                return None, "error"
+                return None, "error", f"bybit_agreement: {err[:120]}"
+            self._track_error(signal.symbol)
             logger.exception(f"Не удалось создать ордер для {signal.symbol}")
-            return None, "error"
+            return None, "error", f"order: {err[:120]}"
 
         # Запись в БД
         trade = Trade(
@@ -420,7 +437,8 @@ class PositionManager:
             f"Позиция открыта: {signal.symbol} @ {entry_price:.6f} "
             f"qty={quantity:.2f}"
         )
-        return trade, "opened"
+        self._reset_errors(signal.symbol)
+        return trade, "opened", None
 
     # ==================================================================
     # MONITORING
@@ -788,3 +806,28 @@ class PositionManager:
                 await self._send_message(text)
             except Exception:
                 logger.exception("Ошибка отправки торгового уведомления")
+
+    # ------------------------------------------------------------------
+    # Error cascade protection
+    # ------------------------------------------------------------------
+
+    def _track_error(self, symbol: str) -> None:
+        """Зафиксировать ошибку открытия позиции по символу.
+        После 3 ошибок подряд — кулдаун 4 часа (защита от каскада)."""
+        count = self._error_counts.get(symbol, 0) + 1
+        self._error_counts[symbol] = count
+        if count >= 3:
+            cooldown_hours = 4
+            self._error_cooldown_until[symbol] = (
+                datetime.now(tz=timezone.utc)
+                + timedelta(hours=cooldown_hours)
+            )
+            logger.warning(
+                f"Error cascade: {symbol} — {count} ошибок подряд, "
+                f"кулдаун на {cooldown_hours}ч"
+            )
+
+    def _reset_errors(self, symbol: str) -> None:
+        """Сбросить счётчик ошибок после успешной сделки."""
+        self._error_counts.pop(symbol, None)
+        self._error_cooldown_until.pop(symbol, None)
