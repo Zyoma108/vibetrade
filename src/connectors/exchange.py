@@ -267,6 +267,51 @@ class ExchangeConnector:
         )
         return raw
 
+    async def place_reduce_only_limit(
+        self, symbol: str, side: str, amount: float, price: float,
+    ) -> dict | None:
+        """Выставить reduce-only лимитный ордер (частичная фиксация).
+        side = 'buy' | 'sell' — направление ПОЗИЦИИ (не ордера).
+        amount — сколько контрактов закрыть.
+        """
+        close_side = "sell" if side == "buy" else "buy"
+        params = {"reduceOnly": True}
+        try:
+            raw = await self._call(
+                "create_order", symbol, "limit", close_side, amount, price, params
+            )
+            logger.info(
+                f"{self.exchange_id}: лимитник reduce-only {symbol} "
+                f"{close_side} {amount} @ {price:.6f}"
+            )
+            return raw
+        except Exception:
+            logger.exception(
+                f"{self.exchange_id}: не удалось выставить лимитник для {symbol}"
+            )
+            return None
+
+    async def cancel_all_orders(self, symbol: str) -> None:
+        """Отменить все открытые ордера по символу (используется при закрытии позиции)."""
+        try:
+            open_orders = await self._call("fetch_open_orders", symbol)
+            for order in open_orders:
+                try:
+                    await self._call("cancel_order", order["id"], symbol)
+                    logger.info(
+                        f"{self.exchange_id}: отменён ордер {order['id']} "
+                        f"для {symbol}"
+                    )
+                except Exception:
+                    logger.warning(
+                        f"{self.exchange_id}: не удалось отменить ордер "
+                        f"{order.get('id')} для {symbol}"
+                    )
+        except Exception:
+            logger.exception(
+                f"{self.exchange_id}: ошибка отмены ордеров для {symbol}"
+            )
+
     # ------------------------------------------------------------------
     # Cleanup
     # ------------------------------------------------------------------

@@ -424,3 +424,191 @@ class TestInitialState:
     def test_is_real_false_for_virtual(self):
         pm = _pm()
         assert pm.is_real is False
+
+
+# ---------------------------------------------------------------------------
+# Partial close trigger price
+# ---------------------------------------------------------------------------
+
+
+class TestPartialCloseTrigger:
+    """Формула цены частичной фиксации: entry + (tp - entry) × partial_close_pct%."""
+
+    def test_default_40pct_of_way_to_tp(self):
+        """При partial_close_pct=40%, trigger = entry + 40% пути до TP."""
+        pm = _pm(stop_loss_pct=5.0, risk_reward_ratio=3.0, partial_close_pct=40.0)
+        entry = 1.0
+        tp = pm._tp_price(entry)  # 1.15
+        trigger = entry + (tp - entry) * (pm.config.partial_close_pct / 100)
+        # trigger = 1.0 + (1.15 - 1.0) × 0.40 = 1.0 + 0.06 = 1.06
+        assert trigger == pytest.approx(1.06)
+
+    def test_50pct_halfway_to_tp(self):
+        """При partial_close_pct=50%, trigger = ровно половина пути до TP."""
+        pm = _pm(stop_loss_pct=5.0, risk_reward_ratio=3.0, partial_close_pct=50.0)
+        entry = 1.0
+        tp = pm._tp_price(entry)  # 1.15
+        trigger = entry + (tp - entry) * (pm.config.partial_close_pct / 100)
+        # trigger = 1.0 + 0.15 × 0.50 = 1.075
+        assert trigger == pytest.approx(1.075)
+
+    def test_trigger_below_tp(self):
+        """Триггер частичной фиксации всегда ниже TP."""
+        pm = _pm(stop_loss_pct=5.0, risk_reward_ratio=3.0, partial_close_pct=90.0)
+        entry = 1.0
+        tp = pm._tp_price(entry)  # 1.15
+        trigger = entry + (tp - entry) * (pm.config.partial_close_pct / 100)
+        assert trigger < tp
+
+    def test_trigger_above_entry(self):
+        """Триггер частичной фиксации всегда выше entry (для long)."""
+        pm = _pm(stop_loss_pct=5.0, risk_reward_ratio=3.0, partial_close_pct=10.0)
+        entry = 1.0
+        tp = pm._tp_price(entry)
+        trigger = entry + (tp - entry) * (pm.config.partial_close_pct / 100)
+        assert trigger > entry
+
+    def test_different_rr_affects_trigger(self):
+        """При RR=2.0 вместо 3.0, путь до TP короче → trigger ближе к entry."""
+        pm_rr3 = _pm(stop_loss_pct=5.0, risk_reward_ratio=3.0, partial_close_pct=40.0)
+        pm_rr2 = _pm(stop_loss_pct=5.0, risk_reward_ratio=2.0, partial_close_pct=40.0)
+        entry = 1.0
+        trigger_rr3 = entry + (pm_rr3._tp_price(entry) - entry) * 0.40
+        trigger_rr2 = entry + (pm_rr2._tp_price(entry) - entry) * 0.40
+        # RR=3: trigger = 1.06, RR=2: trigger = 1.04
+        assert trigger_rr2 < trigger_rr3
+
+
+# ---------------------------------------------------------------------------
+# Partial close — combined PnL
+# ---------------------------------------------------------------------------
+
+
+class TestPartialClosePnL:
+    """Суммарный PnL = PnL остатка + partial_pnl."""
+
+    @pytest.mark.asyncio
+    async def test_combined_pnl_with_partial_profit(self):
+        """Частичная фиксация в плюс + остаток в плюс → сумма больше."""
+        pm = _pm()
+        pm._send_message = AsyncMock()
+
+        # Симулируем частичное закрытие: было quantity=200, закрыли 100 в плюс
+        trade = _trade(entry_price=1.0, quantity=100, pnl=0.0)
+        trade.partial_closed = True
+        trade.partial_pnl = 3.0  # +3 USDT от частичной фиксации
+
+        # Закрываем остаток с убытком -1 USDT
+        # remainder_pnl = (0.99 - 1.0) * 100 = -1.0
+        # total = -1.0 + 3.0 = 2.0
+        await pm._close_position(trade, exit_price=0.99, reason="sl")
+        assert trade.pnl == pytest.approx(2.0)
+
+    @pytest.mark.asyncio
+    async def test_partial_profit_saves_losing_trade(self):
+        """Частичная фиксация может сделать общий PnL положительным
+        даже при убыточном остатке."""
+        pm = _pm()
+        pm._send_message = AsyncMock()
+
+        trade = _trade(entry_price=1.0, quantity=50, pnl=0.0)
+        trade.partial_closed = True
+        trade.partial_pnl = 5.0
+
+        # Остаток: (0.94 - 1.0) * 50 = -3.0
+        # total = -3.0 + 5.0 = 2.0 → прибыль!
+        await pm._close_position(trade, exit_price=0.94, reason="sl")
+        assert trade.pnl > 0
+
+    @pytest.mark.asyncio
+    async def test_partial_loss_drags_down_winner(self):
+        """Отрицательный partial_pnl уменьшает общий PnL."""
+        pm = _pm()
+        pm._send_message = AsyncMock()
+
+        trade = _trade(entry_price=1.0, quantity=100, pnl=0.0)
+        trade.partial_closed = True
+        trade.partial_pnl = -2.0
+
+        # Остаток: (1.10 - 1.0) * 100 = +10.0
+        # total = +10.0 + (-2.0) = +8.0
+        await pm._close_position(trade, exit_price=1.10, reason="tp")
+        assert trade.pnl == pytest.approx(8.0)
+
+    @pytest.mark.asyncio
+    async def test_no_partial_pnl_is_zero(self):
+        """Без частичного закрытия partial_pnl = 0."""
+        pm = _pm()
+        pm._send_message = AsyncMock()
+
+        trade = _trade(entry_price=1.0, quantity=100, pnl=0.0)
+        # partial_closed=False, partial_pnl=0.0 (default)
+        await pm._close_position(trade, exit_price=1.05, reason="tp")
+        assert trade.pnl == pytest.approx(5.0)  # только от остатка
+
+
+# ---------------------------------------------------------------------------
+# MarketContext — should_block_entries
+# ---------------------------------------------------------------------------
+
+
+class TestMarketContextBlockEntries:
+    """should_block_entries: риск-режимы и CAUTIOUS+ST=red."""
+
+    def _make_mc(self, enabled=True, ready=True, regime="risk_on",
+                 supertrend_color="green"):
+        """Создать MarketContext с заданным состоянием."""
+        from unittest.mock import MagicMock
+        from src.analytics.market_context import MarketContext
+        from src.config import MarketContextConfig
+
+        cfg = MarketContextConfig(
+            enabled=enabled,
+            btc_drop_threshold_pct=1.5,
+            supertrend_atr_period=10,
+            supertrend_multiplier=3.0,
+            altcoin_sample_size=30,
+            notify_on_change=True,
+            trend_threshold_pct=0.3,
+        )
+        connector = MagicMock()
+        mc = MarketContext(cfg, connector)
+        mc._ready = ready
+        mc._regime = regime
+        mc._supertrend_color = supertrend_color
+        return mc
+
+    def test_disabled_never_blocks(self):
+        """MarketContext выключен → не блокируем."""
+        mc = self._make_mc(enabled=False, regime="risk_off")
+        assert mc.should_block_entries() is False
+
+    def test_not_ready_never_blocks(self):
+        """Ещё нет данных → не блокируем."""
+        mc = self._make_mc(ready=False, regime="risk_off")
+        assert mc.should_block_entries() is False
+
+    def test_risk_off_blocks(self):
+        """RISK-OFF всегда блокирует."""
+        mc = self._make_mc(regime="risk_off", supertrend_color="green")
+        assert mc.should_block_entries() is True
+
+    def test_risk_on_allows(self):
+        """RISK-ON всегда разрешает."""
+        mc = self._make_mc(regime="risk_on", supertrend_color="red")
+        assert mc.should_block_entries() is False
+
+    def test_cautious_st_green_allows(self):
+        """CAUTIOUS + ST=green → разрешает входы."""
+        mc = self._make_mc(regime="cautious", supertrend_color="green")
+        assert mc.should_block_entries() is False
+
+    def test_cautious_st_red_blocks(self):
+        """CAUTIOUS + ST=red → блокирует (аудит июня 2026)."""
+        mc = self._make_mc(regime="cautious", supertrend_color="red")
+        assert mc.should_block_entries() is True
+
+    def test_unknown_allows(self):
+        """Неизвестный режим → не блокируем (ждём данных)."""
+        mc = self._make_mc(regime="unknown", supertrend_color="red")
+        assert mc.should_block_entries() is False

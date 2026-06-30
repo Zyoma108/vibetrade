@@ -352,6 +352,36 @@ class PositionManager:
                             f"TP/SL для {signal.symbol} "
                             f"будут выставлены в следующем цикле: {e}"
                         )
+
+                # 5. Частичная фиксация — лимитный ордер на 50% позиции
+                # Выставляется сразу при открытии, не зависит от цикла опроса.
+                if tp_sl_ok:
+                    try:
+                        partial_trigger = (
+                            entry_price
+                            + (tp_price - entry_price)
+                            * (self.config.partial_close_pct / 100)
+                        )
+                        partial_qty = quantity / 2
+                        await self._connector.place_reduce_only_limit(  # type: ignore[union-attr]
+                            symbol=signal.symbol,
+                            side="buy",
+                            amount=partial_qty,
+                            price=partial_trigger,
+                        )
+                        logger.info(
+                            f"Лимитник частичной фиксации {signal.symbol}: "
+                            f"{partial_qty:.2f} контрактов @ {partial_trigger:.6f} "
+                            f"({self.config.partial_close_pct:.0f}% пути до TP)"
+                        )
+                    except Exception:
+                        # Не критично — update_positions проверит частичную
+                        # фиксацию по цене как fallback.
+                        logger.warning(
+                            f"Не удалось выставить лимитник частичной "
+                            f"фиксации для {signal.symbol}, будет проверка по циклу"
+                        )
+
             except Exception as e:
                 err = str(e)
                 # ByBit требует подписать соглашение — пропускаем без шума
@@ -485,9 +515,70 @@ class PositionManager:
                 closed.append(pos)
                 continue
 
-            # --- Перевод стопа в б/у на полпути (без частичной фиксации) ---
+            # --- Real: проверка исполнения лимитника частичной фиксации ---
+            if self.is_real and not pos.partial_closed:
+                try:
+                    ex_positions = await self._connector.fetch_positions(  # type: ignore[union-attr]
+                        pos.symbol
+                    )
+                    if ex_positions:
+                        actual_contracts = abs(ex_positions[0]["contracts"])
+                        # Если позиция уменьшилась → лимитник исполнился
+                        if actual_contracts < pos.quantity * 0.75:
+                            tp = self._tp_price(pos.entry_price)
+                            trigger = pos.entry_price + (tp - pos.entry_price) * (
+                                self.config.partial_close_pct / 100
+                            )
+                            close_qty = pos.quantity - actual_contracts
+                            partial_pnl = (
+                                (trigger - pos.entry_price) * close_qty
+                                if pos.direction == "long"
+                                else (pos.entry_price - trigger) * close_qty
+                            )
+                            pos.quantity = actual_contracts
+                            pos.partial_closed = True
+                            pos.partial_pnl = (pos.partial_pnl or 0.0) + partial_pnl
+                            session.add(pos)
+
+                            # Переводим стоп в безубыток для остатка
+                            try:
+                                await self._connector.set_tpsl(  # type: ignore[union-attr]
+                                    symbol=pos.symbol,
+                                    side="buy" if pos.direction == "long" else "sell",
+                                    amount=actual_contracts,
+                                    tp_price=tp,
+                                    sl_price=pos.entry_price,
+                                )
+                            except Exception as e:
+                                logger.warning(
+                                    f"Не удалось перевести стоп в б/у "
+                                    f"для {pos.symbol}: {e}"
+                                )
+
+                            pnl_pct = (trigger / pos.entry_price - 1) * 100
+                            await self._notify(
+                                f"🔒 <b>Частичная фиксация (лимитник)</b> "
+                                f"{pos.direction.upper()}\n"
+                                f"Монета: {pos.symbol}\n"
+                                f"Закрыто 50% @ ${trigger:.6f}\n"
+                                f"Частичный PnL: ${partial_pnl:+.2f} "
+                                f"({pnl_pct:+.1f}%)\n"
+                                f"Стоп переведён в безубыток"
+                            )
+                            logger.info(
+                                f"Лимитник исполнен: {pos.symbol} "
+                                f"{close_qty:.2f} @ {trigger:.6f}"
+                            )
+                            continue
+                except Exception:
+                    logger.warning(
+                        f"Ошибка проверки лимитника для {pos.symbol}"
+                    )
+
+            # --- Перевод стопа в б/у на полпути (virtual, без частичной фиксации) ---
             if (
-                self.config.breakeven_at_halfway
+                not self.is_real
+                and self.config.breakeven_at_halfway
                 and not pos.partial_closed
                 and current_price
             ):
@@ -520,17 +611,71 @@ class PositionManager:
                     logger.info(f"Стоп в б/у: {pos.symbol} @ {current_price:.6f}")
                     continue
 
-            # --- Частичное закрытие на полпути к TP (всегда включено) ---
-            if not pos.partial_closed and current_price:
+            # --- Частичное закрытие (virtual: по high свечей; real: fallback) ---
+            if not pos.partial_closed:
                 tp = self._tp_price(pos.entry_price)
                 trigger = pos.entry_price + (tp - pos.entry_price) * (
                     self.config.partial_close_pct / 100
                 )
-                if (pos.direction == "long" and current_price >= trigger) or (
-                    pos.direction == "short" and current_price <= trigger
-                ):
+
+                # Virtual: проверяем по high свечей с момента входа
+                # (тикер может пропустить кратковременный пик)
+                hit_trigger = False
+                if not self.is_real:
+                    from src.storage.models import Candle
+                    candle_stmt = (
+                        select(Candle.high)
+                        .where(
+                            Candle.symbol == pos.symbol,
+                            Candle.timestamp >= pos.entry_time.replace(
+                                tzinfo=timezone.utc
+                            ),
+                            Candle.timestamp <= now,
+                        )
+                    )
+                    candle_result = await session.execute(candle_stmt)
+                    candle_highs = [r[0] for r in candle_result.all()]
+                    max_high = max(candle_highs) if candle_highs else 0
+                    hit_trigger = (pos.direction == "long" and max_high >= trigger) or (
+                        pos.direction == "short" and max_high <= trigger
+                    )
+                else:
+                    # Real fallback: проверка по тикеру (если лимитник не был выставлен)
+                    hit_trigger = (
+                        current_price
+                        and (
+                            (pos.direction == "long" and current_price >= trigger)
+                            or (pos.direction == "short" and current_price <= trigger)
+                        )
+                    )
+
+                if hit_trigger:
                     close_qty = pos.quantity / 2
+                    # Цена частичной фиксации: для virtual — trigger (лимитник),
+                    # для real fallback — current_price (рыночный ордер)
+                    fill_price = trigger if not self.is_real else current_price
+
                     if self.is_real:
+                        # Проверить, нет ли уже лимитника на бирже (после рестарта).
+                        # Если есть — exchange сам исполнит частичную фиксацию,
+                        # рыночный ордер не нужен.
+                        has_open_orders = False
+                        try:
+                            open_orders = await self._connector._call(  # type: ignore[union-attr]
+                                "fetch_open_orders", pos.symbol
+                            )
+                            has_open_orders = len(open_orders) > 0
+                        except Exception:
+                            pass  # не смогли проверить — лучше перестраховаться
+
+                        if has_open_orders:
+                            logger.info(
+                                f"Частичная фиксация {pos.symbol}: "
+                                f"на бирже есть открытые ордера, "
+                                f"пропускаем fallback (лимитник уже работает)"
+                            )
+                            continue
+
                         try:
                             await self._connector._call(  # type: ignore[union-attr]
                                 "create_order",
@@ -557,21 +702,21 @@ class PositionManager:
                             logger.warning(f"Частичное закрытие {pos.symbol}: {e}")
                             continue
 
-                    partial_pnl = (current_price - pos.entry_price) * close_qty if pos.direction == "long" else (pos.entry_price - current_price) * close_qty
+                    partial_pnl = (fill_price - pos.entry_price) * close_qty if pos.direction == "long" else (pos.entry_price - fill_price) * close_qty
                     pos.quantity -= close_qty
                     pos.partial_closed = True
                     pos.partial_pnl = (pos.partial_pnl or 0.0) + partial_pnl
                     session.add(pos)
 
-                    pnl_pct = (current_price / pos.entry_price - 1) * 100
+                    pnl_pct = (fill_price / pos.entry_price - 1) * 100
                     await self._notify(
                         f"🔒 <b>Частичная фиксация</b> {pos.direction.upper()}\n"
                         f"Монета: {pos.symbol}\n"
-                        f"Закрыто 50% @ ${current_price:.6f}\n"
+                        f"Закрыто 50% @ ${fill_price:.6f}\n"
                         f"Частичный PnL: ${partial_pnl:+.2f} ({pnl_pct:+.1f}%)\n"
                         f"Стоп переведён в безубыток"
                     )
-                    logger.info(f"Частичное закрытие: {pos.symbol} 50% @ {current_price:.6f}")
+                    logger.info(f"Частичное закрытие: {pos.symbol} 50% @ {fill_price:.6f}")
                     continue
 
             # --- Выход по времени (virtual + real) ---
