@@ -77,7 +77,7 @@ trading:
   breakeven_at_halfway: false     # перевести стоп в б/у на полпути (без частичной фиксации)
   cooldown_hours: 1.0             # кулдаун после закрытия позиции
   circuit_breaker_enabled: true   # защита от серий убытков (Circuit Breaker)
-  circuit_breaker_loss_streak_reduce: 3  # после N убытков подряд уменьшить размер позиции
+  circuit_breaker_loss_streak_reduce: 2  # после N убытков подряд уменьшить размер позиции
   circuit_breaker_reduce_mult_pct: 50.0  # множитель размера позиции при срабатывании, %
-  circuit_breaker_loss_streak_stop: 5    # после N убытков подряд полностью остановить
+  circuit_breaker_loss_streak_stop: 3    # после N убытков подряд полностью остановить
   circuit_breaker_stop_minutes: 60       # на сколько минут остановить торговлю
