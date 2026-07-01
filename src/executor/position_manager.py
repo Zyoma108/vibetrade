@@ -29,6 +29,7 @@ class PositionManager:
         self._banned_symbols: set[str] = set()  # монеты с ошибками торговли
         self.market_regime: str = "unknown"
         self.position_size_mult: float = 1.0
+        self.block_entries: bool = False  # should_block_entries() из market_context
 
         # Circuit Breaker: защита от серий убытков
         self._consecutive_losses: int = 0
@@ -183,13 +184,13 @@ class PositionManager:
         'cooldown' | 'no_price' | 'error' | 'circuit_breaker_stop'.
         detail — описание ошибки (только если status != 'opened')."""
 
-        # Проверка рыночного режима
-        if self.market_regime == "risk_off":
+        # Проверка рыночного режима (risk_off или cautious+ST=red)
+        if self.block_entries:
             logger.info(
                 f"Сигнал {signal.symbol} пропущен: "
-                f"risk-off режим (входы заблокированы)"
+                f"рыночный режим блокирует входы (regime={self.market_regime})"
             )
-            return None, "risk_off", None
+            return None, "market_block", self.market_regime
 
         # Circuit Breaker
         cb_status = self._check_circuit_breaker()

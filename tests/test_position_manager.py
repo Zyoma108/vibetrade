@@ -343,12 +343,12 @@ class TestOpenPositionRejections:
     """open_position returns correct status codes for various rejections."""
 
     @pytest.mark.asyncio
-    async def test_risk_off_rejection(self):
+    async def test_market_block_rejection(self):
         pm = _pm()
-        pm.market_regime = "risk_off"
+        pm.block_entries = True
         trade, status, detail = await pm.open_position(AsyncMock(), _signal())
         assert trade is None
-        assert status == "risk_off"
+        assert status == "market_block"
 
     @pytest.mark.asyncio
     async def test_circuit_breaker_stop_rejection(self):

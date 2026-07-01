@@ -267,6 +267,7 @@ class Application:
         # Передаём контекст в PositionManager
         if self._positions and self._market_ctx:
             self._positions.market_regime = self._market_ctx.regime
+            self._positions.block_entries = self._market_ctx.should_block_entries()
             self._positions.position_size_mult = (
                 self._market_ctx.position_size_multiplier()
             )
