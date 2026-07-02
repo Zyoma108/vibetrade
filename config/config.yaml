@@ -72,7 +72,7 @@ trading:
   exchange: bybit                 # биржа для торговли
   max_positions: 10               # максимум одновременных позиций
   leverage: 10                    # кредитное плечо
-  risk_per_trade_pct: 1.5         # % от депозита, которым рискуем за один стоп
+  risk_per_trade_pct: 1.0         # % от депозита, которым рискуем за один стоп
   risk_reward_ratio: 3.5          # соотношение TP/SL (3.5 = 1:3.5 risk/reward)
   stop_loss_pct: 5.0              # стоп-лосс, % от цены входа
   max_hold_hours: 48.0            # макс. время удержания, часов
