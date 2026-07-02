@@ -694,7 +694,7 @@ class TestConfigDefaults:
         assert cfg.sustain_bars == 4
         assert cfg.volume_surge_mult == 2.0
         assert cfg.oi_slope_min_pct == 2.0
-        assert cfg.price_growth_min_pct == 0.3
+        assert cfg.price_growth_min_pct == 1.0
 
     def test_cautious_increase_bounds(self):
         """cautious_volume_surge_mult_increase_pct is within valid range."""

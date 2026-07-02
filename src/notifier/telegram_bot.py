@@ -204,6 +204,7 @@ class TelegramNotifier:
             "error": "❌ Ошибка создания ордера",
             "disabled": "ℹ️ Торговля отключена",
             "risk_off": "🔴 Рынок в risk-off, входы заблокированы",
+            "market_block": "🚫 Вход заблокирован рыночным режимом",
         }
         status_line = status_labels.get(status, f"⚠️ {status}")
 

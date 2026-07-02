@@ -41,7 +41,6 @@ src/
 │   ├── models.py              # ORM: Candle, Ticker, OpenInterest, Signal, Trade, PriceSurgeSignal, MarketContextSnapshot
 │   └── stats.py               # trade_stats() — сбор статистики для команды /stats
 ├── backtest/
-│   ├── loader.py              # Загрузка исторических данных в data/backtest.db
 │   └── runner.py              # Симуляция стратегии на исторических свечах
 ├── scripts/
 │   ├── backtest_sweep.py       # Подбор оптимальных параметров стратегии

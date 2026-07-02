@@ -67,7 +67,7 @@ class SetupDetector(BaseDetector):
                 if self.check_volume_pattern(candles):
                     vol_window = candles
                 else:
-                    for shift in range(1, 4):  # -1, -2, -3 свечи
+                    for shift in range(1, 3):  # -1, -2 свечи
                         shifted = candles[:-shift]
                         if len(shifted) >= min_bars and self.check_volume_pattern(shifted):
                             vol_window = shifted
@@ -153,6 +153,17 @@ class SetupDetector(BaseDetector):
                         )
                         return False
 
+            # Проверка падения объёма в последней свече sustain:
+            # если объём резко упал относительно среднего предыдущих — памп иссякает
+            if len(recent) >= 3:
+                prev_avg = np.mean(recent[:-1])
+                if prev_avg > 0 and recent[-1] / prev_avg < 0.5:
+                    logger.info(
+                        f"Сигнал пропущен: объём последней свечи упал "
+                        f"({recent[-1] / prev_avg:.1%} от среднего предыдущих)"
+                    )
+                    return False
+
         return True
 
     # ------------------------------------------------------------------
@@ -167,6 +178,13 @@ class SetupDetector(BaseDetector):
             session, exchange, symbol, OI_TREND_BARS
         )
         if oi_values is None:
+            return False
+
+        # Если последняя точка OI ниже предпоследней — приток уже иссякает
+        if len(oi_values) >= 2 and oi_values[-1] < oi_values[-2]:
+            logger.info(
+                "Сигнал пропущен: OI снижается — последняя точка ниже предпоследней"
+            )
             return False
 
         slope_pct = calculate_oi_slope_pct(np.array(oi_values))

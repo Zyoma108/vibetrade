@@ -26,6 +26,10 @@ strategy:
     - WHITEWHALE
     - ESPORTS
     - LA
+    # US-токены — требуют ByBit agreement, не сканируем
+    - META
+    - AMAT
+    - KLAC
   baseline_bars: 70              # свечей для расчёта нормального объёма
   volume_surge_mult: 15.0        # во сколько раз объём должен превысить норму
   min_baseline_volume_usdt: 3000 # мин. медиана объёма в USDT, 0 = выкл
@@ -68,7 +72,7 @@ trading:
   exchange: bybit                 # биржа для торговли
   max_positions: 10               # максимум одновременных позиций
   leverage: 10                    # кредитное плечо
-  risk_per_trade_pct: 2.0         # % от депозита, которым рискуем за один стоп
+  risk_per_trade_pct: 1.5         # % от депозита, которым рискуем за один стоп
   risk_reward_ratio: 3.0          # соотношение TP/SL (3.0 = 1:3 risk/reward)
   stop_loss_pct: 5.0              # стоп-лосс, % от цены входа
   max_hold_hours: 48.0            # макс. время удержания, часов

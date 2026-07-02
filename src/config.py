@@ -43,7 +43,7 @@ class StrategyConfig(BaseModel):
         default=2.0, description="Минимальный наклон OI, % (фильтрует плоский/падающий OI)"
     )
     price_growth_min_pct: float = Field(
-        default=0.3, description="Минимальный рост цены за sustain-окно, %"
+        default=1.0, description="Минимальный рост цены за sustain-окно, %"
     )
     price_growth_max_pct: float = Field(
         default=12.0, description="Максимальный рост цены за sustain-окно, % (страховочный потолок, 0 = без лимита)"
