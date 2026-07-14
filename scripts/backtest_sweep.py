@@ -18,8 +18,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from src.config import Settings
 
 DB_PATHS = [
-    "data/trading_bot_22.06-30-06.db",
-    "data/trading_bot.db",
+    "data/trading_bot_22.06-30.06.db",
+    "data/trading_bot_02.07-13.07.db",
 ]
 CONFIG_PATH = "config/config.yaml"
 HAS_OI = True  # DB has OI data
@@ -406,9 +406,11 @@ async def run_round(label: str, overrides_list: list[tuple[str, dict]], db_path:
 async def main():
     start_time = time.time()
 
-    # RR and SL values for combined sweep
+    # RR, SL, Volume, Sustain values for combined sweeps
     RR_VALUES = [2.0, 2.5, 3.0, 3.5, 4.0]
     SL_VALUES = [3.0, 4.0, 5.0, 6.0, 7.5, 8.0, 10.0]
+    VOL_VALUES = [5.0, 6.0, 8.0, 10.0, 12.0, 15.0]
+    SUSTAIN_VALUES = [1, 2, 3, 4]
 
     for db_path in DB_PATHS:
         dname = db_name(db_path)
@@ -425,7 +427,7 @@ async def main():
         # =====================================================================
         # BASELINE
         # =====================================================================
-        print("\n[1/3] Baseline (current config)...")
+        print("\n[1/4] Baseline (current config)...")
         baseline = await run_one(f"BASELINE", {}, db_path)
         if baseline:
             all_results.append(baseline)
@@ -435,7 +437,7 @@ async def main():
         # =====================================================================
         # ROUND 1: Combined RR × SL sweep
         # =====================================================================
-        print(f"\n[2/3] Combined RR×SL sweep ({len(RR_VALUES)}×{len(SL_VALUES)}={len(RR_VALUES)*len(SL_VALUES)} combos)...")
+        print(f"\n[2/4] Combined RR×SL sweep ({len(RR_VALUES)}×{len(SL_VALUES)}={len(RR_VALUES)*len(SL_VALUES)} combos)...")
         combos = []
         for rr in RR_VALUES:
             for sl in SL_VALUES:
@@ -447,13 +449,27 @@ async def main():
         all_results.extend(combo_results)
 
         # =====================================================================
-        # ROUND 2: Other individual parameter sweeps
+        # ROUND 2: Combined Volume×Sustain sweep
         # =====================================================================
-        print("\n[3/3] Individual parameter sweeps...")
+        print(f"\n[3/4] Combined Volume×Sustain sweep ({len(VOL_VALUES)}×{len(SUSTAIN_VALUES)}={len(VOL_VALUES)*len(SUSTAIN_VALUES)} combos)...")
+        vol_sus_combos = []
+        for vol in VOL_VALUES:
+            for sb in SUSTAIN_VALUES:
+                vol_sus_combos.append((f"v={vol:.0f}_s={sb}", {
+                    "volume_surge_mult": vol,
+                    "sustain_bars": sb,
+                }))
+        vol_sus_results = await run_round("", vol_sus_combos, db_path)
+        all_results.extend(vol_sus_results)
+
+        # =====================================================================
+        # ROUND 3: Other individual parameter sweeps
+        # =====================================================================
+        print("\n[4/4] Individual parameter sweeps...")
 
         # volume_surge_mult
         vol_combos = [(f"vol=x{vol:.0f}", {"volume_surge_mult": vol})
-                      for vol in [10.0, 12.0, 15.0, 18.0, 20.0, 25.0]]
+                      for vol in [5.0, 6.0, 8.0, 10.0, 12.0, 15.0, 18.0, 20.0, 25.0]]
         vol_results = await run_round("", vol_combos, db_path)
         all_results.extend(vol_results)
 
@@ -465,7 +481,7 @@ async def main():
 
         # sustain_bars
         sus_combos = [(f"sustain={sb}", {"sustain_bars": sb})
-                      for sb in [3, 4, 5, 6]]
+                      for sb in [1, 2, 3, 4, 5, 6]]
         sus_results = await run_round("", sus_combos, db_path)
         all_results.extend(sus_results)
 
@@ -513,6 +529,27 @@ async def main():
                     row += f" {r['win_rate']:>4.0f}%${r['total_pnl']:>+7.1f}"
                 else:
                     row += f" {'—':>13s}"
+            print(row)
+        print(f"  {'─' * 90}")
+
+        # Print combined Volume×Sustain table
+        print(f"\n  COMBINED VOLUME×SUSTAIN SWEEP (score = PnL × WR/100)")
+        print(f"  {'─' * 90}")
+        header = f"  {'Vol\\Sus':>8s}"
+        for sb in SUSTAIN_VALUES:
+            header += f" {f's={sb}':>14s}"
+        print(header)
+        print(f"  {'─' * 90}")
+        for vol in VOL_VALUES:
+            row = f"  {f'x{vol:.0f}':>8s}"
+            for sb in SUSTAIN_VALUES:
+                match = [r for r in vol_sus_results
+                         if f"v={vol:.0f}_s={sb}" in r.get("label", "")]
+                if match:
+                    r = match[0]
+                    row += f" {r['win_rate']:>4.0f}%${r['total_pnl']:>+7.1f}"
+                else:
+                    row += f" {'—':>14s}"
             print(row)
         print(f"  {'─' * 90}")
 

@@ -154,15 +154,24 @@ class SetupDetector(BaseDetector):
                         return False
 
             # Проверка падения объёма в последней свече sustain:
-            # если объём резко упал относительно среднего предыдущих — памп иссякает
-            if len(recent) >= 3:
+            # если объём упал относительно среднего предыдущих — памп иссякает
+            if len(recent) >= 2:
                 prev_avg = np.mean(recent[:-1])
-                if prev_avg > 0 and recent[-1] / prev_avg < 0.5:
+                if prev_avg > 0 and recent[-1] / prev_avg < 0.7:
                     logger.info(
                         f"Сигнал пропущен: объём последней свечи упал "
                         f"({recent[-1] / prev_avg:.1%} от среднего предыдущих)"
                     )
                     return False
+
+            # Объём должен расти: последняя свеча sustain >= первой свечи sustain
+            # (если объём падает — памп иссякает, сигнал не даём)
+            if len(recent) >= 2 and recent[-1] < recent[0]:
+                logger.info(
+                    f"Сигнал пропущен: объём снижается — "
+                    f"последняя свеча ({recent[-1]:.0f}) < первая ({recent[0]:.0f})"
+                )
+                return False
 
         return True
 
