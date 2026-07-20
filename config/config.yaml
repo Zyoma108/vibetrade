@@ -47,16 +47,17 @@ strategy:
     - SPCX
   baseline_bars: 70              # свечей для расчёта нормального объёма
   volume_surge_mult: 5.0         # во сколько раз объём должен превысить норму
-  min_baseline_volume_usdt: 3000 # мин. медиана объёма в USDT, 0 = выкл
+  min_baseline_volume_usdt: 5000 # мин. медиана объёма в USDT, 0 = выкл
   sustain_bars: 4                # сколько свечей подряд выше порога для сигнала
   oi_slope_min_pct: 2.0          # минимальный наклон OI, % (1→2: жёстче подтверждение)
   smooth_max_ratio: 5.0           # макс. отношение макс/медиана объёма (отсекает спайки)
-  dump_volume_mult: 0.0           # защита от свечей-выбросов, 0 = выкл
+  dump_volume_mult: 0.0           # защита от свечей-выбросов (0 = выкл)
   price_growth_min_pct: 1.0      # минимальный рост цены за sustain-окно, %
   price_growth_max_pct: 12.0     # страховочный потолок роста цены, 0 = выкл
   exhaustion_gain_pct: 5.0       # порог роста для exhaustion-фильтра
   exhaustion_pos_ratio: 0.7      # позиция закрытия свечи (0=low, 1=high)
   max_hourly_drop_pct: 10.0      # макс. падение за час (защита от рагпулов), 0 = выкл
+  pre_surge_max_pct: 8.0         # макс. рост за 30 мин до sustain-окна (0 = выкл)
   cautious_volume_surge_mult_increase_pct: 50.0  # +50% к volume_surge_mult в CAUTIOUS режиме
 
 strategy_price_surge:                    # детектор пампов по чистой цене (только сигналы)
@@ -87,16 +88,16 @@ trading:
   exchange: bybit                 # биржа для торговли
   max_positions: 10               # максимум одновременных позиций
   leverage: 10                    # кредитное плечо
-  risk_per_trade_pct: 1.0         # % от депозита, которым рискуем за один стоп
-  risk_reward_ratio: 3.5          # соотношение TP/SL (3.5 = 1:3.5 risk/reward)
-  stop_loss_pct: 3.0              # стоп-лосс, % от цены входа
+  risk_per_trade_pct: 0.6         # % от депозита, которым рискуем за один стоп
+  risk_reward_ratio: 2.0          # соотношение TP/SL (2.0 = 1:2 risk/reward, TP=+10%)
+  stop_loss_pct: 5.0              # стоп-лосс, % от цены входа
   max_hold_hours: 48.0            # макс. время удержания, часов
   partial_close_enabled: true     # частичная фиксация (всегда включена)
-  partial_close_pct: 40.0         # % пути до TP для закрытия / перевода в б/у
+  partial_close_pct: 35.0         # % пути до TP для закрытия / перевода в б/у
   breakeven_at_halfway: false     # перевести стоп в б/у на полпути (без частичной фиксации)
   cooldown_hours: 1.0             # кулдаун после закрытия позиции
-  circuit_breaker_enabled: false   # защита от серий убытков (Circuit Breaker)
-  circuit_breaker_loss_streak_reduce: 3  # после N убытков подряд уменьшить размер позиции
+  circuit_breaker_enabled: true    # защита от серий убытков (Circuit Breaker)
+  circuit_breaker_loss_streak_reduce: 2  # после N убытков подряд уменьшить размер позиции
   circuit_breaker_reduce_mult_pct: 50.0  # множитель размера позиции при срабатывании, %
-  circuit_breaker_loss_streak_stop: 5    # после N убытков подряд полностью остановить
+  circuit_breaker_loss_streak_stop: 3    # после N убытков подряд полностью остановить
   circuit_breaker_stop_minutes: 60       # на сколько минут остановить торговлю

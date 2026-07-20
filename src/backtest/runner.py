@@ -149,11 +149,13 @@ async def run_backtest(
 
         # Определяем режим рынка на этот момент времени
         regime = "unknown"
+        st_color = "green"
         for mc_ts, mc_row in reversed(mc_snapshots):
             if mc_ts <= ts:
                 regime = mc_row.regime
+                st_color = mc_row.supertrend_color
                 break
-        if regime == "risk_off":
+        if regime == "risk_off" or (regime == "cautious" and st_color == "red"):
             continue
 
         # Проверяем открытые позиции на TP/SL/время

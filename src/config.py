@@ -57,6 +57,9 @@ class StrategyConfig(BaseModel):
     max_hourly_drop_pct: float = Field(
         default=10.0, description="Максимальное падение за час, % (защита от рагпулов, 0 = выкл)"
     )
+    pre_surge_max_pct: float = Field(
+        default=0.0, description="Максимальный рост за 30 мин до sustain-окна, % (0 = выкл)"
+    )
     dump_volume_mult: float = Field(
         default=3.0, description="Макс. отношение объёма последней свечи к медиане остальных свечей sustain-окна (защита от свечей-выбросов, 0 = выкл)"
     )

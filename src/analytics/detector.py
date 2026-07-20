@@ -67,7 +67,7 @@ class SetupDetector(BaseDetector):
                 if self.check_volume_pattern(candles):
                     vol_window = candles
                 else:
-                    for shift in range(1, 3):  # -1, -2 свечи
+                    for shift in range(1, 2):  # -1 свеча (компенсация timing'а)
                         shifted = candles[:-shift]
                         if len(shifted) >= min_bars and self.check_volume_pattern(shifted):
                             vol_window = shifted
@@ -218,6 +218,26 @@ class SetupDetector(BaseDetector):
         if opens[0] <= 0:
             return None
 
+        # Pre-sustain pump filter: проверяем рост за 10 свечей (30 мин) до sustain-окна.
+        # Блокирует сигнал, если монета уже сильно выросла ДО начала sustain-периода.
+        pre_surge_max = self.config.pre_surge_max_pct
+        if pre_surge_max > 0:
+            pre_sustain_bars = 10
+            min_required = self.config.baseline_bars + self.config.sustain_bars + pre_sustain_bars
+            if len(candles) >= min_required:
+                pre_start_idx = -(self.config.sustain_bars + pre_sustain_bars)
+                pre_end_idx = -self.config.sustain_bars
+                pre_open = candles[pre_start_idx]['open']
+                pre_close = candles[pre_end_idx - 1]['close'] if pre_end_idx < 0 else candles[pre_end_idx]['close']
+                if pre_open > 0:
+                    pre_pump_pct = (pre_close / pre_open - 1) * 100
+                    if pre_pump_pct > pre_surge_max:
+                        logger.info(
+                            f"Сигнал пропущен: предварительный памп {pre_pump_pct:.1f}% "
+                            f"(>{pre_surge_max}%) за 30 мин до sustain-окна"
+                        )
+                        return None
+
         # Защита от рагпулов: падение за последний час
         max_drop = self.config.max_hourly_drop_pct
         if max_drop > 0:
@@ -302,7 +322,7 @@ class SetupDetector(BaseDetector):
             symbol=symbol,
             setup_type="volume_surge",
             direction=direction,
-            confidence=min(round(surge * 20), 95),
+            confidence=min(round(surge * 5), 100),
             message=(
                 f"Объём: x{surge:.1f} от нормы\n"
                 f"Последние {sustain} свечей выше порога\n"

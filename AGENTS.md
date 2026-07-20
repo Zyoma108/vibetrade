@@ -44,6 +44,7 @@ src/
 │   └── runner.py              # Симуляция стратегии на исторических свечах
 ├── scripts/
 │   ├── backtest_sweep.py       # Подбор оптимальных параметров стратегии
+│   ├── sweep_focused.py         # Фокусированный свип (RR×SL, vol, dump, risk, partial)
 │   ├── analyze_missed_signals.py # Поиск пропущенных сетапов (сильные движения без сигналов)
 │   ├── analyze_performance.py  # Комплексный анализ на нескольких БД (свип + комбинации)
 │   ├── test_blowoff_filter.py  # Тест фильтра памп-энд-дампов
@@ -128,8 +129,8 @@ Application.start()
 
 | Режим | Условие | Вход в позиции | Размер позиции | Volume surge порог |
 |-------|---------|---------------|----------------|-------------------|
-| 🟢 RISK-ON | BTC > −1.5% **И** OTHERS Supertrend зелёный | ✅ Да | 100% | ×1.0 (15.0) |
-| 🟡 CAUTIOUS | Один из сигналов негативный | ⚠️ Только при ST=green | **50%** | **×1.5 (22.5)** |
+| 🟢 RISK-ON | BTC > −1.5% **И** OTHERS Supertrend зелёный | ✅ Да | 100% | ×1.0 (5.0) |
+| 🟡 CAUTIOUS | Один из сигналов негативный | ⚠️ Только при ST=green | **50%** | **×1.5 (7.5)** |
 | 🔴 RISK-OFF | BTC падает >1.5% **И** OTHERS Supertrend красный | ❌ Нет | 0% | — |
 
 **CAUTIOUS + ST=red** блокирует входы (аудит июня 2026: 5/5 убыточных сделок в этом режиме).
@@ -173,22 +174,24 @@ Application.start()
    - Наклон в % от среднего OI ≥ `oi_slope_min_pct` (растущий открытый интерес = приток капитала)
 4. **Проверка цены** (`check_price_trend`, публичный метод):
    - Рост за sustain-окно: `price_growth_min_pct ≤ рост`
+   - **Pre-sustain pump filter**: если рост за 10 свечей (30 мин) ДО sustain-окна > `pre_surge_max_pct` → блок (монета уже улетела до сигнала)
    - **Exhaustion filter**: если рост > `exhaustion_gain_pct` И последняя свеча закрылась в верхних `exhaustion_pos_ratio` диапазона → сигнал блокируется (истощение покупателей)
-   - **Страховочный потолок**: рост > `price_growth_max_pct` → блок (экстремальный памп)
+   - **Страховочный потолок**: рост > `price_growth_max_pct` → блок (экстремальный памп внутри sustain-окна)
    - Защита от рагпулов: падение за час ≤ `max_hourly_drop_pct`
-5. **Уверенность** = `min(surge_multiple × 20, 95)`, где surge_multiple = средний_объём_окна / медиана_базового
+5. **Уверенность** = `min(surge_multiple × 5, 100)`, где surge_multiple = средний_объём_окна / медиана_базового
 
 **Ключевые параметры** (`config.yaml → strategy`):
 
 | Параметр | Значение по умолчанию | Смысл |
 |----------|----------------------|-------|
-| `volume_surge_mult` | 15.0 | Во сколько раз объём превышает норму |
+| `volume_surge_mult` | 5.0 | Во сколько раз объём превышает норму |
 | `sustain_bars` | 4 | Сколько свечей подряд выше порога |
 | `baseline_bars` | 70 | База для расчёта нормального объёма |
-| `min_baseline_volume_usdt` | 3000 | Мин. медиана объёма в USDT (фильтр низкой ликвидности) |
+| `min_baseline_volume_usdt` | 5000 | Мин. медиана объёма в USDT (фильтр низкой ликвидности) |
 | `oi_slope_min_pct` | 2.0% | Минимальный наклон OI |
 | `price_growth_min_pct` | 1.0% | Мин. рост цены за sustain-окно |
-| `price_growth_max_pct` | 12.0% | Страховочный потолок роста (0 = выкл) |
+| `price_growth_max_pct` | 12.0% | Страховочный потолок роста в sustain-окне (0 = выкл) |
+| `pre_surge_max_pct` | 8.0% | Макс. рост за 30 мин ДО sustain-окна (0 = выкл) |
 | `exhaustion_gain_pct` | 5.0% | Порог роста для exhaustion-фильтра |
 | `exhaustion_pos_ratio` | 0.7 | Позиция закрытия свечи (0=low, 1=high) |
 | `smooth_max_ratio` | 5.0 | Макс. отношение макс/медиана объёма |
@@ -234,24 +237,24 @@ Application.start()
 | Параметр | По умолчанию | Смысл |
 |----------|-------------|-------|
 | `risk_per_trade_pct` | 1.0 | % от депозита, которым рискуем за один стоп |
-| `risk_reward_ratio` | 3.0 | Соотношение TP/SL (3.0 = 1:3 risk/reward) |
+| `risk_reward_ratio` | 2.0 | Соотношение TP/SL (2.0 = TP на +10% при SL=5%) |
 | `stop_loss_pct` | 5.0 | Стоп-лосс, % от цены входа |
 | `max_hold_hours` | 48.0 | Макс. время удержания позиции |
 | `partial_close_enabled` | `true` | Частичная фиксация (всегда включена, игнорируется) |
-| `partial_close_pct` | 50.0 | % пути до TP для частичного закрытия |
+| `partial_close_pct` | 35.0 | % пути до TP для частичного закрытия |
 | `cooldown_hours` | 1.0 | Кулдаун после закрытия позиции (0 = без кулдауна) |
 | `circuit_breaker_enabled` | `true` | Включить Circuit Breaker — защиту от серий убытков |
-| `circuit_breaker_loss_streak_reduce` | 3 | После N убытков подряд уменьшить размер позиции |
+| `circuit_breaker_loss_streak_reduce` | 2 | После N убытков подряд уменьшить размер позиции |
 | `circuit_breaker_reduce_mult_pct` | 50.0 | Множитель размера при срабатывании, % |
-| `circuit_breaker_loss_streak_stop` | 5 | После N убытков подряд полностью остановить торговлю |
+| `circuit_breaker_loss_streak_stop` | 3 | После N убытков подряд полностью остановить торговлю |
 | `circuit_breaker_stop_minutes` | 60 | На сколько минут остановить торговлю |
 
 ### Circuit Breaker (защита от серий убытков)
 
 Встроен в `PositionManager`. Отслеживает количество убыточных сделок подряд. При достижении порогов:
 
-1. **3 убытка подряд** (`circuit_breaker_loss_streak_reduce`) → размер позиции уменьшается до `circuit_breaker_reduce_mult_pct`% (по умолчанию 50%)
-2. **5 убытков подряд** (`circuit_breaker_loss_streak_stop`) → полная остановка торговли на `circuit_breaker_stop_minutes` минут (по умолчанию 60)
+1. **2 убытка подряд** (`circuit_breaker_loss_streak_reduce`) → размер позиции уменьшается до `circuit_breaker_reduce_mult_pct`% (по умолчанию 50%)
+2. **3 убытка подряд** (`circuit_breaker_loss_streak_stop`) → полная остановка торговли на `circuit_breaker_stop_minutes` минут (по умолчанию 60)
 3. **Любая прибыльная сделка** → сброс счётчика, возобновление нормальной торговли
 
 Статус `circuit_breaker_stop` возвращается `open_position()` и записывается в `signals.missed_reason`. Бэктест-раннер симулирует ту же логику.

@@ -297,13 +297,14 @@ LIMIT 20;
 
 ### Фильтры стратегии (в порядке проверки в detector.py)
 
-1. **Volume pattern** (`check_volume_pattern`): baseline 70 свечей, sustain 4 свечи, порог x15. Smoothness (x5), dump-фильтр (выкл), min baseline USDT (3000). **Есть lookback: если текущее окно не проходит, проверяются сдвинутые на -1/-2/-3 свечи** (компенсация timing'а цикла).
+1. **Volume pattern** (`check_volume_pattern`): baseline 70 свечей, sustain 4 свечи, порог x5. Smoothness (x5), dump-фильтр (выкл), min baseline USDT (5000). **Есть lookback: если текущее окно не проходит, проверяется сдвинутое на -1 свечу** (компенсация timing'а цикла).
 
 2. **OI trend** (`_check_oi_trend`): 3 последних точки OI, наклон ≥ 2.0%.
 
 3. **Price trend** (`check_price_trend`):
    - `price_growth_min_pct` ≥ 1.0%
-   - `price_growth_max_pct` ≤ 12.0% (страховочный потолок)
+   - `price_growth_max_pct` ≤ 12.0% (страховочный потолок внутри sustain-окна)
+   - **Pre-sustain pump filter**: рост > 8.0% за 10 свечей (30 мин) ДО sustain-окна → блок (монета уже улетела)
    - **Exhaustion v1**: если рост > 5% И последняя свеча закрылась в верхних 70% диапазона → блок (истощение покупателей)
    - **Exhaustion v2**: если max high в sustain окне > baseline_median × 30% → блок (экстремальный pump-and-dump, не зависит от close_pos)
    - Ragpull protection: падение > 10% за час → блок
@@ -320,13 +321,13 @@ LIMIT 20;
 ### Отвергнутые идеи (не предлагать)
 
 - **ATR-адаптивный SL** — не работает для стратегии на памповых монетах (волатильность на пампах неисторична, ATR непоказателен)
-- **Снижать `partial_close_pct` для повышения win rate** — уменьшает PnL на дистанции. Задача: максимизировать профит, а не win rate
+- **Снижать `partial_close_pct` для повышения win rate** — уменьшает PnL на дистанции. Задача: максимизировать профит, а не win rate. **Уточнение (июль 2026):** снижение с 50% до 35% оправдано — более ранняя фиксация + перевод SL в безубыток повышает win rate на 9-25% без значимой потери PnL.
 - **Виртуальная торговля** — удалена из кодовой базы
 
 ### Инструменты
 
 - **Бэктест со сравнением**: `make backtest-run-live` или `.venv/bin/python -m src.backtest.runner --db data/trading_bot.db` — выводит бэктест и реальные сделки бок о бок
-- **Свип параметров**: `.venv/bin/python scripts/backtest_sweep.py`
+- **Свип параметров**: `.venv/bin/python scripts/backtest_sweep.py` или `.venv/bin/python scripts/sweep_focused.py` (фокусированный свип RR×SL, vol, dump, risk, partial)
 - **Анализ производительности**: `.venv/bin/python scripts/analyze_performance.py`
 
 ### Важные файлы

@@ -113,7 +113,8 @@ class TestVolumePattern:
         d = _detector(baseline_bars=5, sustain_bars=4, volume_surge_mult=3.0,
                       smooth_max_ratio=5.0)
         # sustain: [1000, 1000, 3000, 1000] — max/median = 3000/1000 = 3 <= 5
-        candles = _candles(9, volume=[100] * 5 + [1000, 1000, 3000, 1000])
+        # last/prev_avg = 1000/(7000/3) ≈ 0.43 < 0.7 → need to avoid decline filter
+        candles = _candles(9, volume=[100] * 5 + [1000, 1000, 1000, 3000])
         assert d.check_volume_pattern(candles)
 
     def test_dump_volume_filter_blocks_last_bar_spike(self):
@@ -157,8 +158,8 @@ class TestVolumePattern:
         # sustain bars = 400 each < 450 → fail
         assert not d.check_volume_pattern(candles)
 
-        # With 500 each > 450 → pass
-        candles2 = _candles(9, volume=[100] * 5 + [500] * 4)
+        # With 600 each: avg_surge=6.0, min_avg=4.5*1.2=5.4, 6.0>=5.4 → pass
+        candles2 = _candles(9, volume=[100] * 5 + [600] * 4)
         assert d.check_volume_pattern(candles2)
 
 
@@ -652,20 +653,20 @@ class TestSignalBuilding:
     """_build_signal — confidence calculation and message format."""
 
     def test_confidence_capped_at_95(self):
-        """Confidence is capped at 95 regardless of volume surge."""
+        """Confidence is capped at 100 regardless of volume surge."""
         d = _detector(baseline_bars=5, sustain_bars=4, volume_surge_mult=3.0)
-        # Huge surge: mean(sustain)/baseline = 5000/100 = 50 → confidence = 50*20 = 1000 → capped at 95
+        # Huge surge: mean(sustain)/baseline = 5000/100 = 50 → confidence = 50*5 = 250 → capped at 100
         candles = _candles(9, volume=[100] * 5 + [5000] * 4)
         sig = d._build_signal("TEST/USDT", "long", candles)
-        assert sig.confidence == 95
+        assert sig.confidence == 100
 
     def test_confidence_scales_with_surge(self):
-        """Confidence = min(round(surge * 20), 95)."""
+        """Confidence = min(round(surge * 5), 100)."""
         d = _detector(baseline_bars=5, sustain_bars=4, volume_surge_mult=3.0)
-        # surge = mean([500,500,500,500]) / 100 = 5 → 5*20 = 100 → capped 95
+        # surge = mean([500,500,500,500]) / 100 = 5 → 5*5 = 25
         candles = _candles(9, volume=[100] * 5 + [500] * 4)
         sig = d._build_signal("TEST/USDT", "long", candles)
-        assert sig.confidence == 95
+        assert sig.confidence == 25
 
     def test_signal_has_required_fields(self):
         """Signal has all fields expected by downstream code."""
