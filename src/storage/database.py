@@ -8,7 +8,7 @@ DB_PATH = Path("data/trading_bot.db")
 engine = create_async_engine(
     f"sqlite+aiosqlite:///{DB_PATH}",
     echo=False,
-    connect_args={"timeout": 10},  # ждать 10с вместо падения с "database is locked"
+    connect_args={"timeout": 30},  # ждать 30с вместо падения с "database is locked" (DELETE-режим сериализует запись)
 )
 
 
