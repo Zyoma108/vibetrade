@@ -4,7 +4,7 @@ services:
     container_name: trading-bot
     volumes:
       - ./config/config.yaml:/app/config/config.yaml:ro
-      - ./data:/app/data
+      - vibetrade_data:/app/data
     env_file:
       - .env
     environment:
@@ -15,3 +15,12 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+
+volumes:
+  # Named volume, НЕ bind-mount: SQLite WAL полагается на mmap для координации
+  # между соединениями, что ненадёжно на bind-mount через Docker Desktop for
+  # Mac (osxfs/gRPC-FUSE) — уже дважды приводило к порче БД. Named volume
+  # хранится в файловой системе Docker VM напрямую. Доступ к файлу — только
+  # `docker exec trading-bot ...` / `docker cp`, не напрямую с хоста. См.
+  # AGENTS.md, "База данных".
+  vibetrade_data:

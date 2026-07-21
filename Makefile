@@ -21,7 +21,9 @@ backtest-run:
 	.venv/bin/python -m src.backtest.runner $(ARGS)
 
 backtest-run-live:
-	.venv/bin/python -m src.backtest.runner --db data/trading_bot.db $(ARGS)
+	# Живая БД теперь в named Docker volume (не на хосте) — копируем снапшот перед прогоном
+	docker cp trading-bot:/app/data/trading_bot.db data/trading_bot.live-snapshot.db
+	.venv/bin/python -m src.backtest.runner --db data/trading_bot.live-snapshot.db $(ARGS)
 
 docker-build:
 	docker compose build
