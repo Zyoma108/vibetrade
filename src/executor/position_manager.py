@@ -1,31 +1,45 @@
 import asyncio
+import json
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Callable, Coroutine
+from typing import TYPE_CHECKING, Callable, Coroutine
 
 from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.agent.decision_agent import AGENT_VERSION
 from src.analytics.base import Signal
-from src.config import TradingConfig
+from src.config import AgentConfig, TradingConfig
 from src.connectors.exchange import ExchangeConnector
-from src.storage.models import Ticker, Trade
+from src.storage.models import AgentDecision, Ticker, Trade
+
+if TYPE_CHECKING:
+    from src.agent.decision_agent import DecisionAgent
 
 logger = logging.getLogger(__name__)
 
 
 class PositionManager:
-    """Управление позициями: вход, TP/SL, уведомления (только real)."""
+    """Управление позициями: вход, TP/SL, уведомления (только real).
+
+    Один экземпляр = один "пайплайн" (source='algo' или source='agent') на своём
+    аккаунте биржи (trading_connector). Оба пайплайна используют одну таблицу
+    trades, но все запросы/лимиты/кулдауны скоуплены по source — они не видят
+    и не блокируют друг друга."""
 
     def __init__(
         self,
         config: TradingConfig,
         send_message: Callable[[str], Coroutine] | None = None,
         trading_connector: ExchangeConnector | None = None,
+        source: str = "algo",
+        agent_config: AgentConfig | None = None,
     ):
         self.config = config
         self._send_message = send_message
         self._connector = trading_connector
+        self.source = source  # 'algo' | 'agent'
+        self._agent_config = agent_config  # только для source='agent'
         self._banned_symbols: set[str] = set()  # монеты с ошибками торговли
         self.market_regime: str = "unknown"
         self.position_size_mult: float = 1.0
@@ -38,6 +52,9 @@ class PositionManager:
         # Защита от каскада ошибок по символу
         self._error_counts: dict[str, int] = {}  # symbol → кол-во ошибок подряд
         self._error_cooldown_until: dict[str, datetime] = {}  # symbol → не пытаться до
+
+        # ИИ-агент: троттлинг переоценки открытых позиций (trade.id → когда переоценивали)
+        self._last_reeval_at: dict[int, datetime] = {}
 
     @property
     def _has_connector(self) -> bool:
@@ -69,8 +86,8 @@ class PositionManager:
             return
         ex_symbols = {p["symbol"] for p in exchange_positions}
 
-        # Позиции в БД, открытые
-        db_stmt = select(Trade).where(Trade.status == "open")
+        # Позиции в БД, открытые (только свой пайплайн — algo/agent на разных аккаунтах)
+        db_stmt = select(Trade).where(Trade.status == "open", Trade.source == self.source)
         result = await session.execute(db_stmt)
         db_positions = result.scalars().all()
         db_symbols = {t.symbol for t in db_positions}
@@ -87,6 +104,8 @@ class PositionManager:
                     entry_time=ex_pos["timestamp"],
                     status="open",
                     tp_sl_set=True,  # на бирже уже есть TP/SL, не надо выставлять повторно
+                    source=self.source,
+                    current_sl_price=None,
                 )
                 session.add(trade)
                 logger.info(
@@ -430,6 +449,8 @@ class PositionManager:
             status="open",
             tp_sl_set=tp_sl_ok,
             fee=entry_fee,
+            source=self.source,
+            current_sl_price=sl_price if tp_sl_ok else None,
         )
         session.add(trade)
 
@@ -505,6 +526,7 @@ class PositionManager:
             entry_time=datetime.now(tz=timezone.utc),
             status="pending",
             pending_expires_at=expires_at,
+            source=self.source,
         )
         session.add(trade)
 
@@ -528,7 +550,7 @@ class PositionManager:
         Возвращает список позиций, активированных в этом вызове (для логирования)."""
         stmt = (
             select(Trade)
-            .where(Trade.status == "pending")
+            .where(Trade.status == "pending", Trade.source == self.source)
             .order_by(Trade.entry_time)
         )
         result = await session.execute(stmt)
@@ -582,6 +604,7 @@ class PositionManager:
         except Exception as e:
             logger.warning(f"TP/SL для {pos.symbol} будут выставлены в следующем цикле: {e}")
         pos.tp_sl_set = tp_sl_ok
+        pos.current_sl_price = sl_price if tp_sl_ok else None
 
         if tp_sl_ok:
             try:
@@ -637,7 +660,7 @@ class PositionManager:
         """
         stmt = (
             select(Trade)
-            .where(Trade.status == "open")
+            .where(Trade.status == "open", Trade.source == self.source)
             .order_by(Trade.entry_time)
         )
         result = await session.execute(stmt)
@@ -703,6 +726,7 @@ class PositionManager:
                 sl_price=sl,
             )
             pos.tp_sl_set = True
+            pos.current_sl_price = sl
             session.add(pos)
             logger.info(f"TP/SL повторно выставлены для {pos.symbol}")
             return False
@@ -790,6 +814,7 @@ class PositionManager:
                 tp_price=self._tp_price(pos.entry_price),
                 sl_price=pos.entry_price,
             )
+            pos.current_sl_price = pos.entry_price
         except Exception as e:
             logger.warning(f"Не удалось перевести стоп в б/у для {pos.symbol}: {e}")
 
@@ -861,6 +886,7 @@ class PositionManager:
                 tp_price=self._tp_price(pos.entry_price),
                 sl_price=pos.entry_price,
             )
+            pos.current_sl_price = pos.entry_price
         except Exception as e:
             logger.warning(f"Частичное закрытие {pos.symbol}: {e}")
             return True
@@ -894,15 +920,18 @@ class PositionManager:
         current_price: float | None,
         closed: list[Trade],
     ) -> bool:
-        """Закрыть позицию по истечении max_hold_hours.
+        """Закрыть позицию по истечении max_hold_hours (агент может только
+        ПРОДЛИТЬ этот дедлайн через llm_hold_until, никогда не сократить).
 
         Возвращает True, если стадия обработана (позиция закрыта, либо
         закрытие не удалось и будет повторено в следующем цикле).
         """
-        age_hours = (
-            now - pos.entry_time.replace(tzinfo=timezone.utc)
-        ).total_seconds() / 3600
-        if age_hours < self.config.max_hold_hours:
+        deadline = pos.entry_time.replace(tzinfo=timezone.utc) + timedelta(
+            hours=self.config.max_hold_hours
+        )
+        if pos.llm_hold_until:
+            deadline = max(deadline, pos.llm_hold_until.replace(tzinfo=timezone.utc))
+        if now < deadline:
             return False
 
         try:
@@ -937,17 +966,18 @@ class PositionManager:
         return notional * (rate / 100)
 
     async def _count_open(self, session: AsyncSession) -> int:
-        """Открытые позиции + pending-заявки на вход (обе занимают "слот" max_positions)."""
+        """Открытые позиции + pending-заявки на вход своего пайплайна (обе занимают
+        "слот" max_positions). algo и agent считаются раздельно — разные аккаунты."""
         from sqlalchemy import func
         stmt = (
             select(func.count()).select_from(Trade)
-            .where(Trade.status.in_(["open", "pending"]))
+            .where(Trade.status.in_(["open", "pending"]), Trade.source == self.source)
         )
         result = await session.execute(stmt)
         return result.scalar() or 0
 
     async def _in_cooldown(self, session: AsyncSession, symbol: str) -> bool:
-        """Была ли по символу закрытая сделка за последние N часов (из конфига)."""
+        """Была ли по символу закрытая сделка своего пайплайна за последние N часов."""
         if self.config.cooldown_hours <= 0:
             return False
         cutoff = datetime.now(tz=timezone.utc) - timedelta(hours=self.config.cooldown_hours)
@@ -957,6 +987,7 @@ class PositionManager:
                 Trade.symbol == symbol,
                 Trade.status == "closed",
                 Trade.exit_time >= cutoff,
+                Trade.source == self.source,
             )
             .limit(1)
         )
@@ -964,10 +995,10 @@ class PositionManager:
         return result.first() is not None
 
     async def _has_position(self, session: AsyncSession, symbol: str) -> bool:
-        """Есть ли уже открытая позиция или pending-заявка на вход по символу."""
+        """Есть ли уже открытая позиция или pending-заявка на вход по символу в своём пайплайне."""
         stmt = (
             select(Trade)
-            .where(Trade.symbol == symbol, Trade.status.in_(["open", "pending"]))
+            .where(Trade.symbol == symbol, Trade.status.in_(["open", "pending"]), Trade.source == self.source)
             .limit(1)
         )
         result = await session.execute(stmt)
@@ -1041,6 +1072,7 @@ class PositionManager:
         labels = {
             "tp": ("✅", "Тейк-профит"),
             "sl": ("🛑", "Стоп-лосс"),
+            "llm_close": ("🤖", "Закрыто ИИ-агентом"),
         }
         emoji, label = labels.get(reason, ("⏰", "Выход по времени"))
 
@@ -1063,6 +1095,147 @@ class PositionManager:
                 await self._send_message(text)
             except Exception:
                 logger.exception("Ошибка отправки торгового уведомления")
+
+    # ==================================================================
+    # ИИ-АГЕНТ — переоценка своих открытых позиций (source='agent' только)
+    # ==================================================================
+
+    def _current_sl_price(self, pos: Trade) -> float:
+        """Последний известный эффективный стоп. Нужен, чтобы гарантировать
+        монотонность: агент может только подтягивать SL, никогда не ослаблять."""
+        if pos.current_sl_price is not None:
+            return pos.current_sl_price
+        if pos.partial_closed:
+            return pos.entry_price  # переведено в безубыток, столбец ещё не проставлен (старые строки)
+        return self._sl_price(pos.entry_price)
+
+    async def apply_agent_tighten_sl(self, pos: Trade, new_sl_price: float) -> bool:
+        """Подтянуть стоп по решению агента. Отклоняет попытку ослабить SL —
+        это жёсткий рельс в коде, а не только инструкция модели."""
+        current_sl = self._current_sl_price(pos)
+        if new_sl_price <= current_sl:
+            logger.warning(
+                f"Agent: отклонена попытка ослабить SL для {pos.symbol} "
+                f"({new_sl_price:.6f} <= текущий {current_sl:.6f})"
+            )
+            return False
+        try:
+            await self._connector.set_tpsl(  # type: ignore[union-attr]
+                symbol=pos.symbol,
+                side="buy" if pos.direction == "long" else "sell",
+                amount=pos.quantity,
+                tp_price=self._tp_price(pos.entry_price),
+                sl_price=new_sl_price,
+            )
+        except Exception as e:
+            logger.warning(f"Agent: не удалось подтянуть SL для {pos.symbol}: {e}")
+            return False
+        pos.current_sl_price = new_sl_price
+        return True
+
+    async def apply_agent_hold_extension(self, pos: Trade, extend_hours: float) -> bool:
+        """Продлить дедлайн max_hold_hours. Капается и за раз, и суммарно
+        конфигом agent.max_hold_extension_hours / max_hold_extension_total_hours."""
+        cfg = self._agent_config
+        if not cfg:
+            return False
+        extend_hours = max(0.0, min(extend_hours, cfg.max_hold_extension_hours))
+        total_used = pos.llm_hold_extension_total_hours or 0.0
+        remaining_budget = cfg.max_hold_extension_total_hours - total_used
+        if remaining_budget <= 0:
+            logger.info(f"Agent: лимит продлений удержания исчерпан для {pos.symbol}")
+            return False
+        extend_hours = min(extend_hours, remaining_budget)
+        if extend_hours <= 0:
+            return False
+
+        base_deadline = pos.entry_time.replace(tzinfo=timezone.utc) + timedelta(
+            hours=self.config.max_hold_hours
+        )
+        current_deadline = (
+            pos.llm_hold_until.replace(tzinfo=timezone.utc) if pos.llm_hold_until else base_deadline
+        )
+        pos.llm_hold_until = current_deadline + timedelta(hours=extend_hours)
+        pos.llm_hold_extension_total_hours = total_used + extend_hours
+        return True
+
+    async def apply_agent_close(
+        self, session: AsyncSession, pos: Trade, current_price: float | None
+    ) -> bool:
+        """Закрыть позицию досрочно по решению агента (снимает висящий
+        лимитник частичной фиксации перед закрытием)."""
+        try:
+            await self._connector.cancel_all_orders(pos.symbol)  # type: ignore[union-attr]
+        except Exception:
+            logger.warning(f"Agent close: не удалось отменить ордера для {pos.symbol}")
+        try:
+            await self._connector.close_position(pos.symbol)  # type: ignore[union-attr]
+        except Exception:
+            logger.exception(f"Agent close: не удалось закрыть {pos.symbol}")
+            return False
+        exit_price = current_price or pos.entry_price
+        await self._close_position(pos, exit_price, "llm_close")
+        return True
+
+    async def llm_reevaluate_positions(
+        self, session: AsyncSession, agent: "DecisionAgent"
+    ) -> list[dict]:
+        """Периодическая переоценка своих открытых позиций ИИ-агентом.
+        Троттлинг — раз в agent.reeval_interval_minutes на сделку (в памяти,
+        сбрасывается при рестарте — не влияет на безопасность, максимум
+        лишняя внеочередная переоценка)."""
+        cfg = self._agent_config
+        if not cfg or not cfg.enabled or not cfg.reeval_enabled:
+            return []
+
+        stmt = select(Trade).where(Trade.status == "open", Trade.source == self.source)
+        positions = (await session.execute(stmt)).scalars().all()
+        if not positions:
+            return []
+
+        now = datetime.now(tz=timezone.utc)
+        interval = timedelta(minutes=cfg.reeval_interval_minutes)
+        decisions = []
+        for pos in positions:
+            last = self._last_reeval_at.get(pos.id)
+            if last and now - last < interval:
+                continue
+            self._last_reeval_at[pos.id] = now
+
+            verdict = await agent.evaluate_position(session, pos)
+            applied = await self._apply_reeval_verdict(session, pos, verdict)
+            session.add(AgentDecision(
+                timestamp=now,
+                kind="reeval",
+                trade_id=pos.id,
+                symbol=pos.symbol,
+                verdict=verdict.action,
+                reasoning=verdict.reasoning,
+                tool_calls_json=json.dumps(verdict.tool_trace, default=str),
+                applied=applied,
+                model=cfg.model,
+                agent_version=AGENT_VERSION,
+                latency_ms=verdict.latency_ms,
+            ))
+            decisions.append({"trade_id": pos.id, "symbol": pos.symbol, "action": verdict.action, "applied": applied})
+        return decisions
+
+    async def _apply_reeval_verdict(self, session: AsyncSession, pos: Trade, verdict) -> bool:
+        """Применить решение агента к сделке. dry_run/failed/hold → ничего не меняем."""
+        cfg = self._agent_config
+        if not cfg or verdict.failed or verdict.action == "hold":
+            return False
+        if cfg.dry_run:
+            return False  # решение залогировано (AgentDecision), но не применено
+
+        if verdict.action == "tighten_sl" and cfg.allow_sl_tighten and verdict.new_sl_price:
+            return await self.apply_agent_tighten_sl(pos, verdict.new_sl_price)
+        if verdict.action == "extend_hold" and verdict.extend_hours:
+            return await self.apply_agent_hold_extension(pos, verdict.extend_hours)
+        if verdict.action == "close" and cfg.allow_early_close:
+            current_price = await self._get_current_price(session, pos.symbol)
+            return await self.apply_agent_close(session, pos, current_price)
+        return False
 
     # ------------------------------------------------------------------
     # Error cascade protection

@@ -10,6 +10,7 @@
 - **SQLAlchemy 2.0 + aiosqlite** — SQLite в WAL-режиме
 - **Pydantic 2.x** — валидация конфигурации (YAML + `${ENV_VAR}`)
 - **Alembic** — миграции схемы БД
+- **anthropic (Claude)** — ИИ-режим, опциональный tool-calling агент поверх алгоритма (см. ниже)
 - **Docker Compose** — деплой (один контейнер, `restart: unless-stopped`)
 
 ## Файловая структура
@@ -33,12 +34,15 @@ src/
 │   ├── price_surge.py         # PriceSurgeDetector — пампинг по чистой цене (только сигналы)
 │   └── price_surge_service.py # PriceSurgeSignalProcessor — обогащение и отправка сигналов пампа
 ├── executor/
-│   └── position_manager.py    # PositionManager — открытие/закрытие/трекинг позиций
+│   └── position_manager.py    # PositionManager — открытие/закрытие/трекинг позиций (source='algo'|'agent')
+├── agent/                     # ИИ-режим (доп. режим, отдельный аккаунт) — см. раздел ниже
+│   ├── tools.py                # AgentToolkit — инструменты LLM (funding, стакан, история монеты, ...)
+│   └── decision_agent.py       # DecisionAgent — tool-calling цикл (Claude), fail-open/fail-safe
 ├── notifier/
 │   └── telegram_bot.py        # TelegramNotifier — бот с командами и отправкой сигналов
 ├── storage/
 │   ├── database.py            # engine, async_session, init_db (с авто-ALTER TABLE)
-│   ├── models.py              # ORM: Candle, Ticker, OpenInterest, Signal, Trade, PriceSurgeSignal, MarketContextSnapshot
+│   ├── models.py              # ORM: Candle, Ticker, OpenInterest, Signal, Trade, PriceSurgeSignal, MarketContextSnapshot, AgentDecision
 │   └── stats.py               # trade_stats() — сбор статистики для команды /stats
 ├── backtest/
 │   └── runner.py              # Симуляция стратегии на исторических свечах
@@ -52,7 +56,8 @@ src/
 tests/
 │   ├── test_data_provider.py     # Тесты DataProvider и CandleCache
 │   ├── test_detector.py          # Тесты SetupDetector (volume pattern, price trend)
-│   └── test_position_manager.py  # Тесты PositionManager (Circuit Breaker, TP/SL, позиции)
+│   ├── test_position_manager.py  # Тесты PositionManager (Circuit Breaker, TP/SL, позиции)
+│   └── test_agent.py             # Тесты ИИ-режима (tighten SL, hold extension, fail-open/safe, source scoping)
 config/
 ├── config.yaml                # Боевая конфигурация
 ├── config.example.yaml        # Пример с комментариями
@@ -285,6 +290,111 @@ Application.start()
   - Риск в долларах фиксирован относительно депозита
   - Множитель рыночного режима применяется к `risk_budget` (CAUTIOUS = ×0.5)
 
+## ИИ-режим (`DecisionAgent`, отдельный аккаунт)
+
+**Доп. режим, не заменяет алгоритм** (`agent.enabled: false` по умолчанию — при выключенном
+режиме код бота работает байт-в-байт как раньше). Мотивация — гипотеза, что часть входов
+алгоритма систематически запоздалые (см. `pending_entry_pullback_pct` выше); ИИ-режим — способ
+проверить, добавляет ли LLM-контекст (funding, стакан, история монеты, старшие таймфреймы),
+которого алгоритм не видит, ценность поверх чисто механических фильтров.
+
+**Архитектура — параллельный пайплайн, не вето поверх алгоритма.** Оба пайплайна получают одни
+и те же сигналы от `SetupDetector`, но исполняются НЕЗАВИСИМО:
+- **algo** — `self._positions`, текущий `_trading_connector` (основной аккаунт), не изменился.
+- **agent** — `self._agent_positions`, ОТДЕЛЬНЫЙ аккаунт биржи (`agent.exchange`/`api_key`/`secret`
+  в конфиге, отдельные переменные окружения — не путать с `trading.*`). Изоляция риска — сам факт
+  отдельного аккаунта, а не только `dry_run`.
+
+`PositionManager` получил параметр `source` (`"algo"` / `"agent"`) — все запросы/лимиты/кулдауны
+(`_count_open`, `_has_position`, `_in_cooldown`, `update_positions`, `check_pending_entries`)
+скоуплены по `source`, поэтому два пайплайна не видят и не блокируют друг друга, даже сидя в одной
+таблице `trades`.
+
+**Без Telegram.** По решению пользователя ИИ-режим не шлёт уведомления — вся видимость через БД
+(`agent_decisions` + `trades.source='agent'`), т.к. цель — набрать данные для анализа, а не
+получать сигналы в реальном времени.
+
+### Вход (`_run_agent_entry` в `app.py`)
+На каждый сигнал (после алгоритмического пути) вызывается `DecisionAgent.evaluate_entry()` —
+LLM с tool-calling (Claude, `src/agent/tools.py` + `src/agent/decision_agent.py`) сам решает,
+какие данные запросить (funding rate, сводка стакана, тренд OI, история пампов монеты, рыночный
+контекст, старшие таймфреймы для уровней, активность сигналов по другим монетам — прокси
+секторальной ротации) и завершает вызовом `submit_entry_decision`. Если `approve=True` и
+`agent.dry_run=False` — открывается сделка на отдельном аккаунте (`_agent_positions.open_position`).
+Решение (approve/reject, reasoning, полный трейс вызовов инструментов) пишется в `agent_decisions`
+независимо от `dry_run`.
+
+**Fail-open**: таймаут (`decision_timeout_seconds`), ошибка API или исчерпанный
+`daily_call_budget` → `approved=True` — то есть отказ агента работать не должен блокировать
+тестирование, а не наоборот.
+
+### Сопровождение (`llm_reevaluate_positions` в `PositionManager`)
+
+**Полностью независимо от цикла сканирования рынка.** Первая версия ошибочно вызывала
+`llm_reevaluate_positions` внутри `_on_collect_cycle_done` — тот срабатывает только по
+завершении полного скана всех монет (~5 мин), так что сопровождение молча тормозилось бы вместе
+со сканом. Исправлено: TP/SL-синхронизация с биржей, pending-входы и LLM-переоценка для
+agent-пайплайна вынесены в отдельный `asyncio`-таск `_agent_position_loop` (тикает раз в минуту,
+не зависит от `MarketDataCollector`). Раз в `agent.reeval_interval_minutes` на сделку (троттлинг
+в памяти, per-trade, внутри `llm_reevaluate_positions`) агент вызывает `evaluate_position()` и
+может решить: `hold` / `tighten_sl` / `extend_hold` / `close`.
+
+- **`tighten_sl`** — переиспользует `set_tpsl()` (тот же механизм, что и перевод в безубыток).
+  Жёсткий рельс **в коде**, не только в промпте: `apply_agent_tighten_sl` сравнивает с
+  `Trade.current_sl_price` (последний известный эффективный стоп) и отклоняет любую попытку
+  ослабить SL.
+- **`extend_hold`** — двигает `Trade.llm_hold_until`, который `_check_time_exit` учитывает как
+  `max(механический_дедлайн, llm_hold_until)` — агент может ТОЛЬКО продлить удержание, никогда не
+  сократить. Капается конфигом и за раз (`max_hold_extension_hours`), и суммарно на сделку
+  (`max_hold_extension_total_hours`, счётчик — `Trade.llm_hold_extension_total_hours`).
+- **`close`** — `apply_agent_close`: снимает висящий лимитник частичной фиксации
+  (`cancel_all_orders`) и закрывает по рынку, `reason="llm_close"`.
+
+**Fail-safe**: таймаут/ошибка/бюджет → `action="hold"` — без изменений, штатные биржевые TP/SL
+остаются главной защитой независимо от исхода вызова LLM.
+
+### Быстрый опрос цены под наблюдением (`_agent_watch_loop` в `app.py`)
+Полный цикл сканирования всего рынка занимает несколько минут — слишком редко для сопровождения
+конкретных открытых сделок. Отдельный `asyncio`-таск (`agent.watch_interval_seconds`, по умолчанию
+30с) опрашивает **только** монеты под наблюдением агента (его открытые/pending сделки — не более
+`max_positions` штук) напрямую через `fetch_ticker`, независимо от общего цикла. Работает только
+при `agent.enabled=true` — при выключенном режиме не создаёт лишней нагрузки на биржу.
+
+Итого у ИИ-режима два независимых таска, оба стартуют в `Application.start()` и останавливаются
+в `stop()`: `_agent_watch_loop` (обновление цены, 30с) и `_agent_position_loop` (весь жизненный
+цикл позиций + LLM-переоценка, 60с). Ни один не зависит от `MarketDataCollector`.
+
+### Данные, которых раньше не было
+`fetch_funding_rate`/`fetch_order_book_summary` — новые методы `ExchangeConnector`
+(агрегаты — spread%, глубина в USD на ±0.5/1% от mid, **не сырые уровни стакана**, чтобы не
+раздувать контекст LLM шумом). Старшие таймфреймы для уровней поддержки/сопротивления —
+`get_higher_timeframe_history` дёргает биржу напрямую по требованию (не хранится в БД, не нужно
+для этой задачи).
+
+### Конфигурация (`config.yaml → agent`)
+
+| Параметр | По умолчанию | Смысл |
+|----------|-------------|-------|
+| `enabled` | `false` | Включить ИИ-режим |
+| `dry_run` | `true` | Логировать решения, не открывать реальные сделки даже на своём аккаунте |
+| `exchange` / `api_key` / `secret` | — | Отдельный аккаунт биржи (не `trading.*`) |
+| `model` | `claude-sonnet-5` | Модель Anthropic |
+| `reeval_interval_minutes` | 20.0 | Раз во сколько минут переоценивать одну позицию |
+| `watch_interval_seconds` | 30 | Раз во сколько секунд обновлять цену наблюдаемых монет |
+| `decision_timeout_seconds` | 45.0 | Таймаут решения → fail-open/fail-safe |
+| `max_tool_calls_per_decision` | 6 | Лимит вызовов инструментов на решение |
+| `max_hold_extension_hours` / `_total_hours` | 12.0 / 24.0 | Кап продления удержания, за раз / суммарно |
+| `allow_sl_tighten` / `allow_early_close` | `true` | Разрешить соответствующее действие (ослабление SL запрещено всегда) |
+| `daily_call_budget` | 200 | Максимум вызовов LLM в сутки |
+
+### Статус на момент внедрения (июль 2026)
+Включено с `enabled=false`, `dry_run=true` по умолчанию — режим ещё не запускался "в бою".
+Валидировать на исторических БД нельзя: funding rate и стакан не сохранены в прошлых данных —
+качество решений можно оценить только вперёд, по новым логам `agent_decisions`. Версия системных
+промптов логируется в `agent_decisions.agent_version` (`AGENT_VERSION` в `decision_agent.py`) —
+при правке промпта следует её увеличивать, чтобы позже можно было сопоставить качество решений
+с конкретной редакцией инструкций.
+
 ## База данных
 
 SQLite в WAL-режиме (`data/trading_bot.db`). Миграции: Alembic + ручной `ALTER TABLE` в `init_db()` для обратной совместимости.
@@ -298,7 +408,8 @@ SQLite в WAL-режиме (`data/trading_bot.db`). Миграции: Alembic + 
 | `open_interest` | OI — сохраняется только при изменении значения |
 | `signals` | Сигналы основной стратегии, включает `missed_reason` (причина пропуска) |
 | `price_surge_signals` | Сигналы PriceSurgeDetector |
-| `trades` | Торговые позиции (вход/выход, PnL, partial close, TP/SL статус) |
+| `trades` | Торговые позиции (вход/выход, PnL, partial close, TP/SL статус), `source` — 'algo'/'agent' |
+| `agent_decisions` | Решения ИИ-агента (вход/сопровождение) — verdict, reasoning, полный трейс вызовов инструментов |
 | `market_context_snapshots` | Снимки рыночного контекста (regime, trend, Supertrend, BTC/OTHERS) |
 
 ## Telegram-боты
@@ -362,6 +473,7 @@ SQLite в WAL-режиме (`data/trading_bot.db`). Миграции: Alembic + 
 - **Секреты**: `.env` (не коммитится), содержит токены API и Telegram
 - **Две стратегии**: `strategy` (основная, с торговлей) и `strategy_price_surge` (только сигналы)
 - **Два Telegram-бота**: `telegram` и `telegram_price_surge` (независимые токены)
+- **ИИ-режим** (если `agent.enabled: true`): нужны `ANTHROPIC_API_KEY`, а также `AGENT_BYBIT_API_KEY`/`AGENT_BYBIT_SECRET` — ключи ОТДЕЛЬНОГО аккаунта биржи (не путать с `trading.*`)
 
 ## Запуск
 
@@ -461,3 +573,4 @@ make test
 - **Новый сервис-обработчик** — по аналогии с `PriceSurgeSignalProcessor`: инкапсулирует обогащение сигналов, persistence и нотификации.
 - **Новая биржа** — добавить `ExchangeConfig` в `config.yaml`, ccxt поддерживает её из коробки
 - **Нотификации в другой канал** — реализовать аналог `TelegramNotifier` с тем же интерфейсом
+- **Новый инструмент для ИИ-агента** — добавить метод `_tool_*` в `AgentToolkit` (`src/agent/tools.py`) + схему в `ENTRY_TOOLS`/`REEVAL_TOOLS`. Инструмент должен отдавать агрегированные метрики, не сырые API-дампы (экономия контекста LLM)

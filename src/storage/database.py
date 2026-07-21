@@ -60,6 +60,10 @@ async def init_db() -> None:
             ("missed_detail", "TEXT"),
             ("fee", "FLOAT DEFAULT 0.0"),
             ("pending_expires_at", "DATETIME"),
+            ("source", "VARCHAR(16) DEFAULT 'algo'"),
+            ("llm_hold_until", "DATETIME"),
+            ("llm_hold_extension_total_hours", "FLOAT DEFAULT 0.0"),
+            ("current_sl_price", "FLOAT"),
         ]:
             try:
                 await conn.exec_driver_sql(

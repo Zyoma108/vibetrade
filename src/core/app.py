@@ -1,10 +1,13 @@
 import asyncio
+import json
 import logging
 import signal
 from datetime import datetime, timezone
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.agent.decision_agent import AGENT_VERSION, DecisionAgent
 from src.analytics.base import BaseDetector
 from src.analytics.data_provider import CandleCache, DataProvider
 from src.analytics.detector import SetupDetector
@@ -18,7 +21,7 @@ from src.executor.position_manager import PositionManager
 from src.notifier.telegram_bot import TelegramNotifier
 from src.storage.database import async_session, init_db
 from src.storage.stats import trade_stats
-from src.storage.models import MarketContextSnapshot, Signal as SignalModel
+from src.storage.models import AgentDecision as AgentDecisionModel, MarketContextSnapshot, Signal as SignalModel, Ticker, Trade
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +43,13 @@ class Application:
         self._ps_processor: PriceSurgeSignalProcessor | None = None
         self._positions: PositionManager | None = None
         self._candle_cache = CandleCache()
+
+        # ИИ-режим (доп. режим, отдельный аккаунт биржи) — см. AGENTS.md
+        self._agent_connector: ExchangeConnector | None = None
+        self._agent_positions: PositionManager | None = None
+        self._agent: DecisionAgent | None = None
+        self._agent_watch_task: asyncio.Task | None = None
+        self._agent_reeval_task: asyncio.Task | None = None
 
     async def start(self) -> None:
         logger.info("Запуск приложения...")
@@ -178,6 +188,7 @@ class Application:
                 config=self.settings.trading,
                 send_message=self._notifier.send_message if self._notifier else None,
                 trading_connector=self._trading_connector,
+                source="algo",
             )
             logger.info("Менеджер позиций запущен (real)")
 
@@ -191,6 +202,46 @@ class Application:
                     "Не удалось синхронизировать позиции. "
                     "Бот продолжит работу в режиме сбора данных"
                 )
+
+            # ИИ-режим: полностью отдельный аккаунт, отдельный PositionManager,
+            # без Telegram (send_message=None) — видимость только через БД
+            # (AgentDecision + Trade.source='agent'), см. AGENTS.md.
+            if self.settings.agent.enabled:
+                agent_cfg = self.settings.agent
+                if not agent_cfg.api_key or not agent_cfg.secret:
+                    logger.error(
+                        "ИИ-режим включён, но не настроены api_key/secret отдельного "
+                        "аккаунта (agent.api_key/agent.secret в config.yaml)"
+                    )
+                else:
+                    self._agent_connector = ExchangeConnector(
+                        exchange_id=agent_cfg.exchange,
+                        api_key=agent_cfg.api_key,
+                        secret=agent_cfg.secret,
+                    )
+                    self._agent_positions = PositionManager(
+                        config=self.settings.trading,
+                        send_message=None,
+                        trading_connector=self._agent_connector,
+                        source="agent",
+                        agent_config=agent_cfg,
+                    )
+                    self._agent = DecisionAgent(
+                        config=agent_cfg,
+                        connector=self._agent_connector,
+                        candle_cache=self._candle_cache,
+                        market_ctx=self._market_ctx,
+                    )
+                    logger.info(
+                        f"ИИ-режим включён (dry_run={agent_cfg.dry_run}, "
+                        f"аккаунт={agent_cfg.exchange})"
+                    )
+                    try:
+                        async with async_session() as session:
+                            await self._agent_positions.sync_positions(session)
+                            await session.commit()
+                    except Exception:
+                        logger.exception("Не удалось синхронизировать позиции ИИ-режима")
 
         # Первичное обновление рыночного контекста и отправка в Telegram
         if self._market_ctx and self.settings.market_context.enabled:
@@ -216,12 +267,89 @@ class Application:
         )
 
         self._running = True
+
+        if self._agent_positions:
+            self._agent_watch_task = asyncio.create_task(self._agent_watch_loop())
+            self._agent_reeval_task = asyncio.create_task(self._agent_position_loop())
+
         await self._collector.start()
         logger.info("Приложение запущено")
+
+    async def _agent_watch_loop(self) -> None:
+        """Быстрый опрос цены монет под наблюдением ИИ-агента (его открытые/pending
+        сделки на отдельном аккаунте), независимо от общего цикла сканирования
+        всего рынка (который занимает несколько минут на полный проход)."""
+        interval = self.settings.agent.watch_interval_seconds
+        while self._running:
+            try:
+                async with async_session() as session:
+                    stmt = (
+                        select(Trade.symbol)
+                        .where(Trade.status.in_(["open", "pending"]), Trade.source == "agent")
+                        .distinct()
+                    )
+                    symbols = [row[0] for row in (await session.execute(stmt)).all()]
+                    for symbol in symbols:
+                        try:
+                            ticker = await self._agent_connector.fetch_ticker(symbol)  # type: ignore[union-attr]
+                            session.add(Ticker(**ticker))
+                        except Exception:
+                            logger.debug(f"Agent watch: не удалось обновить тикер {symbol}")
+                    if symbols:
+                        await session.commit()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Agent watch loop: ошибка цикла")
+            await asyncio.sleep(interval)
+
+    async def _agent_position_loop(self) -> None:
+        """Весь жизненный цикл позиций ИИ-агента (TP/SL-синхронизация с биржей,
+        pending-входы, LLM-переоценка) — НЕ привязан к циклу сканирования рынка
+        (тот занимает ~5 мин на полный проход и не должен задерживать
+        сопровождение сделок). Тикает часто (раз в минуту); фактический каданс
+        вызова LLM на конкретную сделку регулируется троттлингом внутри
+        llm_reevaluate_positions (agent.reeval_interval_minutes)."""
+        while self._running:
+            try:
+                async with async_session() as session:
+                    agent_closed = await self._agent_positions.update_positions(session)  # type: ignore[union-attr]
+                    if agent_closed:
+                        logger.info(f"Agent: закрыто позиций: {len(agent_closed)}")
+                    await self._agent_positions.check_pending_entries(session)  # type: ignore[union-attr]
+                    if self._agent:
+                        decisions = await self._agent_positions.llm_reevaluate_positions(  # type: ignore[union-attr]
+                            session, self._agent
+                        )
+                        if decisions:
+                            logger.info(f"Agent: переоценено позиций: {len(decisions)}")
+                    await session.commit()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Agent position loop: ошибка цикла")
+            await asyncio.sleep(60)
 
     async def stop(self) -> None:
         logger.info("Остановка приложения...")
         self._running = False
+
+        if self._agent_watch_task and not self._agent_watch_task.done():
+            self._agent_watch_task.cancel()
+            try:
+                await self._agent_watch_task
+            except asyncio.CancelledError:
+                pass
+
+        if self._agent_reeval_task and not self._agent_reeval_task.done():
+            self._agent_reeval_task.cancel()
+            try:
+                await self._agent_reeval_task
+            except asyncio.CancelledError:
+                pass
+
+        if self._agent_connector:
+            await self._agent_connector.close()
 
         if self._collector:
             await self._collector.stop()
@@ -295,6 +423,10 @@ class Application:
             if activated:
                 logger.info(f"Активировано pending-входов за цикл: {len(activated)}")
 
+        # ИИ-режим полностью вынесен из этого цикла в независимый _agent_position_loop
+        # (см. start()) — сопровождение своих позиций не должно ждать завершения
+        # ~5-минутного скана всего рынка. Здесь остаётся только вход по сигналу (ниже).
+
         # 2. Аналитика — основная стратегия
         if self._detector:
             signals = await self._detector.analyze(session)
@@ -327,11 +459,43 @@ class Application:
                 if self._notifier:
                     await self._notifier.send_signal(sig, status=status)
 
+                # ИИ-режим: тот же сигнал, независимое решение на отдельном аккаунте.
+                # Без Telegram — видимость только через БД (AgentDecision + Trade.source='agent').
+                if self._agent and self._agent_positions and self.settings.agent.entry_gate_enabled:
+                    await self._run_agent_entry(session, sig, db_signal.id)
+
         # 3. Аналитика — price surge детектор (только сигналы)
         if self._ps_processor:
             await self._ps_processor.process_and_notify(session)
 
         await session.commit()
+
+    async def _run_agent_entry(self, session: AsyncSession, sig, signal_id: int) -> None:
+        """ИИ-режим: оценить сигнал и, если одобрено, открыть сделку на ОТДЕЛЬНОМ
+        аккаунте (self._agent_positions). dry_run=True — решение логируется
+        (AgentDecision), но сделка не открывается даже на этом изолированном
+        аккаунте. Fail-open по таймауту/ошибке уже обработан в DecisionAgent."""
+        verdict = await self._agent.evaluate_entry(session, sig)  # type: ignore[union-attr]
+        applied = False
+        if verdict.approved and not self.settings.agent.dry_run:
+            _trade, agent_status, _detail = await self._agent_positions.open_position(  # type: ignore[union-attr]
+                session, sig, signal_id=signal_id
+            )
+            applied = agent_status in ("opened", "pending")
+
+        session.add(AgentDecisionModel(
+            timestamp=datetime.now(tz=timezone.utc),
+            kind="entry",
+            signal_id=signal_id,
+            symbol=sig.symbol,
+            verdict="approve" if verdict.approved else "reject",
+            reasoning=verdict.reasoning,
+            tool_calls_json=json.dumps(verdict.tool_trace, default=str),
+            applied=applied,
+            model=self.settings.agent.model,
+            agent_version=AGENT_VERSION,
+            latency_ms=verdict.latency_ms,
+        ))
 
     async def wait(self) -> None:
         """Ожидание graceful shutdown."""

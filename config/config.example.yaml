@@ -66,3 +66,24 @@ trading:
   backtest_slippage_pct: 0.3      # допущение на проскальзывание входа в бэктесте, % (0 = выкл)
   pending_entry_pullback_pct: 0.0   # вход лимитником на откате от сигнала, % (0 = выкл, market сразу)
   pending_entry_timeout_minutes: 9.0  # через сколько минут снять неисполненный лимитник входа
+
+# ИИ-режим: LLM-агент (Claude) оценивает те же сигналы и торгует на ОТДЕЛЬНОМ аккаунте
+# биржи, параллельно алгоритмической торговле (которая не меняется). См. AGENTS.md.
+agent:
+  enabled: false
+  dry_run: true
+  exchange: bybit
+  api_key: "${AGENT_BYBIT_API_KEY}"
+  secret: "${AGENT_BYBIT_SECRET}"
+  model: claude-sonnet-5
+  entry_gate_enabled: true
+  reeval_enabled: true
+  reeval_interval_minutes: 20.0
+  watch_interval_seconds: 30
+  decision_timeout_seconds: 45.0
+  max_tool_calls_per_decision: 6
+  max_hold_extension_hours: 12.0
+  max_hold_extension_total_hours: 24.0
+  allow_sl_tighten: true
+  allow_early_close: true
+  daily_call_budget: 200

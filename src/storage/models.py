@@ -97,6 +97,31 @@ class Trade(Base):
     partial_pnl: Mapped[float | None] = mapped_column(Float, nullable=True, default=0.0)  # PnL от частичных закрытий
     fee: Mapped[float | None] = mapped_column(Float, nullable=True, default=0.0)  # суммарная комиссия по всем "ногам" сделки (pnl уже net-of-fee)
     pending_expires_at: Mapped[datetime | None] = mapped_column(nullable=True, default=None)  # когда снять неисполненный лимитник входа (status=pending)
+    source: Mapped[str] = mapped_column(String(16), default="algo", index=True)  # algo / agent — какой пайплайн открыл сделку (разные аккаунты биржи)
+    llm_hold_until: Mapped[datetime | None] = mapped_column(nullable=True, default=None)  # ИИ-агент продлил дедлайн max_hold_hours (только увеличивает, не уменьшает)
+    llm_hold_extension_total_hours: Mapped[float] = mapped_column(Float, default=0.0)  # накопленное продление, капается agent.max_hold_extension_total_hours
+    current_sl_price: Mapped[float | None] = mapped_column(Float, nullable=True, default=None)  # последний известный эффективный стоп (нужен, чтобы агент мог только подтягивать, не ослаблять)
+
+
+class AgentDecision(Base):
+    """Решение ИИ-агента (доп. режим, отдельный аккаунт) — вход или сопровождение сделки.
+    Хранит полный трейс вызовов инструментов для последующего анализа и доработки промпта."""
+
+    __tablename__ = "agent_decisions"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    timestamp: Mapped[datetime] = mapped_column(index=True)
+    kind: Mapped[str] = mapped_column(String(16))  # entry / reeval
+    signal_id: Mapped[int | None] = mapped_column(ForeignKey("signals.id"), nullable=True)
+    trade_id: Mapped[int | None] = mapped_column(ForeignKey("trades.id"), nullable=True)
+    symbol: Mapped[str] = mapped_column(String(32), index=True)
+    verdict: Mapped[str] = mapped_column(String(32))  # approve/reject (entry); hold/tighten_sl/extend_hold/close (reeval)
+    reasoning: Mapped[str] = mapped_column(Text)
+    tool_calls_json: Mapped[str | None] = mapped_column(Text, nullable=True)  # JSON-трейс вызовов инструментов
+    applied: Mapped[bool] = mapped_column(Boolean, default=False)  # false в dry_run или если решение не удалось применить
+    model: Mapped[str] = mapped_column(String(64))
+    agent_version: Mapped[str] = mapped_column(String(16))  # версия системного промпта — для анализа качества решений со временем
+    latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
 class MarketContextSnapshot(Base):

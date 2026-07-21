@@ -132,6 +132,60 @@ class ExchangeConnector:
             "value": raw["openInterestAmount"],
         }
 
+    async def fetch_funding_rate(self, symbol: str) -> dict | None:
+        """Текущая funding rate по перпетуалу — индикатор перекоса лонг/шорт
+        позиционирования (используется ИИ-агентом, не влияет на алгоритм)."""
+        try:
+            raw = await self._call("fetch_funding_rate", symbol)
+        except (ccxt.BadRequest, ccxt.NotSupported, ccxt.ExchangeError):
+            logger.debug(f"{self.exchange_id}: funding rate не поддерживается для {symbol}")
+            return None
+        return {
+            "symbol": symbol,
+            "funding_rate_pct": (raw.get("fundingRate") or 0) * 100,
+            "next_funding_time": raw.get("fundingDatetime"),
+        }
+
+    async def fetch_order_book_summary(
+        self, symbol: str, depth_pct: tuple[float, ...] = (0.5, 1.0)
+    ) -> dict | None:
+        """Агрегированная сводка стакана: спред и глубина в USD на заданных % от
+        средней цены. Намеренно не отдаёт сырые уровни — только компактные метрики
+        (используется ИИ-агентом, не влияет на алгоритм)."""
+        try:
+            raw = await self._call("fetch_order_book", symbol, 100)
+        except (ccxt.BadRequest, ccxt.NotSupported, ccxt.ExchangeError):
+            logger.debug(f"{self.exchange_id}: order book не поддерживается для {symbol}")
+            return None
+        bids = raw.get("bids") or []
+        asks = raw.get("asks") or []
+        if not bids or not asks:
+            return None
+        best_bid, best_ask = bids[0][0], asks[0][0]
+        mid = (best_bid + best_ask) / 2
+        if mid <= 0:
+            return None
+        spread_pct = (best_ask - best_bid) / mid * 100
+
+        def depth_usd(levels: list, pct: float, side: str) -> float:
+            limit = mid * (1 - pct / 100) if side == "bid" else mid * (1 + pct / 100)
+            total = 0.0
+            for price, amount in levels:
+                if (side == "bid" and price < limit) or (side == "ask" and price > limit):
+                    break
+                total += price * amount
+            return round(total, 2)
+
+        result: dict = {
+            "symbol": symbol,
+            "mid_price": mid,
+            "spread_pct": round(spread_pct, 4),
+        }
+        for pct in depth_pct:
+            result[f"bid_depth_usd_{pct}pct"] = depth_usd(bids, pct, "bid")
+            result[f"ask_depth_usd_{pct}pct"] = depth_usd(asks, pct, "ask")
+        return result
+
     async def fetch_tickers(self) -> list[dict]:
         """Забрать тикеры всех пар одним запросом."""
         raw = await self._call("fetch_tickers")

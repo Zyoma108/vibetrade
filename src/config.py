@@ -116,6 +116,31 @@ class MarketContextConfig(BaseModel):
     supertrend_multiplier: float = Field(default=3.0, ge=1.0, le=10.0, description="Множитель ATR для Supertrend")
 
 
+class AgentConfig(BaseModel):
+    """ИИ-режим: LLM-агент оценивает те же сигналы и торгует ими на ОТДЕЛЬНОМ аккаунте
+    биржи, параллельно алгоритмической торговле (которая не меняется и не зависит от этого
+    режима). Выключено по умолчанию (enabled=False) — до этого момента поведение бота
+    идентично текущему."""
+
+    enabled: bool = Field(default=False, description="Включить ИИ-режим (доп. режим поверх алгоритма, не заменяет его)")
+    dry_run: bool = Field(default=True, description="true = агент только оценивает и логирует решения, не открывает реальные сделки даже на своём аккаунте")
+    exchange: str = Field(default="bybit", description="Биржа отдельного аккаунта ИИ-режима")
+    api_key: str = Field(default="", description="API-ключ ОТДЕЛЬНОГО аккаунта для ИИ-режима (не путать с основным торговым аккаунтом trading.*)")
+    secret: str = Field(default="", description="Secret отдельного аккаунта ИИ-режима")
+    model: str = Field(default="claude-sonnet-5", description="Модель Anthropic для решений агента")
+    entry_gate_enabled: bool = Field(default=True, description="Агент решает, открывать ли сделку по сигналу на своём аккаунте")
+    reeval_enabled: bool = Field(default=True, description="Агент периодически переоценивает свои открытые позиции")
+    reeval_interval_minutes: float = Field(default=20.0, ge=1.0, description="Раз во сколько минут переоценивать одну открытую позицию агента")
+    watch_interval_seconds: int = Field(default=30, ge=10, description="Раз во сколько секунд обновлять цену монет под наблюдением агента (его открытые/pending сделки), независимо от общего цикла сканирования")
+    decision_timeout_seconds: float = Field(default=45.0, ge=5.0, description="Таймаут на решение агента; при превышении — fail-open (вход разрешён) / fail-safe (сопровождение: без изменений)")
+    max_tool_calls_per_decision: int = Field(default=6, ge=1, le=20, description="Лимит вызовов инструментов на одно решение (защита от зацикливания)")
+    max_hold_extension_hours: float = Field(default=12.0, ge=0.0, description="Максимум, на который агент может продлить удержание сделки за один раз, часов")
+    max_hold_extension_total_hours: float = Field(default=24.0, ge=0.0, description="Максимальное суммарное продление удержания на одну сделку, часов")
+    allow_sl_tighten: bool = Field(default=True, description="Разрешить агенту подтягивать стоп-лосс (ослаблять стоп нельзя никогда, независимо от этого флага)")
+    allow_early_close: bool = Field(default=True, description="Разрешить агенту закрывать свою позицию досрочно")
+    daily_call_budget: int = Field(default=200, ge=1, description="Максимум вызовов LLM в сутки (защита от неограниченных трат)")
+
+
 class Settings(BaseModel):
     exchanges: dict[str, ExchangeConfig]
     collectors: CollectorsConfig = CollectorsConfig()
@@ -125,6 +150,7 @@ class Settings(BaseModel):
     telegram_price_surge: Optional[TelegramConfig] = None   # отдельный бот для сигналов strategy_price_surge
     trading: TradingConfig = TradingConfig()
     market_context: MarketContextConfig = MarketContextConfig()
+    agent: AgentConfig = AgentConfig()
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> "Settings":
