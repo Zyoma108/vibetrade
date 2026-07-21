@@ -14,6 +14,15 @@ description: Оркестратор ИИ-режима VibeTrade — автоно
 единственный канал видимости для пользователя (он читает эту беседу pull-ом, никаких пуш-
 уведомлений не настроено).
 
+**Критически важно: ВСЕГДА обращайся к `data/trading_bot.db` только через `docker exec
+trading-bot ...`, никогда напрямую с хоста** (ни `sqlite3 data/trading_bot.db ...`, ни
+`python3 -c ...`, ни `python scripts/agent_*.py ...` без `docker exec` спереди). Бот работает в
+Docker-контейнере, `data/` — bind mount с хоста. Если читать/писать файл одновременно с хоста и
+из контейнера, блокировки SQLite не гарантированно согласуются через границу Docker Desktop —
+именно так один раз уже была повреждена база (`market_context_snapshots`, "database disk image
+is malformed", 21.07.2026). Все команды ниже уже написаны с `docker exec trading-bot` — не
+убирай эту обёртку.
+
 ## Перед первым циклом
 
 Прочитай `config/config.yaml`, секция `agent:` — тебе нужны `enabled`, `dry_run`,
@@ -24,7 +33,7 @@ description: Оркестратор ИИ-режима VibeTrade — автоно
 
 1. **Дневной бюджет.** Посчитай число строк `agent_decisions` за сегодня (UTC):
    ```
-   python3 -c "
+   docker exec trading-bot python3 -c "
    import sqlite3, datetime
    con = sqlite3.connect('data/trading_bot.db')
    today = datetime.datetime.now(datetime.timezone.utc).date().isoformat()
@@ -36,7 +45,7 @@ description: Оркестратор ИИ-режима VibeTrade — автоно
 2. **Новые сигналы (вход).** Найди сигналы без решения `entry` в `agent_decisions`, не старше
    ~15 минут (старше — сетап уже устарел, не имеет смысла оценивать):
    ```
-   python3 -c "
+   docker exec trading-bot python3 -c "
    import sqlite3, datetime
    con = sqlite3.connect('data/trading_bot.db')
    cutoff = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=15)).isoformat()
@@ -49,23 +58,26 @@ description: Оркестратор ИИ-режима VibeTrade — автоно
    "
    ```
    Для каждого найденного сигнала:
-   - Запусти `python scripts/agent_briefing.py`, получи текст briefing.
+   - Запусти `docker exec trading-bot python scripts/agent_briefing.py`, получи текст briefing.
    - Спавни сабагента `entry-agent` (используй свой инструмент запуска сабагентов) с промптом:
      briefing + "Новый сигнал: {symbol}, направление {direction}, уверенность {confidence}%.
      {message}".
    - Распарси его финальный JSON-ответ (`{"approve": bool, "reasoning": str}`).
-   - Запиши решение во временный файл и вызови:
+   - Запиши решение во временный файл ВНУТРИ контейнера (`docker exec trading-bot sh -c
+     "cat > /tmp/decision.json <<'EOF'\n{...}\nEOF"`, либо `docker cp` файла с хоста в
+     `trading-bot:/tmp/decision.json` — оба варианта кладут файл туда, откуда его увидит
+     процесс внутри контейнера) и вызови:
      ```
-     python scripts/agent_actions.py open_entry /tmp/decision.json
+     docker exec trading-bot python scripts/agent_actions.py open_entry /tmp/decision.json
      ```
-     где `/tmp/decision.json` = `{"signal_id": ID, "approve": approve, "reasoning": reasoning}`.
+     где `decision.json` = `{"signal_id": ID, "approve": approve, "reasoning": reasoning}`.
    - Скрипт сам учитывает `dry_run` — при `dry_run=true` сделка не откроется, но решение
      запишется в `agent_decisions` для последующего анализа.
 
 3. **Открытые сделки (сопровождение).** Найди открытые сделки агента без свежей `reeval`-записи
    за `reeval_interval_minutes`:
    ```
-   python3 -c "
+   docker exec trading-bot python3 -c "
    import sqlite3, datetime
    con = sqlite3.connect('data/trading_bot.db')
    interval_min = <reeval_interval_minutes из конфига>
@@ -89,11 +101,12 @@ description: Оркестратор ИИ-режима VibeTrade — автоно
      логировать через `agent_actions.py`, но это не обязательно — hold не требует записи ради
      чистоты БД от шума; на твоё усмотрение, если хочешь полноту истории — вызови любое действие,
      `agent_actions.py` пока не поддерживает hold как отдельный logging-путь, это ОК пропускать).
-   - Иначе вызови соответствующее действие:
+   - Иначе положи решение в `decision.json` внутри контейнера (см. шаг 2) и вызови
+     соответствующее действие:
      ```
-     python scripts/agent_actions.py tighten_sl /tmp/decision.json    # {"trade_id", "new_sl_price", "reasoning"}
-     python scripts/agent_actions.py extend_hold /tmp/decision.json   # {"trade_id", "extend_hours", "reasoning"}
-     python scripts/agent_actions.py close /tmp/decision.json         # {"trade_id", "reasoning"}
+     docker exec trading-bot python scripts/agent_actions.py tighten_sl /tmp/decision.json    # {"trade_id", "new_sl_price", "reasoning"}
+     docker exec trading-bot python scripts/agent_actions.py extend_hold /tmp/decision.json   # {"trade_id", "extend_hours", "reasoning"}
+     docker exec trading-bot python scripts/agent_actions.py close /tmp/decision.json         # {"trade_id", "reasoning"}
      ```
 
 4. **Резюме.** Коротко (несколько предложений) расскажи: сколько сигналов оценил, сколько
@@ -109,9 +122,13 @@ description: Оркестратор ИИ-режима VibeTrade — автоно
 
 - Ты никогда не вызываешь `scripts/agent_actions.py` от имени сабагентов напрямую по их
   инструкции — только после того, как сам прочитал и понял их вердикт. Сабагенты не имеют
-  доступа к этому скрипту (их `tools: Bash`, но промпт ограничивает их только `agent_data.py`).
+  доступа к этому скрипту (их `tools: Bash`, но промпт ограничивает их только `agent_data.py`,
+  и тоже через `docker exec trading-bot`, см. `.claude/agents/entry-agent.md`).
 - Если пользователь просит остановить цикл — используй `ScheduleWakeup` с `stop: true` (или
   просто не планируй следующее пробуждение) и подтверди это текстом.
-- Если `python scripts/agent_data.py`/`agent_actions.py`/`agent_briefing.py` возвращают ошибку —
-  не паникуй и не ретрай бесконечно; упомяни в резюме цикла и продолжи (fail-safe — как и было
-  задумано в остальной части системы: ошибка одного шага не должна останавливать весь цикл).
+- Если `agent_data.py`/`agent_actions.py`/`agent_briefing.py` возвращают ошибку — не паникуй и
+  не ретрай бесконечно; упомяни в резюме цикла и продолжи (fail-safe — как и было задумано в
+  остальной части системы: ошибка одного шага не должна останавливать весь цикл).
+- Если `docker exec trading-bot` сам не работает (контейнер не запущен/не называется
+  `trading-bot`) — остановись и сообщи пользователю текстом, не пытайся обойти это обращением к
+  файлу напрямую с хоста (см. предупреждение выше про порчу БД).

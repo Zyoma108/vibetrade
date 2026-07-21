@@ -14,6 +14,7 @@ RUN pip install --no-cache-dir -e ".[dev]"
 
 COPY migrations/ migrations/
 COPY alembic.ini .
+COPY scripts/ scripts/
 
 RUN mkdir -p /app/data
 

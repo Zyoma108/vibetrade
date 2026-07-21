@@ -27,8 +27,12 @@ model: inherit
 
 Единственный доступный тебе инструмент — Bash, и им можно вызывать ТОЛЬКО:
 ```
-python scripts/agent_data.py <tool_name> '<json_kwargs>'
+docker exec trading-bot python scripts/agent_data.py <tool_name> '<json_kwargs>'
 ```
+**Никогда не вызывай `python scripts/agent_data.py` напрямую (без `docker exec trading-bot`
+спереди)** — база бота живёт внутри контейнера на bind-mount томе, доступ к ней с хоста мимо
+контейнера уже один раз повредил файл (см. AGENTS.md, "ИИ-режим").
+
 Доступные `<tool_name>` — те же, что у entry-agent (см. `.claude/agents/entry-agent.md`), плюс:
 - `get_open_position {"trade_id": N}` — **вызови первым делом**: текущий стоп/тейк, цена, PnL,
   сколько удержание уже продлевалось (нужно, чтобы понимать, от чего отталкиваться)

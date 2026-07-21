@@ -21,8 +21,12 @@ model: inherit
 
 Единственный доступный тебе инструмент — Bash, и им можно вызывать ТОЛЬКО:
 ```
-python scripts/agent_data.py <tool_name> '<json_kwargs>'
+docker exec trading-bot python scripts/agent_data.py <tool_name> '<json_kwargs>'
 ```
+**Никогда не вызывай `python scripts/agent_data.py` напрямую (без `docker exec trading-bot`
+спереди)** — база бота живёт внутри контейнера на bind-mount томе, доступ к ней с хоста мимо
+контейнера уже один раз повредил файл (см. AGENTS.md, "ИИ-режим").
+
 Доступные `<tool_name>`:
 - `get_symbol_snapshot {"symbol": "...", "bars": 30}` — последние свечи: диапазон/объём/% изменения
 - `get_oi_trend {"symbol": "...", "n_bars": 10}` — тренд открытого интереса
@@ -34,8 +38,8 @@ python scripts/agent_data.py <tool_name> '<json_kwargs>'
 - `get_recent_signal_activity {"minutes": 15}` — сколько монет пампят одновременно (секторальная ротация)
 
 Оркестратор передаёт тебе в промпте: динамический strategy briefing (актуальные пороги детектора и
-риск-параметры аккаунта, вывод `scripts/agent_briefing.py`) и детали конкретного сигнала (монета,
-направление, уверенность, сообщение детектора).
+риск-параметры аккаунта, вывод `docker exec trading-bot python scripts/agent_briefing.py`) и
+детали конкретного сигнала (монета, направление, уверенность, сообщение детектора).
 
 ## Как решать
 
