@@ -108,8 +108,11 @@ class Application:
             )
             logger.info("MarketContext инициализирован")
 
-        # Уведомления
-        if self.settings.telegram.bot_token and self.settings.telegram.chat_ids:
+        # Уведомления (полностью отключены при agent.enabled=true — см. AGENTS.md, "ИИ-режим":
+        # видимость в этом режиме через беседу оркестратора, Telegram не участвует вообще)
+        if self.settings.agent.enabled:
+            logger.info("ИИ-режим включён — Telegram-уведомления и команды отключены полностью")
+        elif self.settings.telegram.bot_token and self.settings.telegram.chat_ids:
             self._notifier = TelegramNotifier(self.settings.telegram)
             await self._notifier.start()
 
@@ -165,8 +168,10 @@ class Application:
         else:
             logger.warning("Telegram не настроен, уведомления отключены")
 
-        # Второй Telegram-бот для strategy_price_surge
-        if self.settings.telegram_price_surge and self.settings.telegram_price_surge.bot_token and self.settings.telegram_price_surge.chat_ids:
+        # Второй Telegram-бот для strategy_price_surge (тоже отключён при agent.enabled=true)
+        if self.settings.agent.enabled:
+            pass  # уже залогировано выше — Telegram полностью отключён ИИ-режимом
+        elif self.settings.telegram_price_surge and self.settings.telegram_price_surge.bot_token and self.settings.telegram_price_surge.chat_ids:
             self._notifier_price_surge = TelegramNotifier(self.settings.telegram_price_surge)
             await self._notifier_price_surge.start()
             logger.info("Telegram-бот Price Surge запущен")
