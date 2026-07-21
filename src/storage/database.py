@@ -65,7 +65,3 @@ async def init_db() -> None:
                 )
             except Exception:
                 pass  # колонка уже существует
-
-
-async def get_session() -> AsyncSession:
-    return async_session()

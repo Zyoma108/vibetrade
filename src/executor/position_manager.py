@@ -367,11 +367,7 @@ class PositionManager:
             # Выставляется сразу при открытии, не зависит от цикла опроса.
             if tp_sl_ok:
                 try:
-                    partial_trigger = (
-                        entry_price
-                        + (tp_price - entry_price)
-                        * (self.config.partial_close_pct / 100)
-                    )
+                    partial_trigger = self._partial_trigger_price(entry_price, tp_price)
                     partial_qty = quantity / 2
                     await self._connector.place_reduce_only_limit(  # type: ignore[union-attr]
                         symbol=signal.symbol,
@@ -446,7 +442,13 @@ class PositionManager:
     # ==================================================================
 
     async def update_positions(self, session: AsyncSession) -> list[Trade]:
-        """Проверить открытые позиции на закрытие. Возвращает закрытые."""
+        """Проверить открытые позиции на закрытие. Возвращает закрытые.
+
+        Для каждой позиции последовательно проверяются (первая сработавшая
+        стадия закрывает итерацию): повторная установка TP/SL → закрытие
+        биржей (TP/SL) → частичная фиксация лимитником → частичная фиксация
+        fallback'ом → выход по времени.
+        """
         stmt = (
             select(Trade)
             .where(Trade.status == "open")
@@ -458,7 +460,7 @@ class PositionManager:
             return []
 
         now = datetime.now(tz=timezone.utc)
-        closed = []
+        closed: list[Trade] = []
 
         # Сверить с биржей
         try:
@@ -469,210 +471,260 @@ class PositionManager:
             return []
 
         for pos in db_positions:
-            # --- Повторно выставить TP/SL если не получилось ---
             if not pos.tp_sl_set:
-                try:
-                    await asyncio.sleep(1)
-                    tp = self._tp_price(pos.entry_price)
-                    sl = self._sl_price(pos.entry_price)
-                    await self._connector.set_tpsl(  # type: ignore[union-attr]
-                        symbol=pos.symbol,
-                        side="buy",
-                        amount=pos.quantity,
-                        tp_price=tp,
-                        sl_price=sl,
-                    )
-                    pos.tp_sl_set = True
-                    session.add(pos)
-                    logger.info(f"TP/SL повторно выставлены для {pos.symbol}")
-                except Exception as e:
-                    err = str(e)
-                    if "lower than" in err.lower() or "higher than" in err.lower():
-                        logger.error(
-                            f"Цена ушла за SL для {pos.symbol}, "
-                            f"аварийно закрываю позицию: {e}"
-                        )
-                        try:
-                            await self._connector.close_position(  # type: ignore[union-attr]
-                                pos.symbol
-                            )
-                        except Exception:
-                            logger.exception(f"Не удалось аварийно закрыть {pos.symbol}")
-                        current_price = await self._get_current_price(session, pos.symbol)
-                        await self._close_position(
-                            pos, current_price or pos.entry_price, "sl"
-                        )
-                        closed.append(pos)
-                        continue
-                    else:
-                        logger.warning(f"Повторная установка TP/SL для {pos.symbol}: {e}")
+                if await self._resync_missing_tpsl(session, pos, closed):
+                    continue
 
             current_price = await self._get_current_price(session, pos.symbol)
 
-            # --- Позиция уже закрыта на бирже (TP/SL) ---
             if pos.symbol not in ex_symbols:
-                exit_price = current_price or pos.entry_price
-                # Пытаемся получить фактическую цену выхода
-                try:
-                    last_trade = await self._connector.fetch_last_trade(  # type: ignore[union-attr]
-                        pos.symbol, pos.entry_time
-                    )
-                    if last_trade:
-                        exit_price = last_trade["price"]
-                except Exception:
-                    pass
-                await self._close_position(pos, exit_price, "tp_sl_exchange")
-                closed.append(pos)
+                await self._close_from_exchange(pos, current_price, closed)
                 continue
 
-            # --- Проверка исполнения лимитника частичной фиксации ---
-            if not pos.partial_closed:
-                try:
-                    ex_positions = await self._connector.fetch_positions(  # type: ignore[union-attr]
-                        pos.symbol
-                    )
-                    if ex_positions:
-                        actual_contracts = abs(ex_positions[0]["contracts"])
-                        # Если позиция уменьшилась → лимитник исполнился
-                        if actual_contracts < pos.quantity * 0.75:
-                            tp = self._tp_price(pos.entry_price)
-                            trigger = pos.entry_price + (tp - pos.entry_price) * (
-                                self.config.partial_close_pct / 100
-                            )
-                            close_qty = pos.quantity - actual_contracts
-                            partial_pnl = (
-                                (trigger - pos.entry_price) * close_qty
-                                if pos.direction == "long"
-                                else (pos.entry_price - trigger) * close_qty
-                            )
-                            pos.quantity = actual_contracts
-                            pos.partial_closed = True
-                            pos.partial_pnl = (pos.partial_pnl or 0.0) + partial_pnl
-                            session.add(pos)
+            if not pos.partial_closed and await self._check_limit_partial_fill(pos):
+                continue
 
-                            # Переводим стоп в безубыток для остатка
-                            try:
-                                await self._connector.set_tpsl(  # type: ignore[union-attr]
-                                    symbol=pos.symbol,
-                                    side="buy" if pos.direction == "long" else "sell",
-                                    amount=actual_contracts,
-                                    tp_price=tp,
-                                    sl_price=pos.entry_price,
-                                )
-                            except Exception as e:
-                                logger.warning(
-                                    f"Не удалось перевести стоп в б/у "
-                                    f"для {pos.symbol}: {e}"
-                                )
-
-                            pnl_pct = (trigger / pos.entry_price - 1) * 100
-                            await self._notify(
-                                f"🔒 <b>Частичная фиксация (лимитник)</b> "
-                                f"{pos.direction.upper()}\n"
-                                f"Монета: {pos.symbol}\n"
-                                f"Закрыто 50% @ ${trigger:.6f}\n"
-                                f"Частичный PnL: ${partial_pnl:+.2f} "
-                                f"({pnl_pct:+.1f}%)\n"
-                                f"Стоп переведён в безубыток"
-                            )
-                            logger.info(
-                                f"Лимитник исполнен: {pos.symbol} "
-                                f"{close_qty:.2f} @ {trigger:.6f}"
-                            )
-                            continue
-                except Exception:
-                    logger.warning(
-                        f"Ошибка проверки лимитника для {pos.symbol}"
-                    )
-
-            # --- Частичное закрытие: fallback если лимитник не был выставлен ---
             if not pos.partial_closed and current_price:
-                tp = self._tp_price(pos.entry_price)
-                trigger = pos.entry_price + (tp - pos.entry_price) * (
-                    self.config.partial_close_pct / 100
-                )
-                if (pos.direction == "long" and current_price >= trigger) or (
-                    pos.direction == "short" and current_price <= trigger
-                ):
-                    close_qty = pos.quantity / 2
-
-                    # Проверить, нет ли уже лимитника на бирже (после рестарта)
-                    has_open_orders = False
-                    try:
-                        open_orders = await self._connector._call(  # type: ignore[union-attr]
-                            "fetch_open_orders", pos.symbol
-                        )
-                        has_open_orders = len(open_orders) > 0
-                    except Exception:
-                        pass
-
-                    if has_open_orders:
-                        logger.info(
-                            f"Частичная фиксация {pos.symbol}: "
-                            f"на бирже есть открытые ордера, "
-                            f"пропускаем fallback (лимитник уже работает)"
-                        )
-                        continue
-
-                    try:
-                        await self._connector._call(  # type: ignore[union-attr]
-                            "create_order",
-                            pos.symbol, "market",
-                            "sell" if pos.direction == "long" else "buy",
-                            close_qty, None,
-                            {"reduceOnly": True},
-                        )
-                        # Получаем фактический остаток и переводим стоп в б/у
-                        ex_positions = await self._connector.fetch_positions(  # type: ignore[union-attr]
-                            pos.symbol
-                        )
-                        remaining = pos.quantity - close_qty
-                        if ex_positions:
-                            remaining = abs(ex_positions[0]["contracts"])
-                        await self._connector.set_tpsl(  # type: ignore[union-attr]
-                            symbol=pos.symbol,
-                            side="buy" if pos.direction == "long" else "sell",
-                            amount=remaining,
-                            tp_price=tp,
-                            sl_price=pos.entry_price,
-                        )
-                    except Exception as e:
-                        logger.warning(f"Частичное закрытие {pos.symbol}: {e}")
-                        continue
-
-                    partial_pnl = (current_price - pos.entry_price) * close_qty if pos.direction == "long" else (pos.entry_price - current_price) * close_qty
-                    pos.quantity -= close_qty
-                    pos.partial_closed = True
-                    pos.partial_pnl = (pos.partial_pnl or 0.0) + partial_pnl
-                    session.add(pos)
-
-                    pnl_pct = (current_price / pos.entry_price - 1) * 100
-                    await self._notify(
-                        f"🔒 <b>Частичная фиксация</b> {pos.direction.upper()}\n"
-                        f"Монета: {pos.symbol}\n"
-                        f"Закрыто 50% @ ${current_price:.6f}\n"
-                        f"Частичный PnL: ${partial_pnl:+.2f} ({pnl_pct:+.1f}%)\n"
-                        f"Стоп переведён в безубыток"
-                    )
-                    logger.info(f"Частичное закрытие: {pos.symbol} 50% @ {current_price:.6f}")
+                if await self._check_partial_close_fallback(pos, current_price):
                     continue
 
-            # --- Выход по времени ---
-            age_hours = (
-                now - pos.entry_time.replace(tzinfo=timezone.utc)
-            ).total_seconds() / 3600
-            if age_hours >= self.config.max_hold_hours:
-                try:
-                    await self._connector.close_position(pos.symbol)  # type: ignore[union-attr]
-                except Exception:
-                    logger.exception(f"Ошибка закрытия {pos.symbol} по времени")
-                    continue
-                exit_price = current_price or pos.entry_price
-                await self._close_position(pos, exit_price, "time")
-                closed.append(pos)
+            if await self._check_time_exit(pos, now, current_price, closed):
                 continue
 
         return closed
+
+    # ------------------------------------------------------------------
+    # update_positions — по одной стадии на метод
+    # ------------------------------------------------------------------
+
+    async def _resync_missing_tpsl(
+        self, session: AsyncSession, pos: Trade, closed: list[Trade]
+    ) -> bool:
+        """Повторно выставить TP/SL, если не удалось при открытии.
+
+        Возвращает True, если позиция аварийно закрыта (цена уже за SL) —
+        в этом случае вызывающий цикл должен перейти к следующей позиции.
+        """
+        try:
+            await asyncio.sleep(1)
+            tp = self._tp_price(pos.entry_price)
+            sl = self._sl_price(pos.entry_price)
+            await self._connector.set_tpsl(  # type: ignore[union-attr]
+                symbol=pos.symbol,
+                side="buy",
+                amount=pos.quantity,
+                tp_price=tp,
+                sl_price=sl,
+            )
+            pos.tp_sl_set = True
+            session.add(pos)
+            logger.info(f"TP/SL повторно выставлены для {pos.symbol}")
+            return False
+        except Exception as e:
+            err = str(e)
+            if "lower than" not in err.lower() and "higher than" not in err.lower():
+                logger.warning(f"Повторная установка TP/SL для {pos.symbol}: {e}")
+                return False
+
+            logger.error(
+                f"Цена ушла за SL для {pos.symbol}, аварийно закрываю позицию: {e}"
+            )
+            try:
+                await self._connector.close_position(pos.symbol)  # type: ignore[union-attr]
+            except Exception:
+                logger.exception(f"Не удалось аварийно закрыть {pos.symbol}")
+            current_price = await self._get_current_price(session, pos.symbol)
+            await self._close_position(pos, current_price or pos.entry_price, "sl")
+            closed.append(pos)
+            return True
+
+    async def _close_from_exchange(
+        self, pos: Trade, current_price: float | None, closed: list[Trade]
+    ) -> None:
+        """Позиция уже закрыта на бирже (сработал TP/SL) — синхронизировать в БД."""
+        exit_price = current_price or pos.entry_price
+        # Пытаемся получить фактическую цену выхода
+        try:
+            last_trade = await self._connector.fetch_last_trade(  # type: ignore[union-attr]
+                pos.symbol, pos.entry_time
+            )
+            if last_trade:
+                exit_price = last_trade["price"]
+        except Exception:
+            pass
+        await self._close_position(pos, exit_price, "tp_sl_exchange")
+        closed.append(pos)
+
+    def _partial_trigger_price(self, entry_price: float, tp_price: float) -> float:
+        """Цена срабатывания частичной фиксации (% пути от входа до TP)."""
+        return entry_price + (tp_price - entry_price) * (
+            self.config.partial_close_pct / 100
+        )
+
+    async def _check_limit_partial_fill(self, pos: Trade) -> bool:
+        """Проверить исполнение лимитника частичной фиксации.
+
+        Возвращает True, если лимитник исполнился и позиция обработана.
+        """
+        try:
+            ex_positions = await self._connector.fetch_positions(  # type: ignore[union-attr]
+                pos.symbol
+            )
+        except Exception:
+            logger.warning(f"Ошибка проверки лимитника для {pos.symbol}")
+            return False
+
+        if not ex_positions:
+            return False
+
+        actual_contracts = abs(ex_positions[0]["contracts"])
+        if actual_contracts >= pos.quantity * 0.75:
+            return False
+
+        # Позиция уменьшилась → лимитник исполнился
+        trigger = self._partial_trigger_price(pos.entry_price, self._tp_price(pos.entry_price))
+        close_qty = pos.quantity - actual_contracts
+        partial_pnl = (
+            (trigger - pos.entry_price) * close_qty
+            if pos.direction == "long"
+            else (pos.entry_price - trigger) * close_qty
+        )
+        pos.quantity = actual_contracts
+        pos.partial_closed = True
+        pos.partial_pnl = (pos.partial_pnl or 0.0) + partial_pnl
+
+        # Переводим стоп в безубыток для остатка
+        try:
+            await self._connector.set_tpsl(  # type: ignore[union-attr]
+                symbol=pos.symbol,
+                side="buy" if pos.direction == "long" else "sell",
+                amount=actual_contracts,
+                tp_price=self._tp_price(pos.entry_price),
+                sl_price=pos.entry_price,
+            )
+        except Exception as e:
+            logger.warning(f"Не удалось перевести стоп в б/у для {pos.symbol}: {e}")
+
+        pnl_pct = (trigger / pos.entry_price - 1) * 100
+        await self._notify(
+            f"🔒 <b>Частичная фиксация (лимитник)</b> {pos.direction.upper()}\n"
+            f"Монета: {pos.symbol}\n"
+            f"Закрыто 50% @ ${trigger:.6f}\n"
+            f"Частичный PnL: ${partial_pnl:+.2f} ({pnl_pct:+.1f}%)\n"
+            f"Стоп переведён в безубыток"
+        )
+        logger.info(f"Лимитник исполнен: {pos.symbol} {close_qty:.2f} @ {trigger:.6f}")
+        return True
+
+    async def _check_partial_close_fallback(
+        self, pos: Trade, current_price: float
+    ) -> bool:
+        """Частичное закрытие по рынку, если лимитник не был выставлен (fallback).
+
+        Возвращает True, если позиция обработана (обработка триггера,
+        неудача ордера и уже-существующий лимитник — всё считается обработкой).
+        """
+        trigger = self._partial_trigger_price(pos.entry_price, self._tp_price(pos.entry_price))
+        triggered = (pos.direction == "long" and current_price >= trigger) or (
+            pos.direction == "short" and current_price <= trigger
+        )
+        if not triggered:
+            return False
+
+        close_qty = pos.quantity / 2
+
+        # Проверить, нет ли уже лимитника на бирже (после рестарта)
+        has_open_orders = False
+        try:
+            open_orders = await self._connector._call(  # type: ignore[union-attr]
+                "fetch_open_orders", pos.symbol
+            )
+            has_open_orders = len(open_orders) > 0
+        except Exception:
+            pass
+
+        if has_open_orders:
+            logger.info(
+                f"Частичная фиксация {pos.symbol}: "
+                f"на бирже есть открытые ордера, "
+                f"пропускаем fallback (лимитник уже работает)"
+            )
+            return True
+
+        try:
+            await self._connector._call(  # type: ignore[union-attr]
+                "create_order",
+                pos.symbol, "market",
+                "sell" if pos.direction == "long" else "buy",
+                close_qty, None,
+                {"reduceOnly": True},
+            )
+            # Получаем фактический остаток и переводим стоп в б/у
+            ex_positions = await self._connector.fetch_positions(  # type: ignore[union-attr]
+                pos.symbol
+            )
+            remaining = pos.quantity - close_qty
+            if ex_positions:
+                remaining = abs(ex_positions[0]["contracts"])
+            await self._connector.set_tpsl(  # type: ignore[union-attr]
+                symbol=pos.symbol,
+                side="buy" if pos.direction == "long" else "sell",
+                amount=remaining,
+                tp_price=self._tp_price(pos.entry_price),
+                sl_price=pos.entry_price,
+            )
+        except Exception as e:
+            logger.warning(f"Частичное закрытие {pos.symbol}: {e}")
+            return True
+
+        partial_pnl = (
+            (current_price - pos.entry_price) * close_qty
+            if pos.direction == "long"
+            else (pos.entry_price - current_price) * close_qty
+        )
+        pos.quantity -= close_qty
+        pos.partial_closed = True
+        pos.partial_pnl = (pos.partial_pnl or 0.0) + partial_pnl
+
+        pnl_pct = (current_price / pos.entry_price - 1) * 100
+        await self._notify(
+            f"🔒 <b>Частичная фиксация</b> {pos.direction.upper()}\n"
+            f"Монета: {pos.symbol}\n"
+            f"Закрыто 50% @ ${current_price:.6f}\n"
+            f"Частичный PnL: ${partial_pnl:+.2f} ({pnl_pct:+.1f}%)\n"
+            f"Стоп переведён в безубыток"
+        )
+        logger.info(f"Частичное закрытие: {pos.symbol} 50% @ {current_price:.6f}")
+        return True
+
+    async def _check_time_exit(
+        self,
+        pos: Trade,
+        now: datetime,
+        current_price: float | None,
+        closed: list[Trade],
+    ) -> bool:
+        """Закрыть позицию по истечении max_hold_hours.
+
+        Возвращает True, если стадия обработана (позиция закрыта, либо
+        закрытие не удалось и будет повторено в следующем цикле).
+        """
+        age_hours = (
+            now - pos.entry_time.replace(tzinfo=timezone.utc)
+        ).total_seconds() / 3600
+        if age_hours < self.config.max_hold_hours:
+            return False
+
+        try:
+            await self._connector.close_position(pos.symbol)  # type: ignore[union-attr]
+        except Exception:
+            logger.exception(f"Ошибка закрытия {pos.symbol} по времени")
+            return True
+
+        exit_price = current_price or pos.entry_price
+        await self._close_position(pos, exit_price, "time")
+        closed.append(pos)
+        return True
 
     # ==================================================================
     # Helpers

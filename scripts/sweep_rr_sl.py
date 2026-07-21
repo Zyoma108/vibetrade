@@ -123,13 +123,6 @@ async def run_backtest_with_config(cfg: Settings, db_path: str) -> dict:
 
             high, low, close = current_bar[3], current_bar[4], current_bar[5]
 
-            if trading_cfg.breakeven_at_halfway and not pos.partial_closed:
-                trigger = pos.entry_price + (pos.tp_price - pos.entry_price) * (
-                    trading_cfg.partial_close_pct / 100)
-                if high >= trigger:
-                    pos.partial_closed = True
-                    pos.sl_price = pos.entry_price
-                    continue
 
             if not pos.partial_closed:
                 trigger = pos.entry_price + (pos.tp_price - pos.entry_price) * (

@@ -30,7 +30,6 @@ def _config(**overrides) -> TradingConfig:
         "risk_reward_ratio": 3.0,
         "stop_loss_pct": 5.0,
         "max_hold_hours": 48.0,
-        "partial_close_enabled": True,
         "partial_close_pct": 40.0,
         "cooldown_hours": 1.0,
         "circuit_breaker_enabled": True,
@@ -633,8 +632,6 @@ class TestMarketContextBlockEntries:
             btc_drop_threshold_pct=1.5,
             supertrend_atr_period=10,
             supertrend_multiplier=3.0,
-            altcoin_sample_size=30,
-            notify_on_change=True,
             trend_threshold_pct=0.3,
         )
         connector = MagicMock()

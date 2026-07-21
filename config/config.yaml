@@ -80,8 +80,6 @@ market_context:
   trend_threshold_pct: 1.0        # порог изменения цены за 4ч для определения тренда, %
   supertrend_atr_period: 10       # период ATR для Supertrend
   supertrend_multiplier: 3.0      # множитель ATR для Supertrend
-  altcoin_sample_size: 30         # сколько топ-альтов для OTHERS proxy
-  notify_on_change: true          # уведомления о смене тренда в Telegram
 
 trading:
   mode: real                      # signal | real
@@ -92,9 +90,7 @@ trading:
   risk_reward_ratio: 2.0          # соотношение TP/SL (2.0 = 1:2 risk/reward, TP=+10%)
   stop_loss_pct: 5.0              # стоп-лосс, % от цены входа
   max_hold_hours: 48.0            # макс. время удержания, часов
-  partial_close_enabled: true     # частичная фиксация (всегда включена)
   partial_close_pct: 35.0         # % пути до TP для закрытия / перевода в б/у
-  breakeven_at_halfway: false     # перевести стоп в б/у на полпути (без частичной фиксации)
   cooldown_hours: 1.0             # кулдаун после закрытия позиции
   circuit_breaker_enabled: true    # защита от серий убытков (Circuit Breaker)
   circuit_breaker_loss_streak_reduce: 2  # после N убытков подряд уменьшить размер позиции

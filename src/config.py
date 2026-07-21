@@ -94,9 +94,7 @@ class TradingConfig(BaseModel):
     risk_reward_ratio: float = Field(default=3.0, ge=1.0, le=20.0, description="Соотношение TP/SL (3.0 = 1:3 risk/reward)")
     stop_loss_pct: float = Field(default=5.0, ge=0.5, le=50.0, description="Стоп-лосс, % от цены входа")
     max_hold_hours: float = Field(default=24.0, ge=1.0, description="Максимальное время удержания позиции, часов")
-    partial_close_enabled: bool = Field(default=True, description="Частичная фиксация на полпути к TP (всегда включена)")
     partial_close_pct: float = Field(default=50.0, ge=10.0, le=90.0, description="% пути до TP для частичного закрытия / перевода в б/у")
-    breakeven_at_halfway: bool = Field(default=False, description="Перевести стоп в б/у на полпути (без частичной фиксации)")
     cooldown_hours: float = Field(default=1.0, ge=0.0, le=168.0, description="Кулдаун после закрытия позиции, часов (0 = без кулдауна)")
     circuit_breaker_enabled: bool = Field(default=True, description="Включить защиту от серий убытков (Circuit Breaker)")
     circuit_breaker_loss_streak_reduce: int = Field(default=3, ge=1, le=20, description="После скольких убытков подряд уменьшить размер позиции")
@@ -111,8 +109,6 @@ class MarketContextConfig(BaseModel):
     trend_threshold_pct: float = Field(default=1.0, ge=0.1, le=20.0, description="Порог изменения цены за 4 часа для определения тренда (bullish/bearish), %")
     supertrend_atr_period: int = Field(default=10, ge=3, le=50, description="Период ATR для Supertrend")
     supertrend_multiplier: float = Field(default=3.0, ge=1.0, le=10.0, description="Множитель ATR для Supertrend")
-    altcoin_sample_size: int = Field(default=30, ge=10, le=100, description="Сколько топ-альтов для OTHERS proxy")
-    notify_on_change: bool = Field(default=True, description="Уведомлять в Telegram о смене тренда")
 
 
 class Settings(BaseModel):

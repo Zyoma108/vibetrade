@@ -153,8 +153,6 @@ Application.start()
 | `btc_drop_threshold_pct` | 1.5 | Порог падения BTC для cautious/risk-off |
 | `supertrend_atr_period` | 10 | Период ATR для Supertrend |
 | `supertrend_multiplier` | 3.0 | Множитель ATR (ширина канала) |
-| `altcoin_sample_size` | 30 | Запасной параметр (не используется с TradingView) |
-| `notify_on_change` | `true` | Уведомлять о смене тренда |
 
 ## Логика стратегий
 
@@ -240,7 +238,6 @@ Application.start()
 | `risk_reward_ratio` | 2.0 | Соотношение TP/SL (2.0 = TP на +10% при SL=5%) |
 | `stop_loss_pct` | 5.0 | Стоп-лосс, % от цены входа |
 | `max_hold_hours` | 48.0 | Макс. время удержания позиции |
-| `partial_close_enabled` | `true` | Частичная фиксация (всегда включена, игнорируется) |
 | `partial_close_pct` | 35.0 | % пути до TP для частичного закрытия |
 | `cooldown_hours` | 1.0 | Кулдаун после закрытия позиции (0 = без кулдауна) |
 | `circuit_breaker_enabled` | `true` | Включить Circuit Breaker — защиту от серий убытков |

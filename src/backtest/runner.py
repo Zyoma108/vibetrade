@@ -9,11 +9,11 @@
 import argparse
 import asyncio
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import numpy as np
-from sqlalchemy import desc, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from src.analytics.detector import SetupDetector
@@ -168,11 +168,9 @@ async def run_backtest(
                 continue
 
             current_bar = None
-            bar_idx_pos = -1
-            for i, r in enumerate(sym_data):
+            for r in sym_data:
                 if r[1] == ts:
                     current_bar = r
-                    bar_idx_pos = i
                     break
             if not current_bar:
                 continue
@@ -180,15 +178,6 @@ async def run_backtest(
             high = current_bar[3]
             low = current_bar[4]
             close = current_bar[5]
-
-            # breakeven_at_halfway
-            if cfg.breakeven_at_halfway and not pos.partial_closed:
-                trigger = pos.entry_price + (pos.tp_price - pos.entry_price) * (
-                    cfg.partial_close_pct / 100)
-                if high >= trigger:
-                    pos.partial_closed = True
-                    pos.sl_price = pos.entry_price
-                    continue
 
             # Частичное закрытие (всегда включено)
             if not pos.partial_closed:
@@ -419,7 +408,6 @@ async def run_backtest(
 def _load_live_stats(db_path: str) -> dict | None:
     """Загрузить статистику реальных сделок из БД."""
     import sqlite3
-    from datetime import datetime, timezone
 
     try:
         db = sqlite3.connect(db_path)
@@ -517,7 +505,7 @@ def _print_comparison(bt: dict, live: dict | None) -> None:
     print("=" * 80)
 
     if live and live.get("signals_total"):
-        print(f"\n  Конвейер сигналов (реальная торговля):")
+        print("\n  Конвейер сигналов (реальная торговля):")
         print(f"    Всего сигналов: {live['signals_total']}")
         print(f"    Отправлено:     {live['signals_sent']}")
         print(f"    Пропущено:      {live['signals_missed']}")
