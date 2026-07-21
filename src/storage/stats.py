@@ -25,15 +25,18 @@ async def trade_stats(session, period: str = "all") -> str:
     result = await session.execute(stmt)
     trades = result.scalars().all()
 
-    # Открытые позиции
+    # Открытые позиции и pending-заявки на вход
     open_stmt = select(func.count()).select_from(Trade).where(Trade.status == "open")
     open_count = (await session.execute(open_stmt)).scalar() or 0
+    pending_stmt = select(func.count()).select_from(Trade).where(Trade.status == "pending")
+    pending_count = (await session.execute(pending_stmt)).scalar() or 0
+    pending_line = f"\nЛимитников на вход: {pending_count}" if pending_count else ""
 
     if not trades:
         return (
             f"📊 <b>Статистика за {labels[period]}</b>\n\n"
             f"Закрытых сделок: 0\n"
-            f"Открыто позиций: {open_count}"
+            f"Открыто позиций: {open_count}{pending_line}"
         )
 
     wins = sum(1 for t in trades if (t.pnl or 0) > 0)
@@ -46,5 +49,5 @@ async def trade_stats(session, period: str = "all") -> str:
         f"Сделок: {len(trades)} | Плюс: {wins} | Минус: {losses}\n"
         f"Win rate: {win_rate:.0f}%\n"
         f"PnL: ${total_pnl:+.2f}\n\n"
-        f"Открыто позиций: {open_count}"
+        f"Открыто позиций: {open_count}{pending_line}"
     )

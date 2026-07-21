@@ -64,3 +64,5 @@ trading:
   taker_fee_pct: 0.055            # комиссия тейкера (market-ордер), % от notional
   maker_fee_pct: 0.02             # комиссия мейкера (лимитный reduce-only ордер), % от notional
   backtest_slippage_pct: 0.3      # допущение на проскальзывание входа в бэктесте, % (0 = выкл)
+  pending_entry_pullback_pct: 0.0   # вход лимитником на откате от сигнала, % (0 = выкл, market сразу)
+  pending_entry_timeout_minutes: 9.0  # через сколько минут снять неисполненный лимитник входа

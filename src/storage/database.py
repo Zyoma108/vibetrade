@@ -59,6 +59,7 @@ async def init_db() -> None:
             ("missed_reason", "VARCHAR(32)"),
             ("missed_detail", "TEXT"),
             ("fee", "FLOAT DEFAULT 0.0"),
+            ("pending_expires_at", "DATETIME"),
         ]:
             try:
                 await conn.exec_driver_sql(

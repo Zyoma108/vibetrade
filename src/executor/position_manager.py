@@ -179,10 +179,13 @@ class PositionManager:
     async def open_position(
         self, session: AsyncSession, signal: Signal, signal_id: int | None = None
     ) -> tuple[Trade | None, str, str | None]:
-        """Открыть позицию по сигналу.
-        Возвращает (trade, status, detail): status = 'opened' | 'limit' | 'duplicate' |
-        'cooldown' | 'no_price' | 'error' | 'circuit_breaker_stop'.
-        detail — описание ошибки (только если status != 'opened')."""
+        """Открыть позицию по сигналу (guard-проверки + диспетчер способа входа).
+        Возвращает (trade, status, detail): status = 'opened' | 'pending' | 'limit' |
+        'duplicate' | 'cooldown' | 'no_price' | 'error' | 'circuit_breaker_stop'.
+        'pending' — лимитник на вход выставлен на откате, ждёт исполнения
+        (см. `pending_entry_pullback_pct`); TP/SL и partial-close выставляются
+        позже, при активации в `check_pending_entries()`.
+        detail — описание ошибки (только если status не 'opened'/'pending')."""
 
         # Проверка рыночного режима (risk_off или cautious+ST=red)
         if self.block_entries:
@@ -202,7 +205,7 @@ class PositionManager:
             )
             return None, "circuit_breaker_stop", None
 
-        # Проверка лимита
+        # Проверка лимита (учитывает открытые и pending-позиции)
         open_count = await self._count_open(session)
         if open_count >= self.config.max_positions:
             logger.info(
@@ -226,7 +229,7 @@ class PositionManager:
             logger.info(f"Сигнал {signal.symbol} пропущен: монета в чёрном списке")
             return None, "error", "banned_symbol"
 
-        # Проверка — нет ли уже позиции по этой монете
+        # Проверка — нет ли уже позиции (открытой или pending) по этой монете
         if await self._has_position(session, signal.symbol):
             logger.info(f"Сигнал {signal.symbol} пропущен: уже есть позиция")
             return None, "duplicate", None
@@ -236,9 +239,9 @@ class PositionManager:
             logger.info(f"Сигнал {signal.symbol} пропущен: кулдаун после закрытия")
             return None, "cooldown", None
 
-        # Цена входа из последнего тикера
-        entry_price = await self._get_current_price(session, signal.symbol)
-        if entry_price is None or entry_price <= 0:
+        # Референсная цена (последний тикер)
+        reference_price = await self._get_current_price(session, signal.symbol)
+        if reference_price is None or reference_price <= 0:
             logger.warning(f"Нет цены для {signal.symbol}, позиция не открыта")
             return None, "no_price", None
 
@@ -256,14 +259,36 @@ class PositionManager:
         # Применяем множители рыночного режима и Circuit Breaker к бюджету риска
         cb_mult = self._get_circuit_breaker_position_mult()
         risk_budget = total * (self.config.risk_per_trade_pct / 100) * self.position_size_mult * cb_mult
-
         if cb_mult < 1.0:
             logger.info(
                 f"Circuit Breaker: размер позиции {signal.symbol} уменьшен "
                 f"до {cb_mult*100:.0f}% ({self._consecutive_losses} убытков подряд)"
             )
 
-        # TP/SL: фиксированные проценты от цены входа
+        try:
+            lev = int(self.config.leverage)
+            if lev > 1:
+                await self._connector.set_leverage(signal.symbol, lev)  # type: ignore[union-attr]
+        except Exception as e:
+            logger.warning(f"Не удалось выставить плечо для {signal.symbol}: {e}")
+
+        if self.config.pending_entry_pullback_pct > 0:
+            return await self._place_pending_entry(
+                session, signal, signal_id, reference_price, risk_budget
+            )
+        return await self._place_market_entry(
+            session, signal, signal_id, reference_price, risk_budget
+        )
+
+    async def _place_market_entry(
+        self,
+        session: AsyncSession,
+        signal: Signal,
+        signal_id: int | None,
+        entry_price: float,
+        risk_budget: float,
+    ) -> tuple[Trade | None, str, str | None]:
+        """Немедленный вход market-ордером (pending_entry_pullback_pct == 0)."""
         sl_distance = entry_price * (self.config.stop_loss_pct / 100)
         tp_distance = sl_distance * self.config.risk_reward_ratio
         quantity = risk_budget / sl_distance
@@ -278,24 +303,13 @@ class PositionManager:
             f"Позиция {signal.symbol}: SL={sl_distance:.6f} ({sl_pct:.1f}%), "
             f"TP={tp_distance:.6f} ({tp_pct:.1f}%), "
             f"qty={quantity:.2f}, размер=${actual_size:.0f} "
-            f"(риск=${risk_budget:.2f}, {self.config.risk_per_trade_pct}% от ${total:.0f})"
+            f"(риск=${risk_budget:.2f})"
         )
 
         tp_sl_ok = False
 
         # Ордер на бирже
         try:
-            lev = int(self.config.leverage)
-            if lev > 1:
-                try:
-                    await self._connector.set_leverage(  # type: ignore[union-attr]
-                        signal.symbol, lev
-                    )
-                except Exception as e:
-                    logger.warning(
-                        f"Не удалось выставить плечо {lev}x для {signal.symbol}: {e}"
-                    )
-
             # 1. Открываем позицию рыночным ордером
             await self._connector.create_market_order(  # type: ignore[union-attr]
                 symbol=signal.symbol,
@@ -439,6 +453,175 @@ class PositionManager:
         )
         self._reset_errors(signal.symbol)
         return trade, "opened", None
+
+    async def _place_pending_entry(
+        self,
+        session: AsyncSession,
+        signal: Signal,
+        signal_id: int | None,
+        reference_price: float,
+        risk_budget: float,
+    ) -> tuple[Trade | None, str, str | None]:
+        """Вход лимитным ордером на откате от цены сигнала (решает проблему
+        покупки на пике пампа). TP/SL и partial-close выставляются позже,
+        при исполнении лимитника — см. `check_pending_entries()`."""
+        limit_price = reference_price * (1 - self.config.pending_entry_pullback_pct / 100)
+        sl_distance = limit_price * (self.config.stop_loss_pct / 100)
+        quantity = risk_budget / sl_distance
+
+        logger.info(
+            f"Pending-вход {signal.symbol}: сигнал=${reference_price:.6f} → "
+            f"лимит=${limit_price:.6f} (откат {self.config.pending_entry_pullback_pct}%), "
+            f"qty={quantity:.2f}, размер=${quantity * limit_price:.0f}"
+        )
+
+        try:
+            await self._connector.create_limit_order(  # type: ignore[union-attr]
+                symbol=signal.symbol, side="buy", amount=quantity, price=limit_price,
+            )
+        except Exception as e:
+            err = str(e)
+            if "sign the required agreement" in err or "110126" in err:
+                self._banned_symbols.add(signal.symbol)
+                self._track_error(signal.symbol)
+                logger.info(
+                    f"ByBit не даёт торговать {signal.symbol}: "
+                    f"нужно подписать соглашение на сайте (добавлен в чёрный список)"
+                )
+                return None, "error", f"bybit_agreement: {err[:120]}"
+            self._track_error(signal.symbol)
+            logger.exception(f"Не удалось выставить лимитник входа для {signal.symbol}")
+            return None, "error", f"pending_order: {err[:120]}"
+
+        expires_at = datetime.now(tz=timezone.utc) + timedelta(
+            minutes=self.config.pending_entry_timeout_minutes
+        )
+        trade = Trade(
+            signal_id=signal_id,
+            symbol=signal.symbol,
+            direction=signal.direction,
+            entry_price=limit_price,
+            quantity=quantity,
+            entry_time=datetime.now(tz=timezone.utc),
+            status="pending",
+            pending_expires_at=expires_at,
+        )
+        session.add(trade)
+
+        await self._notify(
+            f"⏳ <b>Лимитник на вход выставлен</b> {signal.direction.upper()}\n"
+            f"Монета: {signal.symbol}\n"
+            f"Сигнал: ${reference_price:.6f} → Лимит: ${limit_price:.6f} "
+            f"(откат {self.config.pending_entry_pullback_pct}%)\n"
+            f"Истекает через {self.config.pending_entry_timeout_minutes:.0f} мин"
+        )
+        logger.info(f"Pending-вход выставлен: {signal.symbol} @ {limit_price:.6f}")
+        self._reset_errors(signal.symbol)
+        return trade, "pending", None
+
+    # ==================================================================
+    # PENDING ENTRIES — лимитники на вход, ожидающие отката
+    # ==================================================================
+
+    async def check_pending_entries(self, session: AsyncSession) -> list[Trade]:
+        """Проверить лимитники на вход: исполнились или истёк таймаут.
+        Возвращает список позиций, активированных в этом вызове (для логирования)."""
+        stmt = (
+            select(Trade)
+            .where(Trade.status == "pending")
+            .order_by(Trade.entry_time)
+        )
+        result = await session.execute(stmt)
+        pending = result.scalars().all()
+        if not pending:
+            return []
+
+        now = datetime.now(tz=timezone.utc)
+        activated = []
+        for pos in pending:
+            try:
+                ex_positions = await self._connector.fetch_positions(pos.symbol)  # type: ignore[union-attr]
+            except Exception:
+                logger.warning(f"Ошибка проверки pending-входа для {pos.symbol}")
+                continue
+
+            if ex_positions:
+                await self._activate_pending_entry(pos, ex_positions[0])
+                activated.append(pos)
+                continue
+
+            expires_at = pos.pending_expires_at
+            if expires_at and now >= expires_at.replace(tzinfo=timezone.utc):
+                await self._expire_pending_entry(pos)
+
+        return activated
+
+    async def _activate_pending_entry(self, pos: Trade, ex_position: dict) -> None:
+        """Лимитник на вход исполнился — перевести в open, выставить TP/SL
+        и лимитник частичной фиксации (то же самое, что делает market-путь
+        сразу при открытии)."""
+        fill_price = ex_position.get("entry_price") or pos.entry_price
+        pos.entry_price = fill_price
+        pos.entry_time = datetime.now(tz=timezone.utc)
+        pos.status = "open"
+        # Лимитник на вход исполнился как maker (резидентный ордер в стакане)
+        pos.fee = (pos.fee or 0.0) + self._fee(pos.quantity * fill_price, taker=False)
+
+        tp_price = self._tp_price(fill_price)
+        sl_price = self._sl_price(fill_price)
+        tp_sl_ok = False
+        try:
+            await self._connector.set_tpsl(  # type: ignore[union-attr]
+                symbol=pos.symbol,
+                side="buy",
+                amount=pos.quantity,
+                tp_price=tp_price,
+                sl_price=sl_price,
+            )
+            tp_sl_ok = True
+        except Exception as e:
+            logger.warning(f"TP/SL для {pos.symbol} будут выставлены в следующем цикле: {e}")
+        pos.tp_sl_set = tp_sl_ok
+
+        if tp_sl_ok:
+            try:
+                partial_trigger = self._partial_trigger_price(fill_price, tp_price)
+                await self._connector.place_reduce_only_limit(  # type: ignore[union-attr]
+                    symbol=pos.symbol,
+                    side="buy",
+                    amount=pos.quantity / 2,
+                    price=partial_trigger,
+                )
+            except Exception:
+                logger.warning(
+                    f"Не удалось выставить лимитник частичной фиксации для {pos.symbol}"
+                )
+
+        tp_pct = (tp_price / fill_price - 1) * 100
+        sl_pct = (1 - sl_price / fill_price) * 100
+        await self._notify(
+            f"✅ <b>Лимитник на вход исполнен</b> {pos.direction.upper()}\n"
+            f"Монета: {pos.symbol}\n"
+            f"Вход: ${fill_price:.6f}\n"
+            f"TP: ${tp_price:.6f} (+{tp_pct:.1f}%) | SL: ${sl_price:.6f} (-{sl_pct:.1f}%)"
+        )
+        logger.info(f"Pending-вход исполнен: {pos.symbol} @ {fill_price:.6f}")
+        self._reset_errors(pos.symbol)
+
+    async def _expire_pending_entry(self, pos: Trade) -> None:
+        """Лимитник на вход не исполнился за отведённое время — снять."""
+        try:
+            await self._connector.cancel_all_orders(pos.symbol)  # type: ignore[union-attr]
+        except Exception:
+            logger.warning(f"Не удалось отменить лимитник входа для {pos.symbol}")
+        pos.status = "expired"
+        await self._notify(
+            f"⌛ <b>Лимитник на вход истёк</b>\n"
+            f"Монета: {pos.symbol}\n"
+            f"Цена не откатилась до ${pos.entry_price:.6f} за "
+            f"{self.config.pending_entry_timeout_minutes:.0f} мин — сетап устарел"
+        )
+        logger.info(f"Pending-вход истёк: {pos.symbol}")
 
     # ==================================================================
     # MONITORING
@@ -754,9 +937,11 @@ class PositionManager:
         return notional * (rate / 100)
 
     async def _count_open(self, session: AsyncSession) -> int:
+        """Открытые позиции + pending-заявки на вход (обе занимают "слот" max_positions)."""
         from sqlalchemy import func
         stmt = (
-            select(func.count()).select_from(Trade).where(Trade.status == "open")
+            select(func.count()).select_from(Trade)
+            .where(Trade.status.in_(["open", "pending"]))
         )
         result = await session.execute(stmt)
         return result.scalar() or 0
@@ -779,9 +964,10 @@ class PositionManager:
         return result.first() is not None
 
     async def _has_position(self, session: AsyncSession, symbol: str) -> bool:
+        """Есть ли уже открытая позиция или pending-заявка на вход по символу."""
         stmt = (
             select(Trade)
-            .where(Trade.symbol == symbol, Trade.status == "open")
+            .where(Trade.symbol == symbol, Trade.status.in_(["open", "pending"]))
             .limit(1)
         )
         result = await session.execute(stmt)

@@ -187,7 +187,7 @@ class TelegramNotifier:
 
     async def send_signal(self, signal: Signal, status: str = "disabled") -> None:
         """Отправить торговый сигнал.
-        status: opened | limit | duplicate | cooldown | no_price | error | disabled."""
+        status: opened | pending | limit | duplicate | cooldown | no_price | error | disabled."""
         if self._paused:
             logger.info(f"Сигнал {signal.symbol} пропущен: бот приостановлен")
             return
@@ -197,6 +197,7 @@ class TelegramNotifier:
 
         status_labels = {
             "opened": "🟢 Позиция открыта",
+            "pending": "⏳ Лимитник на вход выставлен (ждёт отката)",
             "limit": "⚠️ Нет свободных слотов (лимит)",
             "duplicate": "⚠️ Уже есть позиция по монете",
             "cooldown": "⏳ Кулдаун после закрытия",

@@ -173,6 +173,18 @@ class ExchangeConnector:
         )
         return {**raw, "fill_price": fill_price}
 
+    async def create_limit_order(
+        self, symbol: str, side: str, amount: float, price: float
+    ) -> dict:
+        """Лимитный ордер на открытие позиции (не reduce-only).
+        side = 'buy' | 'sell'. Используется для входа на откате
+        (pending_entry_pullback_pct) вместо немедленного market-входа."""
+        raw = await self._call("create_order", symbol, "limit", side, amount, price)
+        logger.info(
+            f"{self.exchange_id}: лимитник входа {side} {amount} {symbol} @ {price:.6f}"
+        )
+        return raw
+
     async def set_tpsl(
         self,
         symbol: str,

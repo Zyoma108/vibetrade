@@ -217,13 +217,28 @@ Application.start()
 2. **Бюджет риска**: `баланс × risk_per_trade_pct / 100 × position_size_mult × cb_mult` (с биржи), где `position_size_mult` — множитель рыночного режима, `cb_mult` — множитель Circuit Breaker
 3. **TP/SL**: `sl = entry × (1 − stop_loss_pct/100)`, `tp = entry + (entry × stop_loss_pct/100) × risk_reward_ratio`
 4. **Размер позиции**: `quantity = risk_budget / (entry × stop_loss_pct/100)`
-5. **Real**: `set_leverage()` → `create_market_order(buy)` → ожидание 2с → запрос реальной цены → `set_tpsl()` (TP/SL на бирже) → `place_reduce_only_limit` (частичная фиксация)
+5. **Real (`pending_entry_pullback_pct == 0`)**: `set_leverage()` → `create_market_order(buy)` → ожидание 2с → запрос реальной цены → `set_tpsl()` (TP/SL на бирже) → `place_reduce_only_limit` (частичная фиксация)
+
+### Pending-вход на откате (`pending_entry_pullback_pct`)
+
+Решает проблему покупки на пике пампа: детектор по конструкции подтверждает сетап только после `sustain_bars` свечей уже растущего объёма — вход market-ордером в этот момент часто оказывается локальным пиком движения (см. аудит db-analyst: 46-69% убыточных сделок показывали просадку ≥2-3% в первые 15 мин после входа, независимо от фильтров).
+
+Вместо немедленного market-ордера (`_place_market_entry`) при `pending_entry_pullback_pct > 0` выставляется **лимитный buy-ордер** на уровне `сигнальная_цена × (1 − pullback_pct/100)` (`_place_pending_entry`), с TP/SL/quantity, посчитанными сразу от известной цены лимита. `Trade.status = "pending"`, `pending_expires_at = now + pending_entry_timeout_minutes`. Pending-заявки занимают "слот" наравне с открытыми позициями (`_count_open`/`_has_position` учитывают оба статуса).
+
+Каждый цикл `check_pending_entries()`:
+- Если по символу появилась позиция на бирже → лимитник исполнился (как **maker**) → `_activate_pending_entry()`: перевод в `status="open"`, выставление TP/SL и лимитника частичной фиксации (то же самое, что раньше делалось сразу в `open_position`).
+- Если `now >= pending_expires_at` и позиции всё ещё нет → `_expire_pending_entry()`: отмена ордера, `status="expired"` (не считается ни открытой, ни закрытой сделкой).
+
+Бэктест (`runner.py`) симулирует то же самое: `PendingEntry` создаётся вместо `SimPosition` при сигнале, на каждом баре проверяется `low <= limit_price` (заполнение) или истечение таймаута — независимо от `CYCLE_DELAY_BARS`, как и проверка TP/SL уже открытых позиций.
+
+**Свип по `pending_entry_pullback_pct` (июль 2026, 3 БД, см. память `pending-entry-pullback-sweep-july-2026`)**: немонотонная зависимость — мелкий откат (0.3-0.8%) хуже baseline на всех базах, глубокий (≥1.2%) лучше на 2 из 3 (кроме 22.06-30.06, где лучшие движения не дают отката вообще). Выбрано `1.5%` как лучшее по сумме PnL и PnL/сделку в свипе, но подтверждено не на всех периодах — требует дальнейшей валидации на новых данных.
 
 ### Мониторинг (каждый цикл)
 1. Сверка позиций с биржей (закрытые по TP/SL → запись реальной цены выхода)
 2. Проверка исполнения лимитника частичной фиксации → перевод SL в безубыток
 3. **Partial close fallback**: если лимитник не был выставлен — проверка по тикеру, закрытие 50% + SL в безубыток
 4. **Time exit**: превышение `max_hold_hours` → закрытие по рынку
+5. **Pending-входы**: `check_pending_entries()` — исполнение или истечение таймаута (см. выше)
 
 ### Финансовый учёт
 - `pnl` — суммарный PnL по всей позиции, **net of fees** (включая частичные закрытия, минус комиссия всех "ног" сделки)
@@ -249,6 +264,8 @@ Application.start()
 | `taker_fee_pct` | 0.055 | Комиссия тейкера (market-ордер), % от notional |
 | `maker_fee_pct` | 0.02 | Комиссия мейкера (лимитный reduce-only ордер), % от notional |
 | `backtest_slippage_pct` | 0.3 | Допущение на проскальзывание входа в бэктесте, % (0 = выкл) |
+| `pending_entry_pullback_pct` | 1.5 | Вход лимитником на откате от цены сигнала, % (0 = выкл — market сразу) |
+| `pending_entry_timeout_minutes` | 9.0 | Через сколько минут снять неисполненный лимитник входа |
 
 ### Circuit Breaker (защита от серий убытков)
 

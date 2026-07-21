@@ -56,6 +56,27 @@ class SimPosition:
         self.fee = fee  # накопленная комиссия по всем "ногам" сделки
 
 
+class PendingEntry:
+    """Лимитник на вход, ожидающий отката от цены сигнала (pending_entry_pullback_pct)."""
+
+    __slots__ = (
+        "symbol", "limit_price", "signal_time", "expires_at",
+        "quantity", "tp_price", "sl_price", "fee",
+    )
+
+    def __init__(self, symbol: str, limit_price: float, signal_time: datetime,
+                 expires_at: datetime, quantity: float, tp_price: float,
+                 sl_price: float, fee: float):
+        self.symbol = symbol
+        self.limit_price = limit_price
+        self.signal_time = signal_time
+        self.expires_at = expires_at
+        self.quantity = quantity
+        self.tp_price = tp_price
+        self.sl_price = sl_price
+        self.fee = fee  # комиссия входа, известна заранее (maker, лимит известен)
+
+
 def _bar(rows, idx):
     if 0 <= idx < len(rows):
         return rows[idx]
@@ -115,8 +136,11 @@ async def run_backtest(
     cfg = settings.trading
 
     positions: list[SimPosition] = []
+    pending: list[PendingEntry] = []
     closed_trades: list[SimPosition] = []
     signals_count = 0
+    pending_filled = 0
+    pending_expired = 0
 
     # Circuit Breaker state
     cb_losses = 0
@@ -253,10 +277,38 @@ async def run_backtest(
                     else:
                         cb_losses += 1
 
+        # Проверяем pending-заявки на вход: исполнение (low коснулся лимита) или истечение таймаута.
+        # Проверяется на каждом баре, а не только в циклы сканирования — так же, как TP/SL/partial выше.
+        for pe in list(pending):
+            sym_data = symbols.get(pe.symbol)
+            if not sym_data:
+                continue
+            current_bar = None
+            for r in sym_data:
+                if r[1] == ts:
+                    current_bar = r
+                    break
+            if not current_bar:
+                continue
+            low = current_bar[4]
+            if low <= pe.limit_price:
+                pos = SimPosition(
+                    symbol=pe.symbol, entry_price=pe.limit_price, entry_time=ts,
+                    quantity=pe.quantity, tp_price=pe.tp_price, sl_price=pe.sl_price,
+                    fee=pe.fee,
+                )
+                positions.append(pos)
+                pending.remove(pe)
+                pending_filled += 1
+                continue
+            if ts >= pe.expires_at:
+                pending.remove(pe)
+                pending_expired += 1
+
         # Ищем сетапы только в «циклы сканирования»
         if ts_idx % CYCLE_DELAY_BARS != 0:
             continue
-        if len(positions) >= cfg.max_positions:
+        if len(positions) + len(pending) >= cfg.max_positions:
             continue
 
         # Circuit Breaker: проверка полной остановки
@@ -286,7 +338,7 @@ async def run_backtest(
             detector.apply_regime_multiplier(1.0)
 
         for sym, sym_data in symbols.items():
-            if len(positions) >= cfg.max_positions:
+            if len(positions) + len(pending) >= cfg.max_positions:
                 break
 
             bar_idx = -1
@@ -304,7 +356,7 @@ async def run_backtest(
             base = sym.split("/")[0].upper()
             if base in getattr(detector, '_exclude_coins', set()):
                 continue
-            if any(p.symbol == sym for p in positions):
+            if any(p.symbol == sym for p in positions) or any(pe.symbol == sym for pe in pending):
                 continue
 
             cooldown_cutoff = ts - timedelta(hours=cfg.cooldown_hours)
@@ -355,16 +407,34 @@ async def run_backtest(
             signals_count += 1
 
             signal_price = candle_slice[-1]["close"]
+            # Бюджет риска: % от виртуального депозита $1000
+            virtual_balance = 1000.0
+            risk_budget = virtual_balance * (cfg.risk_per_trade_pct / 100) * cb_mult
+
+            if cfg.pending_entry_pullback_pct > 0:
+                # Вход лимитником на откате — TP/SL/qty известны заранее (лимит фиксирован)
+                limit_price = signal_price * (1 - cfg.pending_entry_pullback_pct / 100)
+                sl_distance = limit_price * (cfg.stop_loss_pct / 100)
+                tp_distance = sl_distance * cfg.risk_reward_ratio
+                qty = risk_budget / sl_distance
+                tp = limit_price + tp_distance
+                sl = limit_price - sl_distance
+                entry_fee = _fee(cfg, qty * limit_price, taker=False)  # резидентный лимитник — maker
+                expires_at = ts + timedelta(minutes=cfg.pending_entry_timeout_minutes)
+
+                pending.append(PendingEntry(
+                    symbol=sym, limit_price=limit_price, signal_time=ts,
+                    expires_at=expires_at, quantity=qty, tp_price=tp, sl_price=sl,
+                    fee=entry_fee,
+                ))
+                continue
+
             # Реальный вход рыночным ордером хуже цены сигнала на величину проскальзывания
             entry_price = signal_price * (1 + cfg.backtest_slippage_pct / 100)
 
             # TP/SL: фиксированные проценты от цены входа (после проскальзывания)
             sl_distance = entry_price * (cfg.stop_loss_pct / 100)
             tp_distance = sl_distance * cfg.risk_reward_ratio
-
-            # Бюджет риска: % от виртуального депозита $1000
-            virtual_balance = 1000.0
-            risk_budget = virtual_balance * (cfg.risk_per_trade_pct / 100) * cb_mult
             qty = risk_budget / sl_distance
             tp = entry_price + tp_distance
             sl = entry_price - sl_distance
@@ -388,6 +458,9 @@ async def run_backtest(
             pos.pnl = (last_close - pos.entry_price) * pos.quantity + pos.partial_pnl - pos.fee
         pos.closed = True
         closed_trades.append(pos)
+
+    # Неисполненные к концу периода pending-заявки считаем истёкшими
+    pending_expired += len(pending)
 
     # Статистика
     wins = sum(1 for t in closed_trades if t.pnl > 0)
@@ -417,6 +490,8 @@ async def run_backtest(
         "sl_losses": sl_losses,
         "time_exits": time_exits,
         "partials": partials,
+        "pending_filled": pending_filled,
+        "pending_expired": pending_expired,
         "best": max(closed_trades, key=lambda t: t.pnl) if closed_trades else None,
         "worst": min(closed_trades, key=lambda t: t.pnl) if closed_trades else None,
         "period": f"{start_time} → {end_time}",
@@ -589,6 +664,13 @@ def main():
     print(f"  Комиссии всего:    ${result['total_fees']:.2f} (сред. ${result['avg_fee']:.4f}/сделку)")
     print(f"  TP: {result['tp_wins']} | SL: {result['sl_losses']} | Time: {result['time_exits']}")
     print(f"  Частичных закрытий: {result['partials']}")
+    if result["pending_filled"] or result["pending_expired"]:
+        total_pending = result["pending_filled"] + result["pending_expired"]
+        fill_rate = result["pending_filled"] / total_pending * 100 if total_pending else 0
+        print(
+            f"  Pending-входы:     исполнено {result['pending_filled']} / "
+            f"истекло {result['pending_expired']} ({fill_rate:.0f}% fill rate)"
+        )
     if result["best"]:
         print(f"  Лучшая:  {result['best'].symbol} ${result['best'].pnl:+.2f}")
     if result["worst"]:

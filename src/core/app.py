@@ -290,6 +290,11 @@ class Application:
             if closed:
                 logger.info(f"Закрыто позиций за цикл: {len(closed)}")
 
+            # Проверка pending-заявок на вход (лимитники на откате): исполнились или истёк таймаут
+            activated = await self._positions.check_pending_entries(session)
+            if activated:
+                logger.info(f"Активировано pending-входов за цикл: {len(activated)}")
+
         # 2. Аналитика — основная стратегия
         if self._detector:
             signals = await self._detector.analyze(session)
@@ -313,8 +318,8 @@ class Application:
                         session, sig, signal_id=db_signal.id
                     )
 
-                # Записываем причину пропуска в БД
-                if status != "opened":
+                # Записываем причину пропуска в БД ("pending" — не пропуск, а ожидание отката)
+                if status not in ("opened", "pending"):
                     db_signal.missed_reason = status
                     db_signal.missed_detail = detail
 

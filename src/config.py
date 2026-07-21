@@ -104,6 +104,8 @@ class TradingConfig(BaseModel):
     taker_fee_pct: float = Field(default=0.055, ge=0.0, le=1.0, description="Комиссия тейкера (market-ордер), % от notional (Bybit VIP0 по умолчанию)")
     maker_fee_pct: float = Field(default=0.02, ge=0.0, le=1.0, description="Комиссия мейкера (лимитный reduce-only ордер), % от notional (Bybit VIP0 по умолчанию)")
     backtest_slippage_pct: float = Field(default=0.3, ge=0.0, le=5.0, description="Допущение на проскальзывание входа в бэктесте, % (0 = выкл). Бэктест иначе входит по цене закрытия свечи, что оптимистичнее реального market-ордера")
+    pending_entry_pullback_pct: float = Field(default=0.0, ge=0.0, le=10.0, description="Вход лимитным ордером на откате от цены сигнала, % (0 = выкл — вход market сразу по сигналу, как раньше). Решает проблему покупки на пике пампа")
+    pending_entry_timeout_minutes: float = Field(default=9.0, ge=1.0, le=180.0, description="Через сколько минут снять неисполненный лимитник входа (актуально только если pending_entry_pullback_pct > 0)")
 
 
 class MarketContextConfig(BaseModel):

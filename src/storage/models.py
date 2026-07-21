@@ -91,11 +91,12 @@ class Trade(Base):
     exit_price: Mapped[float | None] = mapped_column(Float, nullable=True)
     exit_time: Mapped[datetime | None] = mapped_column(nullable=True)
     pnl: Mapped[float | None] = mapped_column(Float, nullable=True)
-    status: Mapped[str] = mapped_column(String(16), default="open")  # open / closed
+    status: Mapped[str] = mapped_column(String(16), default="open")  # pending / open / closed / expired
     tp_sl_set: Mapped[bool] = mapped_column(default=False)  # выставлены ли TP/SL на бирже
     partial_closed: Mapped[bool] = mapped_column(default=False)  # выполнено ли частичное закрытие
     partial_pnl: Mapped[float | None] = mapped_column(Float, nullable=True, default=0.0)  # PnL от частичных закрытий
     fee: Mapped[float | None] = mapped_column(Float, nullable=True, default=0.0)  # суммарная комиссия по всем "ногам" сделки (pnl уже net-of-fee)
+    pending_expires_at: Mapped[datetime | None] = mapped_column(nullable=True, default=None)  # когда снять неисполненный лимитник входа (status=pending)
 
 
 class MarketContextSnapshot(Base):
