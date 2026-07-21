@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.analytics.data_provider import CandleCache
 from src.analytics.market_context import MarketContext
+from src.config import TradingConfig
 from src.connectors.exchange import ExchangeConnector
 from src.storage.models import Candle, OpenInterest, Signal, Ticker, Trade
 
@@ -32,11 +33,13 @@ class AgentToolkit:
         connector: ExchangeConnector,
         candle_cache: CandleCache | None = None,
         market_ctx: MarketContext | None = None,
+        trading_config: TradingConfig | None = None,
     ):
         self._session = session
         self._connector = connector
         self._candle_cache = candle_cache
         self._market_ctx = market_ctx
+        self._trading_config = trading_config
         self.calls: list[dict] = []
 
     async def dispatch(self, name: str, tool_input: dict) -> dict:
@@ -190,13 +193,23 @@ class AgentToolkit:
         return {"window_minutes": minutes, "distinct_symbols_with_signals": len(symbols), "symbols": symbols}
 
     async def _tool_get_open_position(self, trade_id: int) -> dict:
-        """Текущее состояние своей открытой сделки (только для сопровождения)."""
+        """Текущее состояние своей открытой сделки: цены, стоп/тейк, PnL, сколько
+        уже продлевали удержание (только для сопровождения)."""
         trade = await self._session.get(Trade, trade_id)
         if not trade:
             return {"error": "trade not found"}
         now = datetime.now(tz=timezone.utc)
         age_hours = (now - trade.entry_time.replace(tzinfo=timezone.utc)).total_seconds() / 3600
         current_price = await self._current_price(trade.symbol)
+
+        sl_price = trade.current_sl_price
+        tp_price = None
+        if self._trading_config:
+            if sl_price is None:
+                sl_price = trade.entry_price * (1 - self._trading_config.stop_loss_pct / 100)
+            sl_distance = trade.entry_price * (self._trading_config.stop_loss_pct / 100)
+            tp_price = trade.entry_price + sl_distance * self._trading_config.risk_reward_ratio
+
         return {
             "symbol": trade.symbol,
             "direction": trade.direction,
@@ -205,6 +218,9 @@ class AgentToolkit:
             "age_hours": round(age_hours, 2),
             "partial_closed": trade.partial_closed,
             "current_price": current_price,
+            "current_sl_price": sl_price,
+            "tp_price": tp_price,
+            "hold_already_extended_hours": trade.llm_hold_extension_total_hours or 0.0,
             "unrealized_pnl_pct": (
                 round((current_price / trade.entry_price - 1) * 100, 2)
                 if current_price and trade.entry_price else None

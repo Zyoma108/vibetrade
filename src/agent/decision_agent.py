@@ -24,7 +24,7 @@ from src.agent.tools import ENTRY_TOOLS, FINAL_TOOL_SCHEMAS, REEVAL_TOOLS, Agent
 from src.analytics.base import Signal
 from src.analytics.data_provider import CandleCache
 from src.analytics.market_context import MarketContext
-from src.config import AgentConfig
+from src.config import AgentConfig, StrategyConfig, TradingConfig
 from src.connectors.exchange import ExchangeConnector
 from src.storage.models import Trade
 
@@ -98,17 +98,77 @@ class DecisionAgent:
         connector: ExchangeConnector,
         candle_cache: CandleCache | None = None,
         market_ctx: MarketContext | None = None,
+        trading_config: TradingConfig | None = None,
+        strategy_config: StrategyConfig | None = None,
     ):
         self.config = config
         self._connector = connector
         self._candle_cache = candle_cache
         self._market_ctx = market_ctx
+        self._trading_config = trading_config
+        self._strategy_config = strategy_config
         self._client = None
         if config.enabled:
             import anthropic
             self._client = anthropic.AsyncAnthropic()  # ANTHROPIC_API_KEY из окружения
         self._calls_today = 0
         self._calls_reset_at = datetime.now(tz=timezone.utc) + timedelta(days=1)
+
+        # Конфиг не меняется на лету (нет hot-reload) — строим один раз при старте,
+        # чтобы промпт всегда отражал РЕАЛЬНЫЕ пороги детектора и риск-параметры,
+        # а не текст, который может разойтись с конфигом при правке последнего.
+        self._strategy_briefing = self._build_strategy_briefing()
+
+    def _build_strategy_briefing(self) -> str:
+        """Динамический блок с фактическими параметрами стратегии — собирается из
+        живого конфига, а не хардкодится текстом (иначе разойдётся при правке
+        config.yaml). См. AGENTS.md, разделы 'Логика стратегий'/'Управление позициями'."""
+        sc, tc = self._strategy_config, self._trading_config
+        lines = ["### Параметры стратегии и аккаунта (актуальный конфиг — не переоткрывай эти проверки, они уже сделаны)"]
+
+        if sc:
+            excl = ", ".join(sc.exclude_coins) or "—"
+            lines.append(
+                f"- Детектор (long-only, альткоин-перпетуалы Bybit, мин. суточный объём "
+                f"${sc.min_volume_usdt:,.0f}, исключены: {excl}): сигнал уже подтверждён "
+                f"объёмом ≥x{sc.volume_surge_mult} от нормы за {sc.sustain_bars} свечей подряд, "
+                f"наклон OI ≥{sc.oi_slope_min_pct}%, рост цены {sc.price_growth_min_pct}–"
+                f"{sc.price_growth_max_pct}% за окно, плюс антиспайк/антидамп и exhaustion-фильтры "
+                f"(защита от входа на уже прошедшем хвосте пампа)."
+            )
+
+        if tc:
+            pullback = (
+                f", вход лимитником на откате {tc.pending_entry_pullback_pct}% от сигнальной цены "
+                f"(таймаут {tc.pending_entry_timeout_minutes:.0f} мин)"
+                if tc.pending_entry_pullback_pct > 0 else ""
+            )
+            tp_pct = tc.stop_loss_pct * tc.risk_reward_ratio
+            lines.append(
+                f"- Риск/исполнение на ЭТОМ (отдельном) аккаунте: риск {tc.risk_per_trade_pct}% "
+                f"от депозита на сделку, SL {tc.stop_loss_pct}% от входа, TP на "
+                f"{tc.risk_reward_ratio}x риска (~{tp_pct:.1f}% от входа), плечо {tc.leverage}x, "
+                f"частичная фиксация 50% на {tc.partial_close_pct}% пути до TP (стоп переводится "
+                f"в безубыток), макс. удержание {tc.max_hold_hours}ч{pullback}."
+            )
+            lines.append(
+                f"- Circuit Breaker уже применяется независимо от тебя: после "
+                f"{tc.circuit_breaker_loss_streak_reduce} убытков подряд размер позиции снижается "
+                f"до {tc.circuit_breaker_reduce_mult_pct:.0f}%, после "
+                f"{tc.circuit_breaker_loss_streak_stop} — торговля останавливается на "
+                f"{tc.circuit_breaker_stop_minutes} мин."
+            )
+
+        lines.append(
+            "- Рыночный режим уже отфильтрован до тебя: новые входы не открываются в risk_off "
+            "и в cautious при Supertrend=red (детали текущего режима — инструмент get_market_context)."
+        )
+        lines.append(
+            "- Известная проблема, которую твой анализ должен смягчать: детектор по конструкции "
+            "подтверждает сетап только после нескольких минут уже растущего движения — "
+            "формальный вход часто оказывается близко к локальному пику движения."
+        )
+        return "\n".join(lines)
 
     def _check_budget(self) -> bool:
         now = datetime.now(tz=timezone.utc)
@@ -125,17 +185,18 @@ class DecisionAgent:
         if not self._check_budget():
             return EntryVerdict(approved=True, reasoning="daily_budget_exhausted", failed=True)
 
-        toolkit = AgentToolkit(session, self._connector, self._candle_cache, self._market_ctx)
+        toolkit = AgentToolkit(session, self._connector, self._candle_cache, self._market_ctx, self._trading_config)
         user_prompt = (
             f"Новый сигнал пампа: {signal.symbol}, направление {signal.direction}, "
             f"уверенность {signal.confidence}%.\n{signal.message}\n\n"
             "Собери данные инструментами и реши: одобрить вход или отклонить. "
             "Заверши вызовом submit_entry_decision."
         )
+        system_prompt = f"{ENTRY_SYSTEM_PROMPT}\n\n{self._strategy_briefing}"
         start = time.monotonic()
         try:
             result = await asyncio.wait_for(
-                self._run_loop(user_prompt, ENTRY_SYSTEM_PROMPT, ENTRY_TOOLS, toolkit, "submit_entry_decision"),
+                self._run_loop(user_prompt, system_prompt, ENTRY_TOOLS, toolkit, "submit_entry_decision"),
                 timeout=self.config.decision_timeout_seconds,
             )
         except asyncio.TimeoutError:
@@ -161,7 +222,7 @@ class DecisionAgent:
         if not self._check_budget():
             return ReevalVerdict(action="hold", reasoning="daily_budget_exhausted", failed=True)
 
-        toolkit = AgentToolkit(session, self._connector, self._candle_cache, self._market_ctx)
+        toolkit = AgentToolkit(session, self._connector, self._candle_cache, self._market_ctx, self._trading_config)
         age_hours = (
             datetime.now(tz=timezone.utc) - trade.entry_time.replace(tzinfo=timezone.utc)
         ).total_seconds() / 3600
@@ -170,13 +231,15 @@ class DecisionAgent:
             f"вход ${trade.entry_price:.6f}, возраст {age_hours:.1f}ч, "
             f"частично закрыта: {trade.partial_closed}.\n"
             "Реши: держать без изменений, подтянуть стоп, продлить время удержания, "
-            "или закрыть досрочно. Заверши вызовом submit_reeval_decision.\n"
+            "или закрыть досрочно. Вызови get_open_position, чтобы узнать текущий стоп/тейк "
+            "и нереализованный PnL перед решением. Заверши вызовом submit_reeval_decision.\n"
             f"(trade_id для инструмента get_open_position: {trade.id})"
         )
+        system_prompt = f"{REEVAL_SYSTEM_PROMPT}\n\n{self._strategy_briefing}"
         start = time.monotonic()
         try:
             result = await asyncio.wait_for(
-                self._run_loop(user_prompt, REEVAL_SYSTEM_PROMPT, REEVAL_TOOLS, toolkit, "submit_reeval_decision"),
+                self._run_loop(user_prompt, system_prompt, REEVAL_TOOLS, toolkit, "submit_reeval_decision"),
                 timeout=self.config.decision_timeout_seconds,
             )
         except asyncio.TimeoutError:

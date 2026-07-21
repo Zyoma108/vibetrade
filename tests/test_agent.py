@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from src.agent.decision_agent import DecisionAgent
 from src.analytics.base import Signal
-from src.config import AgentConfig, TradingConfig
+from src.config import AgentConfig, StrategyConfig, TradingConfig
 from src.executor.position_manager import PositionManager
 from src.storage.models import Base, Trade
 
@@ -437,3 +437,47 @@ class TestDecisionAgentReevalLoop:
         v2 = await agent.evaluate_position(MagicMock(), _trade())
         assert v2.failed is True
         assert v2.action == "hold"
+
+
+# ---------------------------------------------------------------------------
+# Strategy briefing — the model must see real config values, not generic text
+# ---------------------------------------------------------------------------
+
+
+class TestStrategyBriefing:
+    def test_reflects_real_config_values(self):
+        tc = _trading_config(stop_loss_pct=7.5, risk_reward_ratio=2.5, leverage=8, max_hold_hours=36.0)
+        sc = StrategyConfig(volume_surge_mult=4.2, sustain_bars=6, oi_slope_min_pct=3.3)
+        agent = DecisionAgent(
+            config=_agent_config(enabled=False),
+            connector=MagicMock(exchange_id="bybit"),
+            trading_config=tc,
+            strategy_config=sc,
+        )
+        briefing = agent._strategy_briefing
+        assert "7.5" in briefing
+        assert "2.5" in briefing
+        assert "8x" in briefing
+        assert "x4.2" in briefing
+        assert "6 свечей" in briefing
+
+    def test_survives_missing_configs(self):
+        """No trading_config/strategy_config passed (e.g. old caller) — must not crash."""
+        agent = DecisionAgent(config=_agent_config(enabled=False), connector=MagicMock(exchange_id="bybit"))
+        assert "Circuit Breaker" not in agent._strategy_briefing
+        assert "известная проблема" in agent._strategy_briefing.lower()
+
+    @pytest.mark.asyncio
+    async def test_included_in_system_prompt_sent_to_model(self):
+        tc = _trading_config(stop_loss_pct=6.0)
+        agent = DecisionAgent(
+            config=_agent_config(enabled=False), connector=MagicMock(exchange_id="bybit"), trading_config=tc,
+        )
+        agent._client = MagicMock()
+        create = AsyncMock(
+            return_value=_response([_tool_use("submit_entry_decision", {"approve": True, "reasoning": "ok"})])
+        )
+        agent._client.messages.create = create
+        await agent.evaluate_entry(MagicMock(), _signal())
+        sent_system_prompt = create.call_args.kwargs["system"]
+        assert "6.0" in sent_system_prompt

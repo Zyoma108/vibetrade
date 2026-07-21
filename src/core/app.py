@@ -231,6 +231,8 @@ class Application:
                         connector=self._agent_connector,
                         candle_cache=self._candle_cache,
                         market_ctx=self._market_ctx,
+                        trading_config=self.settings.trading,
+                        strategy_config=self.settings.strategy,
                     )
                     logger.info(
                         f"ИИ-режим включён (dry_run={agent_cfg.dry_run}, "

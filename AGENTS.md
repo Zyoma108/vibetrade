@@ -314,6 +314,18 @@ Application.start()
 (`agent_decisions` + `trades.source='agent'`), т.к. цель — набрать данные для анализа, а не
 получать сигналы в реальном времени.
 
+### Системный промпт: полная картина стратегии, не только общие рекомендации
+`DecisionAgent._build_strategy_briefing()` собирает динамический блок из ЖИВОГО конфига
+(`StrategyConfig`/`TradingConfig`, а не хардкод текстом — иначе разойдётся при правке
+`config.yaml`) и добавляет его к системному промпту при каждом вызове: реальные пороги детектора
+(`volume_surge_mult`, `sustain_bars`, `oi_slope_min_pct`, диапазон роста цены, антиспайк/exhaustion),
+реальные риск-параметры этого аккаунта (`stop_loss_pct`, `risk_reward_ratio`, `leverage`,
+`partial_close_pct`, `max_hold_hours`, `pending_entry_pullback_pct`), пороги Circuit Breaker и
+явное упоминание известной проблемы позднего входа (см. `pending-entry-pullback-sweep-july-2026`).
+Строится один раз в `__init__` (конфиг не меняется на лету). Для сопровождения `get_open_position`
+дополнительно отдаёт текущий `current_sl_price`/`tp_price` и сколько удержание уже продлевалось —
+без этого агент не мог бы осмысленно решать `tighten_sl`, не зная, где сейчас стоит стоп.
+
 ### Вход (`_run_agent_entry` в `app.py`)
 На каждый сигнал (после алгоритмического пути) вызывается `DecisionAgent.evaluate_entry()` —
 LLM с tool-calling (Claude, `src/agent/tools.py` + `src/agent/decision_agent.py`) сам решает,
