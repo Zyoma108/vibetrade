@@ -61,9 +61,7 @@ tests/
 │   ├── test_position_manager.py  # Тесты PositionManager (Circuit Breaker, TP/SL, позиции)
 │   └── test_agent.py             # Тесты ИИ-режима (tighten SL, hold extension, source scoping, AgentToolkit, strategy briefing)
 config/
-├── config.yaml                # Боевая конфигурация
-├── config.example.yaml        # Пример с комментариями
-└── test-config.yaml           # Тестовая конфигурация
+└── config.yaml                # Боевая конфигурация (единственная — YAML + `${ENV_VAR}` из `.env`)
 data/
 └── trading_bot.db             # База SQLite (создаётся при первом запуске)
 migrations/                    # Alembic-миграции

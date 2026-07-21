@@ -3,7 +3,7 @@
 
 Использование:
     python -m src.backtest.runner
-    python -m src.backtest.runner --db data/trading_bot.db --config config/test-config.yaml
+    python -m src.backtest.runner --db data/trading_bot.db --config config/config.yaml
 """
 
 import argparse

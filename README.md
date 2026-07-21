@@ -11,7 +11,6 @@ source .venv/bin/activate
 pip install -e .
 
 # Конфигурация
-cp config/config.example.yaml config/config.yaml
 cp .env.example .env
 # Заполни .env: BYBIT_API_KEY, BYBIT_SECRET, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
 
