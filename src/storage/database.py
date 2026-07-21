@@ -13,10 +13,19 @@ engine = create_async_engine(
 
 
 @event.listens_for(engine.sync_engine, "connect")
-def _set_wal(dbapi_connection, connection_record):
-    """Включить WAL-режим — конкурентные чтение и запись."""
+def _set_journal_mode(dbapi_connection, connection_record):
+    """Обычный rollback journal, не WAL.
+
+    WAL полагается на shared-memory индекс (-shm) через mmap для координации
+    между соединениями — это ненадёжно на bind-mount томах Docker Desktop for
+    Mac (osxfs/gRPC-FUSE), независимо от того, кто пишет: хост или несколько
+    соединений внутри одного контейнера. 21-22.07.2026 это дважды привело к
+    порче БД (market_context_snapshots, потом ix_candles_symbol). DELETE-режим
+    использует обычные файловые локи вместо mmap — медленнее при конкурентной
+    записи, но надёжнее на этой файловой системе. См. AGENTS.md, "ИИ-режим".
+    """
     cursor = dbapi_connection.cursor()
-    cursor.execute("PRAGMA journal_mode=WAL")
+    cursor.execute("PRAGMA journal_mode=DELETE")
     cursor.close()
 
 
