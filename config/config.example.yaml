@@ -67,21 +67,20 @@ trading:
   pending_entry_pullback_pct: 0.0   # вход лимитником на откате от сигнала, % (0 = выкл, market сразу)
   pending_entry_timeout_minutes: 9.0  # через сколько минут снять неисполненный лимитник входа
 
-# ИИ-режим: LLM-агент (Claude) оценивает те же сигналы и торгует на ОТДЕЛЬНОМ аккаунте
-# биржи, параллельно алгоритмической торговле (которая не меняется). См. AGENTS.md.
+# ИИ-режим: оркестратор-скилл (автономный /loop) + сабагенты entry-agent/reeval-agent
+# оценивают те же сигналы и торгуют на ОТДЕЛЬНОМ аккаунте биржи, параллельно алгоритмической
+# торговле (которая не меняется). LLM — через Claude Code (подписка), не Anthropic API. См. AGENTS.md.
 agent:
   enabled: false
   dry_run: true
   exchange: bybit
   api_key: "${AGENT_BYBIT_API_KEY}"
   secret: "${AGENT_BYBIT_SECRET}"
-  model: claude-sonnet-5
+  model: sonnet
   entry_gate_enabled: true
   reeval_enabled: true
   reeval_interval_minutes: 20.0
   watch_interval_seconds: 30
-  decision_timeout_seconds: 45.0
-  max_tool_calls_per_decision: 6
   max_hold_extension_hours: 12.0
   max_hold_extension_total_hours: 24.0
   allow_sl_tighten: true

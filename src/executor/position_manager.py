@@ -1,20 +1,15 @@
 import asyncio
-import json
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING, Callable, Coroutine
+from typing import Callable, Coroutine
 
 from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.agent.decision_agent import AGENT_VERSION
 from src.analytics.base import Signal
 from src.config import AgentConfig, TradingConfig
 from src.connectors.exchange import ExchangeConnector
-from src.storage.models import AgentDecision, Ticker, Trade
-
-if TYPE_CHECKING:
-    from src.agent.decision_agent import DecisionAgent
+from src.storage.models import Ticker, Trade
 
 logger = logging.getLogger(__name__)
 
@@ -52,9 +47,6 @@ class PositionManager:
         # Защита от каскада ошибок по символу
         self._error_counts: dict[str, int] = {}  # symbol → кол-во ошибок подряд
         self._error_cooldown_until: dict[str, datetime] = {}  # symbol → не пытаться до
-
-        # ИИ-агент: троттлинг переоценки открытых позиций (trade.id → когда переоценивали)
-        self._last_reeval_at: dict[int, datetime] = {}
 
     @property
     def _has_connector(self) -> bool:
@@ -1097,7 +1089,11 @@ class PositionManager:
                 logger.exception("Ошибка отправки торгового уведомления")
 
     # ==================================================================
-    # ИИ-АГЕНТ — переоценка своих открытых позиций (source='agent' только)
+    # ИИ-АГЕНТ — исполнительные примитивы (source='agent' только).
+    # Решение принимает оркестратор (Claude Code /loop + сабагенты), эти методы
+    # вызываются из scripts/agent_actions.py — не из Python-цикла бота. Здесь же
+    # жёсткие рельсы (SL нельзя ослабить, продление капается конфигом), которые
+    # действуют независимо от того, что попросила модель.
     # ==================================================================
 
     def _current_sl_price(self, pos: Trade) -> float:
@@ -1176,66 +1172,6 @@ class PositionManager:
         exit_price = current_price or pos.entry_price
         await self._close_position(pos, exit_price, "llm_close")
         return True
-
-    async def llm_reevaluate_positions(
-        self, session: AsyncSession, agent: "DecisionAgent"
-    ) -> list[dict]:
-        """Периодическая переоценка своих открытых позиций ИИ-агентом.
-        Троттлинг — раз в agent.reeval_interval_minutes на сделку (в памяти,
-        сбрасывается при рестарте — не влияет на безопасность, максимум
-        лишняя внеочередная переоценка)."""
-        cfg = self._agent_config
-        if not cfg or not cfg.enabled or not cfg.reeval_enabled:
-            return []
-
-        stmt = select(Trade).where(Trade.status == "open", Trade.source == self.source)
-        positions = (await session.execute(stmt)).scalars().all()
-        if not positions:
-            return []
-
-        now = datetime.now(tz=timezone.utc)
-        interval = timedelta(minutes=cfg.reeval_interval_minutes)
-        decisions = []
-        for pos in positions:
-            last = self._last_reeval_at.get(pos.id)
-            if last and now - last < interval:
-                continue
-            self._last_reeval_at[pos.id] = now
-
-            verdict = await agent.evaluate_position(session, pos)
-            applied = await self._apply_reeval_verdict(session, pos, verdict)
-            session.add(AgentDecision(
-                timestamp=now,
-                kind="reeval",
-                trade_id=pos.id,
-                symbol=pos.symbol,
-                verdict=verdict.action,
-                reasoning=verdict.reasoning,
-                tool_calls_json=json.dumps(verdict.tool_trace, default=str),
-                applied=applied,
-                model=cfg.model,
-                agent_version=AGENT_VERSION,
-                latency_ms=verdict.latency_ms,
-            ))
-            decisions.append({"trade_id": pos.id, "symbol": pos.symbol, "action": verdict.action, "applied": applied})
-        return decisions
-
-    async def _apply_reeval_verdict(self, session: AsyncSession, pos: Trade, verdict) -> bool:
-        """Применить решение агента к сделке. dry_run/failed/hold → ничего не меняем."""
-        cfg = self._agent_config
-        if not cfg or verdict.failed or verdict.action == "hold":
-            return False
-        if cfg.dry_run:
-            return False  # решение залогировано (AgentDecision), но не применено
-
-        if verdict.action == "tighten_sl" and cfg.allow_sl_tighten and verdict.new_sl_price:
-            return await self.apply_agent_tighten_sl(pos, verdict.new_sl_price)
-        if verdict.action == "extend_hold" and verdict.extend_hours:
-            return await self.apply_agent_hold_extension(pos, verdict.extend_hours)
-        if verdict.action == "close" and cfg.allow_early_close:
-            current_price = await self._get_current_price(session, pos.symbol)
-            return await self.apply_agent_close(session, pos, current_price)
-        return False
 
     # ------------------------------------------------------------------
     # Error cascade protection

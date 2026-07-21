@@ -1,10 +1,13 @@
 """Инструменты (tools) для ИИ-агента — только чтение данных, без побочных
-эффектов на торговлю. Решения о входе/сопровождении принимает DecisionAgent,
-исполнение — PositionManager (отдельный аккаунт, source='agent').
+эффектов на торговлю. Решения о входе/сопровождении принимает оркестратор
+(Claude Code /loop-скилл + сабагенты entry-agent/reeval-agent), исполнение —
+PositionManager (отдельный аккаунт, source='agent') через scripts/agent_actions.py.
 
 Каждый инструмент отдаёт агрегированные компактные метрики, а не сырые дампы
 API — иначе контекст LLM быстро раздувается шумом (см. AGENTS.md, раздел
-про ИИ-режим)."""
+про ИИ-режим). Диспетчер (`AgentToolkit.dispatch`) вызывается из
+scripts/agent_data.py — это единственный Bash-инструмент, разрешённый
+сабагентам."""
 
 from __future__ import annotations
 
@@ -15,30 +18,43 @@ from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.analytics.data_provider import CandleCache
-from src.analytics.market_context import MarketContext
-from src.config import TradingConfig
+from src.config import StrategyConfig, TradingConfig
 from src.connectors.exchange import ExchangeConnector
-from src.storage.models import Candle, OpenInterest, Signal, Ticker, Trade
+from src.storage.models import (
+    AgentDecision,
+    Candle,
+    MarketContextSnapshot,
+    OpenInterest,
+    Signal,
+    Ticker,
+    Trade,
+)
 
 logger = logging.getLogger(__name__)
 
+# Версия инструкций сабагентов/оркестратора — логируется с каждым решением
+# (AgentDecision.agent_version), чтобы позже сопоставить качество решений с
+# конкретной редакцией .claude/agents/*.md и .claude/skills/vibetrade-agent-loop.
+# Бампнуть при значимой правке промптов/скилла.
+AGENT_VERSION = "v2-orchestrator"
+
 
 class AgentToolkit:
-    """Один экземпляр на вызов агента (evaluate_entry/evaluate_position).
-    Копит трейс вызовов инструментов в self.calls — для аудита в AgentDecision."""
+    """Один экземпляр на вызов сабагента (короткоживущий процесс
+    scripts/agent_data.py). Копит трейс вызовов в self.calls, если вызывающий
+    код хочет его залогировать (не обязательно — оркестратор сам решает, что
+    писать в agent_decisions)."""
 
     def __init__(
         self,
         session: AsyncSession,
         connector: ExchangeConnector,
         candle_cache: CandleCache | None = None,
-        market_ctx: MarketContext | None = None,
         trading_config: TradingConfig | None = None,
     ):
         self._session = session
         self._connector = connector
         self._candle_cache = candle_cache
-        self._market_ctx = market_ctx
         self._trading_config = trading_config
         self.calls: list[dict] = []
 
@@ -157,12 +173,24 @@ class AgentToolkit:
 
     async def _tool_get_market_context(self) -> dict:
         """Текущий рыночный режим (risk_on/cautious/risk_off), тренд и изменение
-        цены BTC/OTHERS за 1ч и 4ч."""
-        if not self._market_ctx or not self._market_ctx.ready:
+        цены BTC/OTHERS за 1ч и 4ч. Читает последний снимок из БД (пишется ботом
+        каждый цикл) — не требует живого подключения к TradingView/бирже."""
+        stmt = select(MarketContextSnapshot).order_by(desc(MarketContextSnapshot.timestamp)).limit(1)
+        snap = (await self._session.execute(stmt)).scalar_one_or_none()
+        if not snap or not snap.ready:
             return {"error": "market context unavailable"}
-        snap = self._market_ctx.get_snapshot()
-        snap.pop("timestamp", None)
-        return snap
+        return {
+            "regime": snap.regime,
+            "trend": snap.trend,
+            "supertrend_color": snap.supertrend_color,
+            "btc_change_1h": snap.btc_change_1h,
+            "btc_change_4h": snap.btc_change_4h,
+            "others_change_1h": snap.others_change_1h,
+            "others_change_4h": snap.others_change_4h,
+            "snapshot_age_minutes": round(
+                (datetime.now(tz=timezone.utc) - snap.timestamp.replace(tzinfo=timezone.utc)).total_seconds() / 60, 1
+            ),
+        }
 
     async def _tool_get_higher_timeframe_history(
         self, symbol: str, timeframe: str = "4h", limit: int = 90
@@ -211,6 +239,7 @@ class AgentToolkit:
             tp_price = trade.entry_price + sl_distance * self._trading_config.risk_reward_ratio
 
         return {
+            "trade_id": trade.id,
             "symbol": trade.symbol,
             "direction": trade.direction,
             "entry_price": trade.entry_price,
@@ -227,125 +256,83 @@ class AgentToolkit:
             ),
         }
 
+    async def _tool_get_recent_agent_decisions(self, trade_id: int, limit: int = 3) -> dict:
+        """Прошлые решения агента по этой конкретной сделке (verdict + reasoning +
+        когда) — континуити для сопровождения: видно, что уже решалось и почему,
+        без необходимости держать одну LLM-сессию открытой все время жизни сделки."""
+        stmt = (
+            select(AgentDecision)
+            .where(AgentDecision.trade_id == trade_id, AgentDecision.kind == "reeval")
+            .order_by(desc(AgentDecision.timestamp))
+            .limit(limit)
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return {
+            "trade_id": trade_id,
+            "past_decisions": [
+                {
+                    "timestamp": r.timestamp.isoformat(),
+                    "verdict": r.verdict,
+                    "reasoning": r.reasoning,
+                    "applied": r.applied,
+                }
+                for r in rows
+            ],
+        }
 
-# ----------------------------------------------------------------------
-# Anthropic tool schemas
-# ----------------------------------------------------------------------
 
-SHARED_TOOLS: list[dict] = [
-    {
-        "name": "get_symbol_snapshot",
-        "description": "Последние N свечей текущего таймфрейма для монеты: диапазон цены, объём, % изменения.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "symbol": {"type": "string"},
-                "bars": {"type": "integer", "default": 30},
-            },
-            "required": ["symbol"],
-        },
-    },
-    {
-        "name": "get_oi_trend",
-        "description": "Тренд открытого интереса (OI) за последние N точек — рост OI вместе с объёмом означает новые деньги, а не перекладывание позиций.",
-        "input_schema": {
-            "type": "object",
-            "properties": {"symbol": {"type": "string"}, "n_bars": {"type": "integer", "default": 10}},
-            "required": ["symbol"],
-        },
-    },
-    {
-        "name": "get_funding_rate",
-        "description": "Текущая funding rate по перпетуалу. Сильно положительная funding = лонги уже перегружены, повышенный риск лонг-сквиза.",
-        "input_schema": {"type": "object", "properties": {"symbol": {"type": "string"}}, "required": ["symbol"]},
-    },
-    {
-        "name": "get_order_book_summary",
-        "description": "Агрегированная сводка стакана: спред и глубина в USD на ±0.5%/±1% от средней цены. Показывает исполнимость.",
-        "input_schema": {"type": "object", "properties": {"symbol": {"type": "string"}}, "required": ["symbol"]},
-    },
-    {
-        "name": "get_symbol_pump_history",
-        "description": "Последние N сигналов по монете и их исход (сделка/пропуск/PnL) — история повторных пампов.",
-        "input_schema": {
-            "type": "object",
-            "properties": {"symbol": {"type": "string"}, "limit": {"type": "integer", "default": 5}},
-            "required": ["symbol"],
-        },
-    },
-    {
-        "name": "get_market_context",
-        "description": "Текущий рыночный режим (risk_on/cautious/risk_off), тренд и изменение цены BTC/OTHERS.",
-        "input_schema": {"type": "object", "properties": {}},
-    },
-    {
-        "name": "get_higher_timeframe_history",
-        "description": "OHLC-свечи на старшем таймфрейме (напр. 4h/1d) для поиска уровней поддержки/сопротивления.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "symbol": {"type": "string"},
-                "timeframe": {"type": "string", "default": "4h", "description": "например 1h, 4h, 1d"},
-                "limit": {"type": "integer", "default": 90},
-            },
-            "required": ["symbol"],
-        },
-    },
-    {
-        "name": "get_recent_signal_activity",
-        "description": "Сколько разных монет дали сигнал за последние N минут — прокси секторальной ротации против изолированного пампа одной монеты.",
-        "input_schema": {
-            "type": "object",
-            "properties": {"minutes": {"type": "integer", "default": 15}},
-        },
-    },
-]
+def build_strategy_briefing(
+    strategy_config: StrategyConfig | None, trading_config: TradingConfig | None
+) -> str:
+    """Динамический блок с фактическими параметрами стратегии — собирается из
+    живого конфига, а не хардкодится текстом (иначе разойдётся при правке
+    config.yaml). Вызывается через scripts/agent_briefing.py, оркестратор
+    вставляет вывод в промпт сабагенту при каждом диспетче. См. AGENTS.md,
+    разделы 'Логика стратегий'/'Управление позициями'."""
+    lines = ["### Параметры стратегии и аккаунта (актуальный конфиг — не переоткрывай эти проверки, они уже сделаны)"]
 
-ENTRY_TOOLS: list[dict] = SHARED_TOOLS
+    if strategy_config:
+        sc = strategy_config
+        excl = ", ".join(sc.exclude_coins) or "—"
+        lines.append(
+            f"- Детектор (long-only, альткоин-перпетуалы Bybit, мин. суточный объём "
+            f"${sc.min_volume_usdt:,.0f}, исключены: {excl}): сигнал уже подтверждён "
+            f"объёмом ≥x{sc.volume_surge_mult} от нормы за {sc.sustain_bars} свечей подряд, "
+            f"наклон OI ≥{sc.oi_slope_min_pct}%, рост цены {sc.price_growth_min_pct}–"
+            f"{sc.price_growth_max_pct}% за окно, плюс антиспайк/антидамп и exhaustion-фильтры "
+            f"(защита от входа на уже прошедшем хвосте пампа)."
+        )
 
-REEVAL_TOOLS: list[dict] = SHARED_TOOLS + [
-    {
-        "name": "get_open_position",
-        "description": "Текущее состояние открытой сделки: возраст, цена входа/текущая, нереализованный PnL%.",
-        "input_schema": {"type": "object", "properties": {"trade_id": {"type": "integer"}}, "required": ["trade_id"]},
-    },
-]
+    if trading_config:
+        tc = trading_config
+        pullback = (
+            f", вход лимитником на откате {tc.pending_entry_pullback_pct}% от сигнальной цены "
+            f"(таймаут {tc.pending_entry_timeout_minutes:.0f} мин)"
+            if tc.pending_entry_pullback_pct > 0 else ""
+        )
+        tp_pct = tc.stop_loss_pct * tc.risk_reward_ratio
+        lines.append(
+            f"- Риск/исполнение на ЭТОМ (отдельном) аккаунте: риск {tc.risk_per_trade_pct}% "
+            f"от депозита на сделку, SL {tc.stop_loss_pct}% от входа, TP на "
+            f"{tc.risk_reward_ratio}x риска (~{tp_pct:.1f}% от входа), плечо {tc.leverage}x, "
+            f"частичная фиксация 50% на {tc.partial_close_pct}% пути до TP (стоп переводится "
+            f"в безубыток), макс. удержание {tc.max_hold_hours}ч{pullback}."
+        )
+        lines.append(
+            f"- Circuit Breaker уже применяется независимо от тебя: после "
+            f"{tc.circuit_breaker_loss_streak_reduce} убытков подряд размер позиции снижается "
+            f"до {tc.circuit_breaker_reduce_mult_pct:.0f}%, после "
+            f"{tc.circuit_breaker_loss_streak_stop} — торговля останавливается на "
+            f"{tc.circuit_breaker_stop_minutes} мин."
+        )
 
-SUBMIT_ENTRY_DECISION_TOOL: dict = {
-    "name": "submit_entry_decision",
-    "description": "Завершить анализ и вынести решение по входу в сделку.",
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "approve": {"type": "boolean", "description": "true = одобрить вход, false = отклонить"},
-            "reasoning": {"type": "string", "description": "Краткое обоснование на основе собранных данных"},
-        },
-        "required": ["approve", "reasoning"],
-    },
-}
-
-SUBMIT_REEVAL_DECISION_TOOL: dict = {
-    "name": "submit_reeval_decision",
-    "description": "Завершить переоценку открытой сделки и вынести решение.",
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "action": {"type": "string", "enum": ["hold", "tighten_sl", "extend_hold", "close"]},
-            "reasoning": {"type": "string"},
-            "new_sl_price": {
-                "type": "number",
-                "description": "Только для action=tighten_sl — новая цена стопа (должна быть строже текущей)",
-            },
-            "extend_hours": {
-                "type": "number",
-                "description": "Только для action=extend_hold — на сколько часов продлить удержание",
-            },
-        },
-        "required": ["action", "reasoning"],
-    },
-}
-
-FINAL_TOOL_SCHEMAS: dict[str, dict] = {
-    "submit_entry_decision": SUBMIT_ENTRY_DECISION_TOOL,
-    "submit_reeval_decision": SUBMIT_REEVAL_DECISION_TOOL,
-}
+    lines.append(
+        "- Рыночный режим уже отфильтрован до тебя: новые входы не открываются в risk_off "
+        "и в cautious при Supertrend=red (детали текущего режима — инструмент get_market_context)."
+    )
+    lines.append(
+        "- Известная проблема, которую твой анализ должен смягчать: детектор по конструкции "
+        "подтверждает сетап только после нескольких минут уже растущего движения — "
+        "формальный вход часто оказывается близко к локальному пику движения."
+    )
+    return "\n".join(lines)

@@ -1,5 +1,4 @@
 import asyncio
-import json
 import logging
 import signal
 from datetime import datetime, timezone
@@ -7,7 +6,6 @@ from datetime import datetime, timezone
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.agent.decision_agent import AGENT_VERSION, DecisionAgent
 from src.analytics.base import BaseDetector
 from src.analytics.data_provider import CandleCache, DataProvider
 from src.analytics.detector import SetupDetector
@@ -21,7 +19,7 @@ from src.executor.position_manager import PositionManager
 from src.notifier.telegram_bot import TelegramNotifier
 from src.storage.database import async_session, init_db
 from src.storage.stats import trade_stats
-from src.storage.models import AgentDecision as AgentDecisionModel, MarketContextSnapshot, Signal as SignalModel, Ticker, Trade
+from src.storage.models import MarketContextSnapshot, Signal as SignalModel, Ticker, Trade
 
 logger = logging.getLogger(__name__)
 
@@ -44,12 +42,14 @@ class Application:
         self._positions: PositionManager | None = None
         self._candle_cache = CandleCache()
 
-        # ИИ-режим (доп. режим, отдельный аккаунт биржи) — см. AGENTS.md
+        # ИИ-режим (доп. режим, отдельный аккаунт биржи) — см. AGENTS.md.
+        # Решения принимает оркестратор (Claude Code /loop-скилл + сабагенты entry-agent/
+        # reeval-agent, см. .claude/skills/vibetrade-agent-loop) — Python здесь только
+        # держит механическую синхронизацию позиций, LLM сам не вызывает.
         self._agent_connector: ExchangeConnector | None = None
         self._agent_positions: PositionManager | None = None
-        self._agent: DecisionAgent | None = None
         self._agent_watch_task: asyncio.Task | None = None
-        self._agent_reeval_task: asyncio.Task | None = None
+        self._agent_position_task: asyncio.Task | None = None
 
     async def start(self) -> None:
         logger.info("Запуск приложения...")
@@ -226,14 +226,6 @@ class Application:
                         source="agent",
                         agent_config=agent_cfg,
                     )
-                    self._agent = DecisionAgent(
-                        config=agent_cfg,
-                        connector=self._agent_connector,
-                        candle_cache=self._candle_cache,
-                        market_ctx=self._market_ctx,
-                        trading_config=self.settings.trading,
-                        strategy_config=self.settings.strategy,
-                    )
                     logger.info(
                         f"ИИ-режим включён (dry_run={agent_cfg.dry_run}, "
                         f"аккаунт={agent_cfg.exchange})"
@@ -272,7 +264,7 @@ class Application:
 
         if self._agent_positions:
             self._agent_watch_task = asyncio.create_task(self._agent_watch_loop())
-            self._agent_reeval_task = asyncio.create_task(self._agent_position_loop())
+            self._agent_position_task = asyncio.create_task(self._agent_position_loop())
 
         await self._collector.start()
         logger.info("Приложение запущено")
@@ -306,12 +298,11 @@ class Application:
             await asyncio.sleep(interval)
 
     async def _agent_position_loop(self) -> None:
-        """Весь жизненный цикл позиций ИИ-агента (TP/SL-синхронизация с биржей,
-        pending-входы, LLM-переоценка) — НЕ привязан к циклу сканирования рынка
-        (тот занимает ~5 мин на полный проход и не должен задерживать
-        сопровождение сделок). Тикает часто (раз в минуту); фактический каданс
-        вызова LLM на конкретную сделку регулируется троттлингом внутри
-        llm_reevaluate_positions (agent.reeval_interval_minutes)."""
+        """Механическая синхронизация позиций ИИ-агента (TP/SL с биржей,
+        pending-входы) — НЕ привязана к циклу сканирования рынка (тот занимает
+        ~5 мин на полный проход). LLM-решения (вход/сопровождение) сюда не
+        входят — их принимает и применяет оркестратор (Claude Code /loop-скилл
+        + entry-agent/reeval-agent + scripts/agent_actions.py), см. AGENTS.md."""
         while self._running:
             try:
                 async with async_session() as session:
@@ -319,12 +310,6 @@ class Application:
                     if agent_closed:
                         logger.info(f"Agent: закрыто позиций: {len(agent_closed)}")
                     await self._agent_positions.check_pending_entries(session)  # type: ignore[union-attr]
-                    if self._agent:
-                        decisions = await self._agent_positions.llm_reevaluate_positions(  # type: ignore[union-attr]
-                            session, self._agent
-                        )
-                        if decisions:
-                            logger.info(f"Agent: переоценено позиций: {len(decisions)}")
                     await session.commit()
             except asyncio.CancelledError:
                 raise
@@ -343,10 +328,10 @@ class Application:
             except asyncio.CancelledError:
                 pass
 
-        if self._agent_reeval_task and not self._agent_reeval_task.done():
-            self._agent_reeval_task.cancel()
+        if self._agent_position_task and not self._agent_position_task.done():
+            self._agent_position_task.cancel()
             try:
-                await self._agent_reeval_task
+                await self._agent_position_task
             except asyncio.CancelledError:
                 pass
 
@@ -461,43 +446,14 @@ class Application:
                 if self._notifier:
                     await self._notifier.send_signal(sig, status=status)
 
-                # ИИ-режим: тот же сигнал, независимое решение на отдельном аккаунте.
-                # Без Telegram — видимость только через БД (AgentDecision + Trade.source='agent').
-                if self._agent and self._agent_positions and self.settings.agent.entry_gate_enabled:
-                    await self._run_agent_entry(session, sig, db_signal.id)
+                # ИИ-режим по этому же сигналу решает независимо оркестратор
+                # (Claude Code /loop-скилл + entry-agent), не Python — см. AGENTS.md.
 
         # 3. Аналитика — price surge детектор (только сигналы)
         if self._ps_processor:
             await self._ps_processor.process_and_notify(session)
 
         await session.commit()
-
-    async def _run_agent_entry(self, session: AsyncSession, sig, signal_id: int) -> None:
-        """ИИ-режим: оценить сигнал и, если одобрено, открыть сделку на ОТДЕЛЬНОМ
-        аккаунте (self._agent_positions). dry_run=True — решение логируется
-        (AgentDecision), но сделка не открывается даже на этом изолированном
-        аккаунте. Fail-open по таймауту/ошибке уже обработан в DecisionAgent."""
-        verdict = await self._agent.evaluate_entry(session, sig)  # type: ignore[union-attr]
-        applied = False
-        if verdict.approved and not self.settings.agent.dry_run:
-            _trade, agent_status, _detail = await self._agent_positions.open_position(  # type: ignore[union-attr]
-                session, sig, signal_id=signal_id
-            )
-            applied = agent_status in ("opened", "pending")
-
-        session.add(AgentDecisionModel(
-            timestamp=datetime.now(tz=timezone.utc),
-            kind="entry",
-            signal_id=signal_id,
-            symbol=sig.symbol,
-            verdict="approve" if verdict.approved else "reject",
-            reasoning=verdict.reasoning,
-            tool_calls_json=json.dumps(verdict.tool_trace, default=str),
-            applied=applied,
-            model=self.settings.agent.model,
-            agent_version=AGENT_VERSION,
-            latency_ms=verdict.latency_ms,
-        ))
 
     async def wait(self) -> None:
         """Ожидание graceful shutdown."""

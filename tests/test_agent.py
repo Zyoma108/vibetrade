@@ -1,24 +1,23 @@
 """
 Tests for the AI-mode agent subsystem: PositionManager's agent-facing methods
-(tighten SL, extend hold, early close, source scoping) and DecisionAgent's
-tool-calling loop (fail-open/fail-safe behavior, termination conditions).
+(tighten SL, extend hold, early close, source scoping) and AgentToolkit's data
+tools / strategy briefing (used by scripts/agent_data.py, agent_briefing.py —
+the CLI surface entry-agent/reeval-agent call via Bash).
 
 Uses minimal mocking, mirrors the conventions in test_position_manager.py.
 """
 
 from datetime import datetime, timedelta, timezone
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from src.agent.decision_agent import DecisionAgent
-from src.analytics.base import Signal
+from src.agent.tools import AgentToolkit, build_strategy_briefing
 from src.config import AgentConfig, StrategyConfig, TradingConfig
 from src.executor.position_manager import PositionManager
-from src.storage.models import Base, Trade
+from src.storage.models import AgentDecision, Base, MarketContextSnapshot, Trade
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -79,20 +78,20 @@ def _agent_pm(**agent_overrides) -> PositionManager:
     return pm
 
 
-def _signal(symbol: str = "TEST/USDT:USDT") -> Signal:
-    return Signal(symbol=symbol, setup_type="volume_surge", direction="long", confidence=80, message="Test signal")
+@pytest_asyncio.fixture
+async def engine():
+    eng = create_async_engine("sqlite+aiosqlite://", echo=False)
+    async with eng.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    yield eng
+    await eng.dispose()
 
 
-def _tool_use(name: str, input_: dict, id_: str = "tu_1"):
-    return SimpleNamespace(type="tool_use", name=name, input=input_, id=id_)
-
-
-def _text(text: str = "thinking"):
-    return SimpleNamespace(type="text", text=text)
-
-
-def _response(content: list):
-    return SimpleNamespace(content=content)
+@pytest_asyncio.fixture
+async def session(engine):
+    session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    async with session_factory() as sess:
+        yield sess
 
 
 # ---------------------------------------------------------------------------
@@ -250,22 +249,6 @@ class TestApplyAgentClose:
 # ---------------------------------------------------------------------------
 
 
-@pytest_asyncio.fixture
-async def engine():
-    eng = create_async_engine("sqlite+aiosqlite://", echo=False)
-    async with eng.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    yield eng
-    await eng.dispose()
-
-
-@pytest_asyncio.fixture
-async def session(engine):
-    session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-    async with session_factory() as sess:
-        yield sess
-
-
 class TestSourceScoping:
     @pytest.mark.asyncio
     async def test_count_open_scoped_by_source(self, session):
@@ -295,166 +278,16 @@ class TestSourceScoping:
 
 
 # ---------------------------------------------------------------------------
-# DecisionAgent — tool-calling loop: fail-open/fail-safe, termination
+# build_strategy_briefing — the subagent must see real config values, not
+# generic text (this is what scripts/agent_briefing.py prints)
 # ---------------------------------------------------------------------------
 
 
-def _agent(config: AgentConfig | None = None) -> DecisionAgent:
-    """DecisionAgent with enabled=False so __init__ skips real Anthropic client
-    construction — tests inject a fake client afterwards."""
-    cfg = config or _agent_config(enabled=False)
-    agent = DecisionAgent(config=cfg, connector=MagicMock(exchange_id="bybit"))
-    return agent
-
-
-class TestDecisionAgentEntryLoop:
-    @pytest.mark.asyncio
-    async def test_approves_on_immediate_final_call(self):
-        agent = _agent()
-        agent._client = MagicMock()
-        agent._client.messages.create = AsyncMock(
-            return_value=_response([_tool_use("submit_entry_decision", {"approve": True, "reasoning": "looks fine"})])
-        )
-        verdict = await agent.evaluate_entry(MagicMock(), _signal())
-        assert verdict.approved is True
-        assert verdict.reasoning == "looks fine"
-        assert verdict.failed is False
-
-    @pytest.mark.asyncio
-    async def test_rejects_when_model_says_no(self):
-        agent = _agent()
-        agent._client = MagicMock()
-        agent._client.messages.create = AsyncMock(
-            return_value=_response([_tool_use("submit_entry_decision", {"approve": False, "reasoning": "overheated"})])
-        )
-        verdict = await agent.evaluate_entry(MagicMock(), _signal())
-        assert verdict.approved is False
-        assert verdict.reasoning == "overheated"
-
-    @pytest.mark.asyncio
-    async def test_fail_open_on_timeout(self):
-        agent = _agent(_agent_config(enabled=False, decision_timeout_seconds=5.0))
-        agent.config.decision_timeout_seconds = 0.05  # bypass pydantic ge=5 floor for a fast test
-
-        async def _slow(**kwargs):
-            import asyncio
-            await asyncio.sleep(1.0)
-
-        agent._client = MagicMock()
-        agent._client.messages.create = AsyncMock(side_effect=_slow)
-        verdict = await agent.evaluate_entry(MagicMock(), _signal())
-        assert verdict.approved is True  # fail-open
-        assert verdict.failed is True
-
-    @pytest.mark.asyncio
-    async def test_fail_open_on_exception(self):
-        agent = _agent()
-        agent._client = MagicMock()
-        agent._client.messages.create = AsyncMock(side_effect=RuntimeError("api down"))
-        verdict = await agent.evaluate_entry(MagicMock(), _signal())
-        assert verdict.approved is True
-        assert verdict.failed is True
-
-    @pytest.mark.asyncio
-    async def test_fail_open_when_tool_call_budget_exceeded(self):
-        """Model keeps calling data tools and never submits a final decision."""
-        agent = _agent(_agent_config(enabled=False, max_tool_calls_per_decision=2))
-        agent._client = MagicMock()
-        agent._client.messages.create = AsyncMock(
-            return_value=_response([_tool_use("get_market_context", {})])
-        )
-        verdict = await agent.evaluate_entry(MagicMock(), _signal())
-        assert verdict.approved is True  # fail-open
-        assert verdict.failed is True
-
-    @pytest.mark.asyncio
-    async def test_fail_open_when_model_returns_no_tool_use(self):
-        agent = _agent()
-        agent._client = MagicMock()
-        agent._client.messages.create = AsyncMock(return_value=_response([_text("I dunno")]))
-        verdict = await agent.evaluate_entry(MagicMock(), _signal())
-        assert verdict.approved is True
-        assert verdict.failed is True
-
-    @pytest.mark.asyncio
-    async def test_dispatches_data_tool_before_final_decision(self):
-        """First turn requests a data tool, second turn submits the decision."""
-        agent = _agent()
-        agent._client = MagicMock()
-        agent._client.messages.create = AsyncMock(
-            side_effect=[
-                _response([_tool_use("get_market_context", {}, id_="tu_1")]),
-                _response([_tool_use("submit_entry_decision", {"approve": True, "reasoning": "ok"}, id_="tu_2")]),
-            ]
-        )
-        verdict = await agent.evaluate_entry(MagicMock(), _signal())
-        assert verdict.approved is True
-        assert len(verdict.tool_trace) == 1
-        assert verdict.tool_trace[0]["tool"] == "get_market_context"
-        assert agent._client.messages.create.await_count == 2
-
-
-class TestDecisionAgentReevalLoop:
-    @pytest.mark.asyncio
-    async def test_fail_safe_holds_on_timeout(self):
-        agent = _agent(_agent_config(enabled=False, decision_timeout_seconds=5.0))
-        agent.config.decision_timeout_seconds = 0.05  # bypass pydantic ge=5 floor for a fast test
-
-        async def _slow(**kwargs):
-            import asyncio
-            await asyncio.sleep(1.0)
-
-        agent._client = MagicMock()
-        agent._client.messages.create = AsyncMock(side_effect=_slow)
-        verdict = await agent.evaluate_position(MagicMock(), _trade())
-        assert verdict.action == "hold"
-        assert verdict.failed is True
-
-    @pytest.mark.asyncio
-    async def test_returns_tighten_sl_action(self):
-        agent = _agent()
-        agent._client = MagicMock()
-        agent._client.messages.create = AsyncMock(
-            return_value=_response([
-                _tool_use("submit_reeval_decision", {
-                    "action": "tighten_sl", "reasoning": "resistance nearby", "new_sl_price": 101.0,
-                })
-            ])
-        )
-        verdict = await agent.evaluate_position(MagicMock(), _trade())
-        assert verdict.action == "tighten_sl"
-        assert verdict.new_sl_price == 101.0
-
-    @pytest.mark.asyncio
-    async def test_daily_budget_exhausted_fails_safe(self):
-        agent = _agent(_agent_config(enabled=False, daily_call_budget=1))
-        agent._client = MagicMock()
-        agent._client.messages.create = AsyncMock(
-            return_value=_response([_tool_use("submit_reeval_decision", {"action": "hold", "reasoning": "ok"})])
-        )
-        v1 = await agent.evaluate_position(MagicMock(), _trade())
-        assert v1.failed is False
-        v2 = await agent.evaluate_position(MagicMock(), _trade())
-        assert v2.failed is True
-        assert v2.action == "hold"
-
-
-# ---------------------------------------------------------------------------
-# Strategy briefing — the model must see real config values, not generic text
-# ---------------------------------------------------------------------------
-
-
-class TestStrategyBriefing:
+class TestBuildStrategyBriefing:
     def test_reflects_real_config_values(self):
         tc = _trading_config(stop_loss_pct=7.5, risk_reward_ratio=2.5, leverage=8, max_hold_hours=36.0)
         sc = StrategyConfig(volume_surge_mult=4.2, sustain_bars=6, oi_slope_min_pct=3.3)
-        agent = DecisionAgent(
-            config=_agent_config(enabled=False),
-            connector=MagicMock(exchange_id="bybit"),
-            trading_config=tc,
-            strategy_config=sc,
-        )
-        briefing = agent._strategy_briefing
+        briefing = build_strategy_briefing(sc, tc)
         assert "7.5" in briefing
         assert "2.5" in briefing
         assert "8x" in briefing
@@ -462,22 +295,96 @@ class TestStrategyBriefing:
         assert "6 свечей" in briefing
 
     def test_survives_missing_configs(self):
-        """No trading_config/strategy_config passed (e.g. old caller) — must not crash."""
-        agent = DecisionAgent(config=_agent_config(enabled=False), connector=MagicMock(exchange_id="bybit"))
-        assert "Circuit Breaker" not in agent._strategy_briefing
-        assert "известная проблема" in agent._strategy_briefing.lower()
+        briefing = build_strategy_briefing(None, None)
+        assert "Circuit Breaker" not in briefing
+        assert "известная проблема" in briefing.lower()
+
+    def test_mentions_pullback_only_when_enabled(self):
+        tc_off = _trading_config(pending_entry_pullback_pct=0.0)
+        tc_on = _trading_config(pending_entry_pullback_pct=1.5, pending_entry_timeout_minutes=9.0)
+        assert "откате" not in build_strategy_briefing(None, tc_off)
+        assert "откате 1.5%" in build_strategy_briefing(None, tc_on)
+
+
+# ---------------------------------------------------------------------------
+# AgentToolkit — market context from DB snapshot, recent agent decisions
+# (the tools scripts/agent_data.py exposes to entry-agent/reeval-agent)
+# ---------------------------------------------------------------------------
+
+
+class TestAgentToolkitMarketContext:
+    @pytest.mark.asyncio
+    async def test_returns_error_without_snapshot(self, session):
+        toolkit = AgentToolkit(session=session, connector=MagicMock(exchange_id="bybit"))
+        result = await toolkit.dispatch("get_market_context", {})
+        assert "error" in result
 
     @pytest.mark.asyncio
-    async def test_included_in_system_prompt_sent_to_model(self):
-        tc = _trading_config(stop_loss_pct=6.0)
-        agent = DecisionAgent(
-            config=_agent_config(enabled=False), connector=MagicMock(exchange_id="bybit"), trading_config=tc,
-        )
-        agent._client = MagicMock()
-        create = AsyncMock(
-            return_value=_response([_tool_use("submit_entry_decision", {"approve": True, "reasoning": "ok"})])
-        )
-        agent._client.messages.create = create
-        await agent.evaluate_entry(MagicMock(), _signal())
-        sent_system_prompt = create.call_args.kwargs["system"]
-        assert "6.0" in sent_system_prompt
+    async def test_reads_latest_snapshot_from_db(self, session):
+        session.add(MarketContextSnapshot(
+            timestamp=datetime.now(tz=timezone.utc),
+            regime="cautious", regime_start=datetime.now(tz=timezone.utc),
+            trend="neutral", trend_start=datetime.now(tz=timezone.utc),
+            supertrend_color="red", btc_change_1h=-0.5, btc_change_4h=-1.2,
+            others_value=1e9, others_change_1h=-0.3, others_change_4h=-0.8,
+            ready=True,
+        ))
+        await session.commit()
+
+        toolkit = AgentToolkit(session=session, connector=MagicMock(exchange_id="bybit"))
+        result = await toolkit.dispatch("get_market_context", {})
+        assert result["regime"] == "cautious"
+        assert result["supertrend_color"] == "red"
+        assert "error" not in result
+
+    @pytest.mark.asyncio
+    async def test_ignores_not_ready_snapshot(self, session):
+        session.add(MarketContextSnapshot(
+            timestamp=datetime.now(tz=timezone.utc),
+            regime="unknown", regime_start=datetime.now(tz=timezone.utc),
+            trend="neutral", trend_start=datetime.now(tz=timezone.utc),
+            supertrend_color="red", btc_change_1h=0.0, btc_change_4h=0.0,
+            others_value=0.0, others_change_1h=0.0, others_change_4h=0.0,
+            ready=False,
+        ))
+        await session.commit()
+
+        toolkit = AgentToolkit(session=session, connector=MagicMock(exchange_id="bybit"))
+        result = await toolkit.dispatch("get_market_context", {})
+        assert "error" in result
+
+
+class TestAgentToolkitRecentAgentDecisions:
+    @pytest.mark.asyncio
+    async def test_returns_past_reeval_decisions_for_trade(self, session):
+        trade = _trade()
+        session.add(trade)
+        await session.flush()
+
+        session.add(AgentDecision(
+            timestamp=datetime.now(tz=timezone.utc), kind="reeval", trade_id=trade.id,
+            symbol=trade.symbol, verdict="hold", reasoning="looked fine",
+            applied=False, model="sonnet", agent_version="v2-orchestrator",
+        ))
+        session.add(AgentDecision(
+            timestamp=datetime.now(tz=timezone.utc), kind="reeval", trade_id=trade.id,
+            symbol=trade.symbol, verdict="tighten_sl", reasoning="resistance nearby",
+            applied=True, model="sonnet", agent_version="v2-orchestrator",
+        ))
+        await session.commit()
+
+        toolkit = AgentToolkit(session=session, connector=MagicMock(exchange_id="bybit"))
+        result = await toolkit.dispatch("get_recent_agent_decisions", {"trade_id": trade.id})
+        assert len(result["past_decisions"]) == 2
+        verdicts = {d["verdict"] for d in result["past_decisions"]}
+        assert verdicts == {"hold", "tighten_sl"}
+
+    @pytest.mark.asyncio
+    async def test_empty_for_trade_with_no_history(self, session):
+        trade = _trade()
+        session.add(trade)
+        await session.flush()
+
+        toolkit = AgentToolkit(session=session, connector=MagicMock(exchange_id="bybit"))
+        result = await toolkit.dispatch("get_recent_agent_decisions", {"trade_id": trade.id})
+        assert result["past_decisions"] == []
