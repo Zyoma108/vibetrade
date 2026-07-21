@@ -334,6 +334,57 @@ class TestPriceCalculations:
 
 
 # ---------------------------------------------------------------------------
+# Fees
+# ---------------------------------------------------------------------------
+
+
+class TestFeeCalculation:
+    """_fee(): taker/maker комиссия от notional."""
+
+    def test_taker_fee(self):
+        pm = _pm(taker_fee_pct=0.055, maker_fee_pct=0.02)
+        fee = pm._fee(1000.0, taker=True)
+        assert fee == pytest.approx(0.55)
+
+    def test_maker_fee_cheaper_than_taker(self):
+        pm = _pm(taker_fee_pct=0.055, maker_fee_pct=0.02)
+        assert pm._fee(1000.0, taker=False) < pm._fee(1000.0, taker=True)
+
+    def test_zero_fee_config(self):
+        pm = _pm(taker_fee_pct=0.0, maker_fee_pct=0.0)
+        assert pm._fee(1000.0, taker=True) == 0.0
+
+    @pytest.mark.asyncio
+    async def test_close_position_deducts_exit_fee_from_pnl(self):
+        """_close_position добавляет exit-fee к trade.fee и вычитает из pnl."""
+        pm = _pm(taker_fee_pct=0.055)
+        pm._send_message = AsyncMock()
+
+        trade = _trade(entry_price=1.0, quantity=100, pnl=0.0)
+        trade.fee = 0.055  # комиссия входа, уже начислена при open_position
+
+        # remainder = (1.05 - 1.0) * 100 = 5.0
+        # exit_fee = 1.05 * 100 * 0.055% = 0.05775
+        # trade.fee итого = 0.055 + 0.05775 = 0.11275
+        # pnl = 5.0 - 0.11275 = 4.88725
+        await pm._close_position(trade, exit_price=1.05, reason="tp")
+        assert trade.fee == pytest.approx(0.11275)
+        assert trade.pnl == pytest.approx(4.88725)
+
+    @pytest.mark.asyncio
+    async def test_close_position_handles_none_fee(self):
+        """Позиции, восстановленные при sync (без известной fee), не должны падать."""
+        pm = _pm(taker_fee_pct=0.055)
+        pm._send_message = AsyncMock()
+
+        trade = _trade(entry_price=1.0, quantity=100, pnl=0.0)
+        trade.fee = None  # например, позиция восстановлена после рестарта бота
+
+        await pm._close_position(trade, exit_price=1.05, reason="tp")
+        assert trade.fee == pytest.approx(0.05775)  # только exit-fee
+
+
+# ---------------------------------------------------------------------------
 # open_position — rejection reasons
 # ---------------------------------------------------------------------------
 
@@ -565,9 +616,10 @@ class TestPartialClosePnL:
 
         # Закрываем остаток с убытком -1 USDT
         # remainder_pnl = (0.99 - 1.0) * 100 = -1.0
-        # total = -1.0 + 3.0 = 2.0
+        # exit_fee (taker) = 0.99 * 100 * 0.055% = 0.05445
+        # total = -1.0 + 3.0 - 0.05445 = 1.94555
         await pm._close_position(trade, exit_price=0.99, reason="sl")
-        assert trade.pnl == pytest.approx(2.0)
+        assert trade.pnl == pytest.approx(1.94555)
 
     @pytest.mark.asyncio
     async def test_partial_profit_saves_losing_trade(self):
@@ -581,7 +633,7 @@ class TestPartialClosePnL:
         trade.partial_pnl = 5.0
 
         # Остаток: (0.94 - 1.0) * 50 = -3.0
-        # total = -3.0 + 5.0 = 2.0 → прибыль!
+        # gross total = -3.0 + 5.0 = 2.0, минус небольшая комиссия выхода → прибыль!
         await pm._close_position(trade, exit_price=0.94, reason="sl")
         assert trade.pnl > 0
 
@@ -596,9 +648,10 @@ class TestPartialClosePnL:
         trade.partial_pnl = -2.0
 
         # Остаток: (1.10 - 1.0) * 100 = +10.0
-        # total = +10.0 + (-2.0) = +8.0
+        # exit_fee (taker) = 1.10 * 100 * 0.055% = 0.0605
+        # total = +10.0 + (-2.0) - 0.0605 = 7.9395
         await pm._close_position(trade, exit_price=1.10, reason="tp")
-        assert trade.pnl == pytest.approx(8.0)
+        assert trade.pnl == pytest.approx(7.9395)
 
     @pytest.mark.asyncio
     async def test_no_partial_pnl_is_zero(self):
@@ -608,8 +661,9 @@ class TestPartialClosePnL:
 
         trade = _trade(entry_price=1.0, quantity=100, pnl=0.0)
         # partial_closed=False, partial_pnl=0.0 (default)
+        # exit_fee (taker) = 1.05 * 100 * 0.055% = 0.05775
         await pm._close_position(trade, exit_price=1.05, reason="tp")
-        assert trade.pnl == pytest.approx(5.0)  # только от остатка
+        assert trade.pnl == pytest.approx(4.94225)  # от остатка минус комиссия выхода
 
 
 # ---------------------------------------------------------------------------

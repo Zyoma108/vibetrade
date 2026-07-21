@@ -404,6 +404,8 @@ class PositionManager:
             return None, "error", f"order: {err[:120]}"
 
         # Запись в БД
+        actual_size = quantity * entry_price
+        entry_fee = self._fee(actual_size, taker=True)
         trade = Trade(
             signal_id=signal_id,
             symbol=signal.symbol,
@@ -413,11 +415,11 @@ class PositionManager:
             entry_time=datetime.now(tz=timezone.utc),
             status="open",
             tp_sl_set=tp_sl_ok,
+            fee=entry_fee,
         )
         session.add(trade)
 
         # Нотификация
-        actual_size = quantity * entry_price
         margin = actual_size / self.config.leverage
         tp_pct = (tp_price / entry_price - 1) * 100
         sl_pct = (1 - sl_price / entry_price) * 100
@@ -427,7 +429,8 @@ class PositionManager:
             f"Вход: ${entry_price:.6f}\n"
             f"Объём: ${actual_size:.0f} (маржа ${margin:.0f} на {self.config.leverage}x)\n"
             f"TP: ${tp_price:.6f} (+{tp_pct:.1f}% | 1:{self.config.risk_reward_ratio})\n"
-            f"SL: ${sl_price:.6f} (-{sl_pct:.1f}%)"
+            f"SL: ${sl_price:.6f} (-{sl_pct:.1f}%)\n"
+            f"Комиссия входа: ${entry_fee:.4f}"
         )
 
         logger.info(
@@ -592,6 +595,8 @@ class PositionManager:
         pos.quantity = actual_contracts
         pos.partial_closed = True
         pos.partial_pnl = (pos.partial_pnl or 0.0) + partial_pnl
+        # Резервный лимитный ордер исполнился как maker
+        pos.fee = (pos.fee or 0.0) + self._fee(trigger * close_qty, taker=False)
 
         # Переводим стоп в безубыток для остатка
         try:
@@ -685,6 +690,8 @@ class PositionManager:
         pos.quantity -= close_qty
         pos.partial_closed = True
         pos.partial_pnl = (pos.partial_pnl or 0.0) + partial_pnl
+        # Fallback закрывает market-ордером — taker
+        pos.fee = (pos.fee or 0.0) + self._fee(current_price * close_qty, taker=True)
 
         pnl_pct = (current_price / pos.entry_price - 1) * 100
         await self._notify(
@@ -738,6 +745,13 @@ class PositionManager:
     def _sl_price(self, entry: float) -> float:
         """SL: entry − stop_loss_pct%."""
         return entry * (1 - self.config.stop_loss_pct / 100)
+
+    def _fee(self, notional: float, taker: bool) -> float:
+        """Комиссия биржи за одну "ногу" сделки.
+        taker=True — market-ордер (вход, TP/SL-триггер, time-exit, fallback partial).
+        taker=False — резервный reduce-only лимитник (исполняется как maker)."""
+        rate = self.config.taker_fee_pct if taker else self.config.maker_fee_pct
+        return notional * (rate / 100)
 
     async def _count_open(self, session: AsyncSession) -> int:
         from sqlalchemy import func
@@ -799,8 +813,11 @@ class PositionManager:
         else:
             remainder_pnl = (trade.entry_price - exit_price) * trade.quantity
 
-        # Суммируем с частичными закрытиями
-        total_pnl = remainder_pnl + (trade.partial_pnl or 0.0)
+        # Финальный выход — market (TP/SL/time-exit/аварийное закрытие всегда taker)
+        trade.fee = (trade.fee or 0.0) + self._fee(exit_price * trade.quantity, taker=True)
+
+        # Суммируем с частичными закрытиями, вычитаем комиссию всех "ног" сделки
+        total_pnl = remainder_pnl + (trade.partial_pnl or 0.0) - (trade.fee or 0.0)
         trade.pnl = total_pnl
 
         pnl_pct = (
@@ -845,12 +862,13 @@ class PositionManager:
             f"{emoji} <b>{label}</b> {trade.direction.upper()}\n"
             f"Монета: {trade.symbol}\n"
             f"Вход: ${trade.entry_price:.6f} → Выход: ${exit_price:.6f}\n"
-            f"PnL: ${trade.pnl:+.2f} ({pnl_pct:+.1f}%)"
+            f"PnL: ${trade.pnl:+.2f} ({pnl_pct:+.1f}%) "
+            f"[комиссии: ${trade.fee or 0.0:.4f}]"
         )
 
         logger.info(
             f"Позиция закрыта: {trade.symbol} {reason} "
-            f"PnL=${trade.pnl:+.2f} ({pnl_pct:+.1f}%)"
+            f"PnL=${trade.pnl:+.2f} ({pnl_pct:+.1f}%) fee=${trade.fee or 0.0:.4f}"
         )
 
     async def _notify(self, text: str) -> None:

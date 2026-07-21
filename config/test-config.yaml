@@ -47,3 +47,6 @@ trading:
   max_hold_hours: 48.0            # макс. время удержания, часов
   partial_close_pct: 50.0         # % пути до TP для закрытия / перевода в б/у
   cooldown_hours: 1.0             # кулдаун после закрытия позиции
+  taker_fee_pct: 0.055            # комиссия тейкера (market-ордер), % от notional
+  maker_fee_pct: 0.02             # комиссия мейкера (лимитный reduce-only ордер), % от notional
+  backtest_slippage_pct: 0.3      # допущение на проскальзывание входа в бэктесте, % (0 = выкл)

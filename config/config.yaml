@@ -97,3 +97,6 @@ trading:
   circuit_breaker_reduce_mult_pct: 50.0  # множитель размера позиции при срабатывании, %
   circuit_breaker_loss_streak_stop: 3    # после N убытков подряд полностью остановить
   circuit_breaker_stop_minutes: 60       # на сколько минут остановить торговлю
+  taker_fee_pct: 0.055             # комиссия тейкера (market-ордер), % от notional
+  maker_fee_pct: 0.02              # комиссия мейкера (лимитный reduce-only ордер), % от notional
+  backtest_slippage_pct: 0.3       # допущение на проскальзывание входа в бэктесте, % (0 = выкл)

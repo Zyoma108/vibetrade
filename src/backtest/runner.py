@@ -35,11 +35,11 @@ class SimPosition:
     __slots__ = (
         "symbol", "entry_price", "entry_time", "quantity",
         "tp_price", "sl_price", "partial_closed", "partial_pnl",
-        "closed", "exit_price", "exit_time", "pnl", "exit_reason",
+        "closed", "exit_price", "exit_time", "pnl", "exit_reason", "fee",
     )
 
     def __init__(self, symbol: str, entry_price: float, entry_time: datetime,
-                 quantity: float, tp_price: float, sl_price: float):
+                 quantity: float, tp_price: float, sl_price: float, fee: float = 0.0):
         self.symbol = symbol
         self.entry_price = entry_price
         self.entry_time = entry_time
@@ -53,12 +53,21 @@ class SimPosition:
         self.exit_time: datetime | None = None
         self.pnl = 0.0
         self.exit_reason = ""
+        self.fee = fee  # накопленная комиссия по всем "ногам" сделки
 
 
 def _bar(rows, idx):
     if 0 <= idx < len(rows):
         return rows[idx]
     return None
+
+
+def _fee(cfg, notional: float, taker: bool) -> float:
+    """Комиссия биржи за одну "ногу" сделки (см. PositionManager._fee).
+    taker=True — market-ордер (вход, TP/SL/time-exit, fallback partial).
+    taker=False — резервный reduce-only лимитник частичной фиксации (maker)."""
+    rate = cfg.taker_fee_pct if taker else cfg.maker_fee_pct
+    return notional * (rate / 100)
 
 
 # ---------------------------------------------------------------------------
@@ -190,6 +199,8 @@ async def run_backtest(
                     pos.partial_closed = True
                     pos.partial_pnl = partial_pnl
                     pos.sl_price = pos.entry_price
+                    # Резервный лимитник частичной фиксации — maker
+                    pos.fee += _fee(cfg, trigger * close_qty, taker=False)
                     continue
 
             # TP
@@ -197,7 +208,8 @@ async def run_backtest(
                 pos.exit_price = pos.tp_price
                 pos.exit_time = ts
                 pos.exit_reason = "tp"
-                pos.pnl = (pos.tp_price - pos.entry_price) * pos.quantity + pos.partial_pnl
+                pos.fee += _fee(cfg, pos.tp_price * pos.quantity, taker=True)
+                pos.pnl = (pos.tp_price - pos.entry_price) * pos.quantity + pos.partial_pnl - pos.fee
                 pos.closed = True
                 closed_trades.append(pos)
                 positions.remove(pos)
@@ -212,7 +224,8 @@ async def run_backtest(
                 pos.exit_price = pos.sl_price
                 pos.exit_time = ts
                 pos.exit_reason = "sl"
-                pos.pnl = (pos.sl_price - pos.entry_price) * pos.quantity + pos.partial_pnl
+                pos.fee += _fee(cfg, pos.sl_price * pos.quantity, taker=True)
+                pos.pnl = (pos.sl_price - pos.entry_price) * pos.quantity + pos.partial_pnl - pos.fee
                 pos.closed = True
                 closed_trades.append(pos)
                 positions.remove(pos)
@@ -227,7 +240,8 @@ async def run_backtest(
                 pos.exit_price = close
                 pos.exit_time = ts
                 pos.exit_reason = "time"
-                pos.pnl = (close - pos.entry_price) * pos.quantity + pos.partial_pnl
+                pos.fee += _fee(cfg, close * pos.quantity, taker=True)
+                pos.pnl = (close - pos.entry_price) * pos.quantity + pos.partial_pnl - pos.fee
                 pos.closed = True
                 closed_trades.append(pos)
                 positions.remove(pos)
@@ -340,9 +354,11 @@ async def run_backtest(
 
             signals_count += 1
 
-            entry_price = candle_slice[-1]["close"]
+            signal_price = candle_slice[-1]["close"]
+            # Реальный вход рыночным ордером хуже цены сигнала на величину проскальзывания
+            entry_price = signal_price * (1 + cfg.backtest_slippage_pct / 100)
 
-            # TP/SL: фиксированные проценты от цены входа
+            # TP/SL: фиксированные проценты от цены входа (после проскальзывания)
             sl_distance = entry_price * (cfg.stop_loss_pct / 100)
             tp_distance = sl_distance * cfg.risk_reward_ratio
 
@@ -352,10 +368,11 @@ async def run_backtest(
             qty = risk_budget / sl_distance
             tp = entry_price + tp_distance
             sl = entry_price - sl_distance
+            entry_fee = _fee(cfg, qty * entry_price, taker=True)
 
             pos = SimPosition(
                 symbol=sym, entry_price=entry_price, entry_time=ts,
-                quantity=qty, tp_price=tp, sl_price=sl,
+                quantity=qty, tp_price=tp, sl_price=sl, fee=entry_fee,
             )
             positions.append(pos)
 
@@ -367,7 +384,8 @@ async def run_backtest(
             pos.exit_price = last_close
             pos.exit_time = end_time
             pos.exit_reason = "eod"
-            pos.pnl = (last_close - pos.entry_price) * pos.quantity + pos.partial_pnl
+            pos.fee += _fee(cfg, last_close * pos.quantity, taker=True)
+            pos.pnl = (last_close - pos.entry_price) * pos.quantity + pos.partial_pnl - pos.fee
         pos.closed = True
         closed_trades.append(pos)
 
@@ -381,6 +399,7 @@ async def run_backtest(
     sl_losses = sum(1 for t in closed_trades if t.exit_reason == "sl")
     time_exits = sum(1 for t in closed_trades if t.exit_reason == "time")
     partials = sum(1 for t in closed_trades if t.partial_closed)
+    total_fees = sum(t.fee for t in closed_trades)
 
     await engine.dispose()
 
@@ -392,6 +411,8 @@ async def run_backtest(
         "win_rate": round(win_rate, 1),
         "total_pnl": round(total_pnl, 2),
         "avg_pnl": round(total_pnl / len(closed_trades), 2) if closed_trades else 0,
+        "total_fees": round(total_fees, 2),
+        "avg_fee": round(total_fees / len(closed_trades), 4) if closed_trades else 0,
         "tp_wins": tp_wins,
         "sl_losses": sl_losses,
         "time_exits": time_exits,
@@ -563,8 +584,9 @@ def main():
     print(f"  Сделок:            {result['trades']}")
     print(f"  Плюс / Минус:      {result['wins']} / {result['losses']}")
     print(f"  Win rate:          {result['win_rate']}%")
-    print(f"  Total PnL:         ${result['total_pnl']:+.2f}")
+    print(f"  Total PnL:         ${result['total_pnl']:+.2f} (net of fees)")
     print(f"  Средний PnL:       ${result['avg_pnl']:+.2f}")
+    print(f"  Комиссии всего:    ${result['total_fees']:.2f} (сред. ${result['avg_fee']:.4f}/сделку)")
     print(f"  TP: {result['tp_wins']} | SL: {result['sl_losses']} | Time: {result['time_exits']}")
     print(f"  Частичных закрытий: {result['partials']}")
     if result["best"]:

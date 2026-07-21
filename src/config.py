@@ -101,6 +101,9 @@ class TradingConfig(BaseModel):
     circuit_breaker_reduce_mult_pct: float = Field(default=50.0, ge=10.0, le=90.0, description="Множитель размера позиции при срабатывании, %")
     circuit_breaker_loss_streak_stop: int = Field(default=5, ge=1, le=50, description="После скольких убытков подряд полностью остановить торговлю")
     circuit_breaker_stop_minutes: int = Field(default=60, ge=10, le=1440, description="На сколько минут остановить торговлю при полном срабатывании")
+    taker_fee_pct: float = Field(default=0.055, ge=0.0, le=1.0, description="Комиссия тейкера (market-ордер), % от notional (Bybit VIP0 по умолчанию)")
+    maker_fee_pct: float = Field(default=0.02, ge=0.0, le=1.0, description="Комиссия мейкера (лимитный reduce-only ордер), % от notional (Bybit VIP0 по умолчанию)")
+    backtest_slippage_pct: float = Field(default=0.3, ge=0.0, le=5.0, description="Допущение на проскальзывание входа в бэктесте, % (0 = выкл). Бэктест иначе входит по цене закрытия свечи, что оптимистичнее реального market-ордера")
 
 
 class MarketContextConfig(BaseModel):
