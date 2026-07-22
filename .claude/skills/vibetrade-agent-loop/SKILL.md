@@ -26,8 +26,8 @@ is malformed", 21.07.2026). Все команды ниже уже написан
 ## Перед первым циклом
 
 Прочитай `config/config.yaml`, секция `agent:` — тебе нужны `enabled`, `dry_run`,
-`reeval_interval_minutes`, `daily_call_budget`, `model`. Если `agent.enabled: false` — сообщи
-пользователю и не продолжай цикл (спроси, включить ли).
+`reeval_interval_minutes`, `daily_call_budget`, `model`, `entry_symbol_cooldown_minutes`. Если
+`agent.enabled: false` — сообщи пользователю и не продолжай цикл (спроси, включить ли).
 
 ## Один цикл
 
@@ -43,9 +43,10 @@ is malformed", 21.07.2026). Все команды ниже уже написан
    Если ≥ `daily_call_budget` — пропусти шаги 2-3 в этом цикле, сразу переходи к резюме и паузе.
 
 2. **Новые сигналы (вход).** Найди сигналы без решения `entry` в `agent_decisions`, не старше
-   ~15 минут (старше — сетап уже устарел, не имеет смысла оценивать). Важно: `signals.timestamp`
+   ~15 минут (старше — сетап уже устарел, не имеет смысла оценивать), И по монетам, для которых
+   не было `entry`-решения за последние `entry_symbol_cooldown_minutes`. Важно: `signals.timestamp`
    хранится как naive-строка вида `2026-07-22 07:47:05.768977` (пробел-разделитель, без `T` и
-   без `+00:00`) — `cutoff` формируй через `strftime('%Y-%m-%d %H:%M:%S.%f')`, а НЕ через
+   без `+00:00`) — оба cutoff формируй через `strftime('%Y-%m-%d %H:%M:%S.%f')`, а НЕ через
    `.isoformat()` на aware-datetime: `isoformat()` даёт `T`-разделитель и суффикс `+00:00`, а при
    строковом сравнении SQLite `' ' < 'T'`, из-за чего `timestamp >= cutoff` ложно фейлится для
    ЛЮБОГО сигнала за тот же день (баг был найден и исправлен 22.07.2026 — сигнал по CL был
@@ -54,15 +55,24 @@ is malformed", 21.07.2026). Все команды ниже уже написан
    docker exec trading-bot python3 -c "
    import sqlite3, datetime
    con = sqlite3.connect('data/trading_bot.db')
-   cutoff = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=15)).strftime('%Y-%m-%d %H:%M:%S.%f')
+   cooldown_min = <entry_symbol_cooldown_minutes из конфига>
+   fresh_cutoff = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=15)).strftime('%Y-%m-%d %H:%M:%S.%f')
+   cooldown_cutoff = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=cooldown_min)).strftime('%Y-%m-%d %H:%M:%S.%f')
    rows = con.execute('''
        SELECT id, symbol, setup_type, direction, confidence, message, timestamp FROM signals
-       WHERE timestamp >= ? AND id NOT IN (SELECT signal_id FROM agent_decisions WHERE kind='entry' AND signal_id IS NOT NULL)
+       WHERE timestamp >= ?
+         AND id NOT IN (SELECT signal_id FROM agent_decisions WHERE kind='entry' AND signal_id IS NOT NULL)
+         AND symbol NOT IN (SELECT symbol FROM agent_decisions WHERE kind='entry' AND timestamp >= ?)
        ORDER BY timestamp
-   ''', (cutoff,)).fetchall()
+   ''', (fresh_cutoff, cooldown_cutoff)).fetchall()
    for r in rows: print(r)
    "
    ```
+   Монета, отфильтрованная кулдауном, просто пропускается в этом цикле — не трать на неё вызов
+   entry-agent, но можешь упомянуть в резюме одной строкой, что сигнал был, но монета на кулдауне
+   (памятка: 22.07.2026 ALICE дала 3 почти идентичных сигнала за 12 минут, каждый пришлось гонять
+   через entry-agent — кулдаун избавляет от этого).
+
    Для каждого найденного сигнала:
    - Запусти `docker exec trading-bot python scripts/agent_briefing.py`, получи текст briefing.
    - Спавни сабагента `entry-agent` (используй свой инструмент запуска сабагентов) с промптом:
