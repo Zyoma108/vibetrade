@@ -64,6 +64,20 @@ class Signal(Base):
     missed_detail: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)  # детали ошибки (исключение, причина) / no_price
 
 
+class FilteredSignal(Base):
+    """Сетапы, отсеянные детектором до появления в signals (после того как объём уже
+    подтвердил всплеск) — для анализа, стоит ли ослаблять фильтры. См. AGENTS.md."""
+
+    __tablename__ = "filtered_signals"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    timestamp: Mapped[datetime] = mapped_column(index=True)
+    exchange: Mapped[str] = mapped_column(String(32))
+    symbol: Mapped[str] = mapped_column(String(32), index=True)
+    stage: Mapped[str] = mapped_column(String(32), index=True)  # volume_spike / volume_dump / volume_fading / volume_declining / oi_declining / oi_slope_low / pre_surge_pump / hourly_drop / price_growth_low / exhaustion / exhaustion_extreme / price_growth_high
+    reason: Mapped[str] = mapped_column(Text)
+
+
 class PriceSurgeSignal(Base):
     """Сигналы детектора пампов (strategy_price_surge)."""
 

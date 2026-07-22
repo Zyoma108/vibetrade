@@ -1,4 +1,5 @@
 import logging
+from datetime import datetime, timezone
 
 import numpy as np
 
@@ -6,6 +7,7 @@ from src.analytics.base import BaseDetector, Signal
 from src.analytics.data_provider import DataProvider
 from src.analytics.utils import OI_TREND_BARS, calculate_oi_slope_pct, timeframe_to_minutes
 from src.config import StrategyConfig
+from src.storage.models import FilteredSignal
 
 logger = logging.getLogger(__name__)
 
@@ -64,26 +66,35 @@ class SetupDetector(BaseDetector):
                 # если текущее окно не проходит — пробуем сдвинутые
                 # (компенсация timing'а: цикл мог попасть между свечей)
                 vol_window = None
-                if self.check_volume_pattern(candles):
+                vol_ctx: dict = {}
+                if self.check_volume_pattern(candles, vol_ctx):
                     vol_window = candles
                 else:
                     for shift in range(1, 2):  # -1 свеча (компенсация timing'а)
                         shifted = candles[:-shift]
-                        if len(shifted) >= min_bars and self.check_volume_pattern(shifted):
+                        shift_ctx: dict = {}
+                        if len(shifted) >= min_bars and self.check_volume_pattern(shifted, shift_ctx):
                             vol_window = shifted
                             logger.info(
                                 f"Сетап {symbol}: volume найден со сдвигом -{shift} свечей"
                             )
                             break
+                        if shift_ctx:
+                            vol_ctx = shift_ctx  # причина последней попытки — самая релевантная
 
                 if vol_window is None:
+                    self._log_filtered(session, exchange, symbol, vol_ctx)
                     continue
 
-                if not await self._check_oi_trend(session, exchange, symbol):
+                oi_ctx: dict = {}
+                if not await self._check_oi_trend(session, exchange, symbol, oi_ctx):
+                    self._log_filtered(session, exchange, symbol, oi_ctx)
                     continue
 
-                direction = self.check_price_trend(vol_window)
+                price_ctx: dict = {}
+                direction = self.check_price_trend(vol_window, price_ctx)
                 if direction is None:
+                    self._log_filtered(session, exchange, symbol, price_ctx)
                     continue
 
                 # Дедупликация: одна монета — один сигнал
@@ -101,10 +112,28 @@ class SetupDetector(BaseDetector):
         return signals
 
     # ------------------------------------------------------------------
+    # Filtered-signal audit trail (только для near-miss: сетап уже прошёл
+    # основной порог всплеска объёма — сюда не попадают "тихие" монеты)
+    # ------------------------------------------------------------------
+
+    def _log_filtered(self, session, exchange: str, symbol: str, ctx: dict) -> None:
+        if not ctx:
+            return
+        session.add(
+            FilteredSignal(
+                timestamp=datetime.now(timezone.utc),
+                exchange=exchange,
+                symbol=symbol,
+                stage=ctx["stage"],
+                reason=ctx["reason"],
+            )
+        )
+
+    # ------------------------------------------------------------------
     # Volume pattern (public — used by backtest)
     # ------------------------------------------------------------------
 
-    def check_volume_pattern(self, candles: list[dict]) -> bool:
+    def check_volume_pattern(self, candles: list[dict], context: dict | None = None) -> bool:
         """Проверить плавный рост объёма над базовым уровнем."""
         volumes = np.array([c["volume"] for c in candles])
 
@@ -135,6 +164,12 @@ class SetupDetector(BaseDetector):
         recent_median = np.median(recent)
         if recent_median > 0:
             if np.max(recent) / recent_median > self.config.smooth_max_ratio:
+                if context is not None:
+                    context["stage"] = "volume_spike"
+                    context["reason"] = (
+                        f"одиночный спайк объёма: max/median={np.max(recent) / recent_median:.1f} "
+                        f"> лимита x{self.config.smooth_max_ratio}"
+                    )
                 return False
 
             # Защита от свечи-выброса (distribution/climax):
@@ -151,6 +186,12 @@ class SetupDetector(BaseDetector):
                             f"свечи (x{recent[-1] / others_median:.1f}) "
                             f"> лимита x{dump_mult}"
                         )
+                        if context is not None:
+                            context["stage"] = "volume_dump"
+                            context["reason"] = (
+                                f"свеча-выброс: объём последней свечи "
+                                f"(x{recent[-1] / others_median:.1f}) > лимита x{dump_mult}"
+                            )
                         return False
 
             # Проверка падения объёма в последней свече sustain:
@@ -162,6 +203,12 @@ class SetupDetector(BaseDetector):
                         f"Сигнал пропущен: объём последней свечи упал "
                         f"({recent[-1] / prev_avg:.1%} от среднего предыдущих)"
                     )
+                    if context is not None:
+                        context["stage"] = "volume_fading"
+                        context["reason"] = (
+                            f"объём последней свечи упал "
+                            f"({recent[-1] / prev_avg:.1%} от среднего предыдущих)"
+                        )
                     return False
 
             # Объём должен расти: последняя свеча sustain >= первой свечи sustain
@@ -171,6 +218,12 @@ class SetupDetector(BaseDetector):
                     f"Сигнал пропущен: объём снижается — "
                     f"последняя свеча ({recent[-1]:.0f}) < первая ({recent[0]:.0f})"
                 )
+                if context is not None:
+                    context["stage"] = "volume_declining"
+                    context["reason"] = (
+                        f"объём снижается — последняя свеча ({recent[-1]:.0f}) "
+                        f"< первая ({recent[0]:.0f})"
+                    )
                 return False
 
         return True
@@ -180,7 +233,7 @@ class SetupDetector(BaseDetector):
     # ------------------------------------------------------------------
 
     async def _check_oi_trend(
-        self, session, exchange: str, symbol: str
+        self, session, exchange: str, symbol: str, context: dict | None = None
     ) -> bool:
         """Проверить, что OI растёт (приток денег, а не перекладка)."""
         oi_values = await self._dp.load_oi_values(
@@ -194,19 +247,30 @@ class SetupDetector(BaseDetector):
             logger.info(
                 "Сигнал пропущен: OI снижается — последняя точка ниже предпоследней"
             )
+            if context is not None:
+                context["stage"] = "oi_declining"
+                context["reason"] = "OI снижается — последняя точка ниже предпоследней"
             return False
 
         slope_pct = calculate_oi_slope_pct(np.array(oi_values))
         if slope_pct is None:
             return False
 
-        return slope_pct >= self.config.oi_slope_min_pct
+        if slope_pct < self.config.oi_slope_min_pct:
+            if context is not None:
+                context["stage"] = "oi_slope_low"
+                context["reason"] = (
+                    f"наклон OI {slope_pct:.1f}% < минимума {self.config.oi_slope_min_pct}%"
+                )
+            return False
+
+        return True
 
     # ------------------------------------------------------------------
     # Price direction (public — used by backtest)
     # ------------------------------------------------------------------
 
-    def check_price_trend(self, candles: list[dict]) -> str | None:
+    def check_price_trend(self, candles: list[dict], context: dict | None = None) -> str | None:
         """Только лонг: цена должна вырасти, но не слишком сильно
         (фильтр «памп уже состоялся»).
         Также защита от рагпулов: если за последний час падение > N%."""
@@ -236,6 +300,12 @@ class SetupDetector(BaseDetector):
                             f"Сигнал пропущен: предварительный памп {pre_pump_pct:.1f}% "
                             f"(>{pre_surge_max}%) за 30 мин до sustain-окна"
                         )
+                        if context is not None:
+                            context["stage"] = "pre_surge_pump"
+                            context["reason"] = (
+                                f"предварительный памп {pre_pump_pct:.1f}% "
+                                f"(>{pre_surge_max}%) за 30 мин до sustain-окна"
+                            )
                         return None
 
         # Защита от рагпулов: падение за последний час
@@ -251,11 +321,19 @@ class SetupDetector(BaseDetector):
                             f"Сигнал пропущен: падение {drop:.1f}% за час "
                             f"(лимит {-max_drop}%)"
                         )
+                        if context is not None:
+                            context["stage"] = "hourly_drop"
+                            context["reason"] = f"падение {drop:.1f}% за час (лимит {-max_drop}%)"
                         return None
 
         change_pct = (closes[-1] / opens[0] - 1) * 100
 
         if change_pct < self.config.price_growth_min_pct:
+            if context is not None:
+                context["stage"] = "price_growth_low"
+                context["reason"] = (
+                    f"рост цены {change_pct:.1f}% < минимума {self.config.price_growth_min_pct}%"
+                )
             return None
 
         # Exhaustion filter v1: цена выросла за sustain-окно И свеча закрылась у верха
@@ -273,6 +351,12 @@ class SetupDetector(BaseDetector):
                         f"Сигнал пропущен: истощение — рост {change_pct:.1f}% "
                         f"(>{ex_gain}%) и свеча у верха (pos={close_pos:.2f} > {ex_pos})"
                     )
+                    if context is not None:
+                        context["stage"] = "exhaustion"
+                        context["reason"] = (
+                            f"истощение — рост {change_pct:.1f}% (>{ex_gain}%) "
+                            f"и свеча у верха (pos={close_pos:.2f} > {ex_pos})"
+                        )
                     return None
 
         # Exhaustion filter v2: экстремальный памп от baseline (pump-and-dump).
@@ -293,6 +377,12 @@ class SetupDetector(BaseDetector):
                     f"Сигнал пропущен: экстремальный памп {extreme_pump_pct:.1f}% "
                     f"от baseline (>{extreme_threshold:.0f}%) — вероятный pump-and-dump"
                 )
+                if context is not None:
+                    context["stage"] = "exhaustion_extreme"
+                    context["reason"] = (
+                        f"экстремальный памп {extreme_pump_pct:.1f}% от baseline "
+                        f"(>{extreme_threshold:.0f}%) — вероятный pump-and-dump"
+                    )
                 return None
 
         max_growth = self.config.price_growth_max_pct
@@ -300,6 +390,9 @@ class SetupDetector(BaseDetector):
             logger.info(
                 f"Сигнал пропущен: рост {change_pct:.1f}% > лимита {max_growth}%"
             )
+            if context is not None:
+                context["stage"] = "price_growth_high"
+                context["reason"] = f"рост {change_pct:.1f}% > лимита {max_growth}%"
             return None
 
         return "long"
