@@ -208,39 +208,41 @@ class Application:
                     "Бот продолжит работу в режиме сбора данных"
                 )
 
-            # ИИ-режим: полностью отдельный аккаунт, отдельный PositionManager,
-            # без Telegram (send_message=None) — видимость только через БД
-            # (AgentDecision + Trade.source='agent'), см. AGENTS.md.
-            if self.settings.agent.enabled:
-                agent_cfg = self.settings.agent
-                if not agent_cfg.api_key or not agent_cfg.secret:
-                    logger.error(
-                        "ИИ-режим включён, но не настроены api_key/secret отдельного "
-                        "аккаунта (agent.api_key/agent.secret в config.yaml)"
-                    )
-                else:
-                    self._agent_connector = ExchangeConnector(
-                        exchange_id=agent_cfg.exchange,
-                        api_key=agent_cfg.api_key,
-                        secret=agent_cfg.secret,
-                    )
-                    self._agent_positions = PositionManager(
-                        config=self.settings.trading,
-                        send_message=None,
-                        trading_connector=self._agent_connector,
-                        source="agent",
-                        agent_config=agent_cfg,
-                    )
-                    logger.info(
-                        f"ИИ-режим включён (dry_run={agent_cfg.dry_run}, "
-                        f"аккаунт={agent_cfg.exchange})"
-                    )
-                    try:
-                        async with async_session() as session:
-                            await self._agent_positions.sync_positions(session)
-                            await session.commit()
-                    except Exception:
-                        logger.exception("Не удалось синхронизировать позиции ИИ-режима")
+        # ИИ-режим: полностью отдельный аккаунт, отдельный PositionManager, без Telegram
+        # (send_message=None) — видимость только через БД (AgentDecision + Trade.source=
+        # 'agent'), см. AGENTS.md. Независим от trading.mode: на машине с алгоритмической
+        # торговлей на удалённом сервере локально держим trading.mode=signal (не дублировать
+        # real-исполнение на общем счёте), при этом ИИ-режим на отдельном счёте всё равно работает.
+        if self.settings.agent.enabled:
+            agent_cfg = self.settings.agent
+            if not agent_cfg.api_key or not agent_cfg.secret:
+                logger.error(
+                    "ИИ-режим включён, но не настроены api_key/secret отдельного "
+                    "аккаунта (agent.api_key/agent.secret в config.yaml)"
+                )
+            else:
+                self._agent_connector = ExchangeConnector(
+                    exchange_id=agent_cfg.exchange,
+                    api_key=agent_cfg.api_key,
+                    secret=agent_cfg.secret,
+                )
+                self._agent_positions = PositionManager(
+                    config=self.settings.trading,
+                    send_message=None,
+                    trading_connector=self._agent_connector,
+                    source="agent",
+                    agent_config=agent_cfg,
+                )
+                logger.info(
+                    f"ИИ-режим включён (dry_run={agent_cfg.dry_run}, "
+                    f"аккаунт={agent_cfg.exchange})"
+                )
+                try:
+                    async with async_session() as session:
+                        await self._agent_positions.sync_positions(session)
+                        await session.commit()
+                except Exception:
+                    logger.exception("Не удалось синхронизировать позиции ИИ-режима")
 
         # Первичное обновление рыночного контекста и отправка в Telegram
         if self._market_ctx and self.settings.market_context.enabled:

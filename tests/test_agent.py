@@ -338,6 +338,57 @@ class TestAgentToolkitMarketContext:
         assert "error" not in result
 
     @pytest.mark.asyncio
+    async def test_entries_restricted_true_for_risk_off(self, session):
+        session.add(MarketContextSnapshot(
+            timestamp=datetime.now(tz=timezone.utc),
+            regime="risk_off", regime_start=datetime.now(tz=timezone.utc),
+            trend="down", trend_start=datetime.now(tz=timezone.utc),
+            supertrend_color="green", btc_change_1h=-2.0, btc_change_4h=-3.0,
+            others_value=1e9, others_change_1h=-2.0, others_change_4h=-3.0,
+            ready=True,
+        ))
+        await session.commit()
+
+        toolkit = AgentToolkit(session=session, connector=MagicMock(exchange_id="bybit"))
+        result = await toolkit.dispatch("get_market_context", {})
+        assert result["entries_restricted"] is True
+        assert result["restriction_reason"]
+
+    @pytest.mark.asyncio
+    async def test_entries_restricted_true_for_cautious_red(self, session):
+        session.add(MarketContextSnapshot(
+            timestamp=datetime.now(tz=timezone.utc),
+            regime="cautious", regime_start=datetime.now(tz=timezone.utc),
+            trend="neutral", trend_start=datetime.now(tz=timezone.utc),
+            supertrend_color="red", btc_change_1h=-0.5, btc_change_4h=-1.2,
+            others_value=1e9, others_change_1h=-0.3, others_change_4h=-0.8,
+            ready=True,
+        ))
+        await session.commit()
+
+        toolkit = AgentToolkit(session=session, connector=MagicMock(exchange_id="bybit"))
+        result = await toolkit.dispatch("get_market_context", {})
+        assert result["entries_restricted"] is True
+        assert result["restriction_reason"]
+
+    @pytest.mark.asyncio
+    async def test_entries_not_restricted_for_cautious_green(self, session):
+        session.add(MarketContextSnapshot(
+            timestamp=datetime.now(tz=timezone.utc),
+            regime="cautious", regime_start=datetime.now(tz=timezone.utc),
+            trend="neutral", trend_start=datetime.now(tz=timezone.utc),
+            supertrend_color="green", btc_change_1h=-0.5, btc_change_4h=-1.2,
+            others_value=1e9, others_change_1h=-0.3, others_change_4h=-0.8,
+            ready=True,
+        ))
+        await session.commit()
+
+        toolkit = AgentToolkit(session=session, connector=MagicMock(exchange_id="bybit"))
+        result = await toolkit.dispatch("get_market_context", {})
+        assert result["entries_restricted"] is False
+        assert result["restriction_reason"] is None
+
+    @pytest.mark.asyncio
     async def test_ignores_not_ready_snapshot(self, session):
         session.add(MarketContextSnapshot(
             timestamp=datetime.now(tz=timezone.utc),

@@ -43,12 +43,18 @@ is malformed", 21.07.2026). Все команды ниже уже написан
    Если ≥ `daily_call_budget` — пропусти шаги 2-3 в этом цикле, сразу переходи к резюме и паузе.
 
 2. **Новые сигналы (вход).** Найди сигналы без решения `entry` в `agent_decisions`, не старше
-   ~15 минут (старше — сетап уже устарел, не имеет смысла оценивать):
+   ~15 минут (старше — сетап уже устарел, не имеет смысла оценивать). Важно: `signals.timestamp`
+   хранится как naive-строка вида `2026-07-22 07:47:05.768977` (пробел-разделитель, без `T` и
+   без `+00:00`) — `cutoff` формируй через `strftime('%Y-%m-%d %H:%M:%S.%f')`, а НЕ через
+   `.isoformat()` на aware-datetime: `isoformat()` даёт `T`-разделитель и суффикс `+00:00`, а при
+   строковом сравнении SQLite `' ' < 'T'`, из-за чего `timestamp >= cutoff` ложно фейлится для
+   ЛЮБОГО сигнала за тот же день (баг был найден и исправлен 22.07.2026 — сигнал по CL был
+   пропущен из-за этого):
    ```
    docker exec trading-bot python3 -c "
    import sqlite3, datetime
    con = sqlite3.connect('data/trading_bot.db')
-   cutoff = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=15)).isoformat()
+   cutoff = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=15)).strftime('%Y-%m-%d %H:%M:%S.%f')
    rows = con.execute('''
        SELECT id, symbol, setup_type, direction, confidence, message, timestamp FROM signals
        WHERE timestamp >= ? AND id NOT IN (SELECT signal_id FROM agent_decisions WHERE kind='entry' AND signal_id IS NOT NULL)
@@ -81,7 +87,7 @@ is malformed", 21.07.2026). Все команды ниже уже написан
    import sqlite3, datetime
    con = sqlite3.connect('data/trading_bot.db')
    interval_min = <reeval_interval_minutes из конфига>
-   cutoff = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=interval_min)).isoformat()
+   cutoff = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=interval_min)).strftime('%Y-%m-%d %H:%M:%S.%f')
    trades = con.execute(\"SELECT id, symbol FROM trades WHERE status='open' AND source='agent'\").fetchall()
    for tid, symbol in trades:
        last = con.execute(

@@ -179,6 +179,18 @@ class AgentToolkit:
         snap = (await self._session.execute(stmt)).scalar_one_or_none()
         if not snap or not snap.ready:
             return {"error": "market context unavailable"}
+        # Та же логика, что MarketContext.should_block_entries() — алго-режим в этих
+        # случаях сам не открывает позицию. Агент решает независимо, но при
+        # entries_restricted=true обязан требовать более сильных оснований (см.
+        # entry-agent.md, "Рыночный режим ограничивает вход").
+        entries_restricted = snap.regime == "risk_off" or (
+            snap.regime == "cautious" and snap.supertrend_color == "red"
+        )
+        restriction_reason = None
+        if snap.regime == "risk_off":
+            restriction_reason = "risk_off — алгоритм не открывает позиции ни по одному сигналу"
+        elif entries_restricted:
+            restriction_reason = "cautious + Supertrend=red — по аудиту июня 2026 все сделки в этом сочетании были убыточны"
         return {
             "regime": snap.regime,
             "trend": snap.trend,
@@ -190,6 +202,8 @@ class AgentToolkit:
             "snapshot_age_minutes": round(
                 (datetime.now(tz=timezone.utc) - snap.timestamp.replace(tzinfo=timezone.utc)).total_seconds() / 60, 1
             ),
+            "entries_restricted": entries_restricted,
+            "restriction_reason": restriction_reason,
         }
 
     async def _tool_get_higher_timeframe_history(
