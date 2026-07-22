@@ -78,7 +78,9 @@ is malformed", 21.07.2026). Все команды ниже уже написан
    - Спавни сабагента `entry-agent` (используй свой инструмент запуска сабагентов) с промптом:
      briefing + "Новый сигнал: {symbol}, направление {direction}, уверенность {confidence}%.
      {message}".
-   - Распарси его финальный JSON-ответ (`{"approve": bool, "reasoning": str}`).
+   - Распарси его финальный JSON-ответ (`{"approve": bool, "entry_mode": "limit"|"market",
+     "pullback_pct": float, "reasoning": str}` — `entry_mode`/`pullback_pct` опциональны, см.
+     `.claude/agents/entry-agent.md`).
    - Запиши решение во временный файл ВНУТРИ контейнера (`docker exec trading-bot sh -c
      "cat > /tmp/decision.json <<'EOF'\n{...}\nEOF"`, либо `docker cp` файла с хоста в
      `trading-bot:/tmp/decision.json` — оба варианта кладут файл туда, откуда его увидит
@@ -86,44 +88,62 @@ is malformed", 21.07.2026). Все команды ниже уже написан
      ```
      docker exec trading-bot python scripts/agent_actions.py open_entry /tmp/decision.json
      ```
-     где `decision.json` = `{"signal_id": ID, "approve": approve, "reasoning": reasoning}`.
-   - Скрипт сам учитывает `dry_run` — при `dry_run=true` сделка не откроется, но решение
-     запишется в `agent_decisions` для последующего анализа.
+     где `decision.json` = `{"signal_id": ID, "approve": approve, "entry_mode": entry_mode,
+     "pullback_pct": pullback_pct, "reasoning": reasoning}` (поля `entry_mode`/`pullback_pct`
+     передавай, только если сабагент их вернул — при их отсутствии в JSON срабатывает конфиговое
+     поведение по умолчанию).
+   - Скрипт сам учитывает `dry_run` и клэмпит `pullback_pct` в допустимый диапазон — при
+     `dry_run=true` сделка не откроется, но решение запишется в `agent_decisions` для
+     последующего анализа.
 
-3. **Открытые сделки (сопровождение).** Найди открытые сделки агента без свежей `reeval`-записи
-   за `reeval_interval_minutes`:
+3. **Открытые и pending сделки (сопровождение).** Найди сделки агента (открытые ИЛИ ещё
+   неисполненные лимитники на вход) без свежей `reeval`-записи за `reeval_interval_minutes`:
    ```
    docker exec trading-bot python3 -c "
    import sqlite3, datetime
    con = sqlite3.connect('data/trading_bot.db')
    interval_min = <reeval_interval_minutes из конфига>
    cutoff = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=interval_min)).strftime('%Y-%m-%d %H:%M:%S.%f')
-   trades = con.execute(\"SELECT id, symbol FROM trades WHERE status='open' AND source='agent'\").fetchall()
-   for tid, symbol in trades:
+   trades = con.execute(\"SELECT id, symbol, status FROM trades WHERE status IN ('open','pending') AND source='agent'\").fetchall()
+   for tid, symbol, status in trades:
        last = con.execute(
            'SELECT timestamp FROM agent_decisions WHERE trade_id=? AND kind=\'reeval\' ORDER BY timestamp DESC LIMIT 1',
            (tid,),
        ).fetchone()
        if not last or last[0] < cutoff:
-           print(tid, symbol)
+           print(tid, symbol, status)
    "
    ```
-   Для каждой найденной сделки:
+   Для каждой найденной сделки (не важно, `open` или `pending` — `reeval-agent` сам определяет
+   по `get_open_position.status`, какой набор действий уместен, см. `.claude/agents/
+   reeval-agent.md`):
    - Тот же briefing (можно переиспользовать из шага 2, если ещё актуален в этом цикле).
    - Спавни `reeval-agent` с промптом: briefing + `trade_id={ID}`. Напомни ему вызвать
      `get_open_position` и `get_recent_agent_decisions` первым делом.
-   - Распарси финальный JSON (`action` + опциональные `new_sl_price`/`extend_hours` + `reasoning`).
-   - Если `action == "hold"` — просто зафиксируй в своём резюме, ничего не вызывай (можно
-     логировать через `agent_actions.py`, но это не обязательно — hold не требует записи ради
-     чистоты БД от шума; на твоё усмотрение, если хочешь полноту истории — вызови любое действие,
-     `agent_actions.py` пока не поддерживает hold как отдельный logging-путь, это ОК пропускать).
+   - Распарси финальный JSON (`action` + поля по действию, см. `.claude/agents/reeval-agent.md`).
+   - Если `action` — `hold` или `keep_pending` — просто зафиксируй в своём резюме, ничего не
+     вызывай (можно логировать через `agent_actions.py`, но это не обязательно — не требует
+     записи ради чистоты БД от шума; на твоё усмотрение, если хочешь полноту истории — вызови
+     любое действие, `agent_actions.py` пока не поддерживает hold/keep_pending как отдельный
+     logging-путь, это ОК пропускать).
    - Иначе положи решение в `decision.json` внутри контейнера (см. шаг 2) и вызови
      соответствующее действие:
      ```
-     docker exec trading-bot python scripts/agent_actions.py tighten_sl /tmp/decision.json    # {"trade_id", "new_sl_price", "reasoning"}
-     docker exec trading-bot python scripts/agent_actions.py extend_hold /tmp/decision.json   # {"trade_id", "extend_hours", "reasoning"}
-     docker exec trading-bot python scripts/agent_actions.py close /tmp/decision.json         # {"trade_id", "reasoning"}
+     # status="open"
+     docker exec trading-bot python scripts/agent_actions.py tighten_sl /tmp/decision.json      # {"trade_id", "new_sl_price", "reasoning"}
+     docker exec trading-bot python scripts/agent_actions.py raise_tp /tmp/decision.json         # {"trade_id", "new_tp_price", "reasoning"}
+     docker exec trading-bot python scripts/agent_actions.py partial_close /tmp/decision.json    # {"trade_id", "reasoning"}
+     docker exec trading-bot python scripts/agent_actions.py extend_hold /tmp/decision.json      # {"trade_id", "extend_hours", "reasoning"}
+     docker exec trading-bot python scripts/agent_actions.py close /tmp/decision.json            # {"trade_id", "reasoning"}
+     # status="pending"
+     docker exec trading-bot python scripts/agent_actions.py reprice_pending /tmp/decision.json  # {"trade_id", "new_pullback_pct", "reasoning"}
+     docker exec trading-bot python scripts/agent_actions.py enter_market /tmp/decision.json     # {"trade_id", "reasoning"}
+     docker exec trading-bot python scripts/agent_actions.py cancel_pending /tmp/decision.json   # {"trade_id", "reasoning"}
      ```
+     Все действия (кроме `open_entry`) перед изменением перепроверяют состояние НА БИРЖЕ, не
+     только в БД — если механический цикл бота уже исполнил/снял/закрыл сделку, пока шёл вызов
+     сабагента, действие просто не применится (`applied: false` в ответе), это ожидаемо и не
+     ошибка.
 
 4. **Резюме.** Коротко (несколько предложений) расскажи: сколько сигналов оценил, сколько
    одобрил/отклонил и почему вкратце, сколько сделок переоценил и что изменил (если что-то).

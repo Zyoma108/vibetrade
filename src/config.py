@@ -122,8 +122,9 @@ class AgentConfig(BaseModel):
     торгует ими на ОТДЕЛЬНОМ аккаунте биржи, параллельно алгоритмической торговле
     (которая не меняется и не зависит от этого режима). Python не вызывает LLM сам —
     только предоставляет данные (scripts/agent_data.py) и исполняет решения
-    (scripts/agent_actions.py, дёргает apply_agent_* в PositionManager). Выключено по
-    умолчанию (enabled=False) — до этого момента поведение бота идентично текущему."""
+    (scripts/agent_actions.py, дёргает apply_agent_* в AgentPositionManager,
+    src/executor/agent_position_manager.py). Выключено по умолчанию (enabled=False) —
+    до этого момента поведение бота идентично текущему."""
 
     enabled: bool = Field(default=False, description="Включить ИИ-режим (доп. режим поверх алгоритма, не заменяет его)")
     dry_run: bool = Field(default=True, description="true = агент только оценивает и логирует решения, не открывает реальные сделки даже на своём аккаунте")
@@ -139,6 +140,11 @@ class AgentConfig(BaseModel):
     max_hold_extension_total_hours: float = Field(default=24.0, ge=0.0, description="Максимальное суммарное продление удержания на одну сделку, часов")
     allow_sl_tighten: bool = Field(default=True, description="Разрешить агенту подтягивать стоп-лосс (ослаблять стоп нельзя никогда, независимо от этого флага)")
     allow_early_close: bool = Field(default=True, description="Разрешить агенту закрывать свою позицию досрочно")
+    allow_raise_tp: bool = Field(default=True, description="Разрешить агенту поднимать тейк-профит (опускать нельзя никогда, независимо от этого флага)")
+    allow_partial_close: bool = Field(default=True, description="Разрешить агенту фиксировать часть позиции по рынку до автоматического триггера")
+    allow_pending_management: bool = Field(default=True, description="Разрешить агенту двигать/переводить в market/отменять свой неисполненный лимитник входа")
+    entry_pullback_min_pct: float = Field(default=0.5, ge=0.0, le=20.0, description="Нижняя граница отката для лимитника входа, который может выбрать агент (клэмп на стороне кода, не только промпт)")
+    entry_pullback_max_pct: float = Field(default=4.0, ge=0.0, le=20.0, description="Верхняя граница отката для лимитника входа, который может выбрать агент")
     daily_call_budget: int = Field(default=200, ge=1, description="Максимум запусков сабагентов в сутки (оркестратор сверяет с кол-вом строк agent_decisions за сегодня)")
 
 

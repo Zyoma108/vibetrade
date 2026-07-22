@@ -36,7 +36,7 @@ logger = logging.getLogger(__name__)
 # (AgentDecision.agent_version), чтобы позже сопоставить качество решений с
 # конкретной редакцией .claude/agents/*.md и .claude/skills/vibetrade-agent-loop.
 # Бампнуть при значимой правке промптов/скилла.
-AGENT_VERSION = "v2-orchestrator"
+AGENT_VERSION = "v3-flexible-execution"
 
 
 class AgentToolkit:
@@ -235,27 +235,53 @@ class AgentToolkit:
         return {"window_minutes": minutes, "distinct_symbols_with_signals": len(symbols), "symbols": symbols}
 
     async def _tool_get_open_position(self, trade_id: int) -> dict:
-        """Текущее состояние своей открытой сделки: цены, стоп/тейк, PnL, сколько
-        уже продлевали удержание (только для сопровождения)."""
+        """Текущее состояние своей сделки — открытой ИЛИ ещё не исполненного
+        лимитника на вход (status='pending'). Для pending PnL/TP/SL не имеют
+        смысла (entry_price — это ЦЕНА ЛИМИТНИКА, не факт входа), поэтому
+        для них отдаём дистанцию до исполнения и остаток таймаута вместо этого."""
         trade = await self._session.get(Trade, trade_id)
         if not trade:
             return {"error": "trade not found"}
         now = datetime.now(tz=timezone.utc)
-        age_hours = (now - trade.entry_time.replace(tzinfo=timezone.utc)).total_seconds() / 3600
         current_price = await self._current_price(trade.symbol)
 
+        if trade.status == "pending":
+            minutes_until_expiry = None
+            if trade.pending_expires_at:
+                remaining = (
+                    trade.pending_expires_at.replace(tzinfo=timezone.utc) - now
+                ).total_seconds() / 60
+                minutes_until_expiry = round(max(remaining, 0.0), 1)
+            return {
+                "trade_id": trade.id,
+                "symbol": trade.symbol,
+                "direction": trade.direction,
+                "status": trade.status,
+                "limit_price": trade.entry_price,
+                "quantity": trade.quantity,
+                "current_price": current_price,
+                "distance_to_fill_pct": (
+                    round((current_price / trade.entry_price - 1) * 100, 2)
+                    if current_price and trade.entry_price else None
+                ),
+                "minutes_until_expiry": minutes_until_expiry,
+            }
+
+        age_hours = (now - trade.entry_time.replace(tzinfo=timezone.utc)).total_seconds() / 3600
         sl_price = trade.current_sl_price
-        tp_price = None
+        tp_price = trade.current_tp_price
         if self._trading_config:
             if sl_price is None:
                 sl_price = trade.entry_price * (1 - self._trading_config.stop_loss_pct / 100)
-            sl_distance = trade.entry_price * (self._trading_config.stop_loss_pct / 100)
-            tp_price = trade.entry_price + sl_distance * self._trading_config.risk_reward_ratio
+            if tp_price is None:
+                sl_distance = trade.entry_price * (self._trading_config.stop_loss_pct / 100)
+                tp_price = trade.entry_price + sl_distance * self._trading_config.risk_reward_ratio
 
         return {
             "trade_id": trade.id,
             "symbol": trade.symbol,
             "direction": trade.direction,
+            "status": trade.status,
             "entry_price": trade.entry_price,
             "quantity": trade.quantity,
             "age_hours": round(age_hours, 2),

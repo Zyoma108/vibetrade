@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from src.agent.tools import AgentToolkit, build_strategy_briefing
 from src.config import AgentConfig, StrategyConfig, TradingConfig
+from src.executor.agent_position_manager import AgentPositionManager
 from src.executor.position_manager import PositionManager
 from src.storage.models import AgentDecision, Base, MarketContextSnapshot, Trade
 
@@ -65,8 +66,8 @@ def _trade(**overrides) -> Trade:
     return Trade(**params)
 
 
-def _agent_pm(**agent_overrides) -> PositionManager:
-    pm = PositionManager(
+def _agent_pm(**agent_overrides) -> AgentPositionManager:
+    pm = AgentPositionManager(
         config=_trading_config(),
         source="agent",
         agent_config=_agent_config(**agent_overrides),
@@ -75,6 +76,11 @@ def _agent_pm(**agent_overrides) -> PositionManager:
     pm._connector.set_tpsl = AsyncMock()
     pm._connector.cancel_all_orders = AsyncMock()
     pm._connector.close_position = AsyncMock()
+    pm._connector.create_market_order = AsyncMock(return_value={"fill_price": 100.0})
+    pm._connector.create_limit_order = AsyncMock()
+    pm._connector.place_reduce_only_limit = AsyncMock()
+    pm._connector.fetch_positions = AsyncMock(return_value=[])
+    pm._connector._call = AsyncMock()
     return pm
 
 
@@ -242,6 +248,160 @@ class TestApplyAgentClose:
         ok = await pm.apply_agent_close(AsyncMock(), pos, current_price=105.0)
         assert ok is False
         assert pos.status == "open"
+
+
+# ---------------------------------------------------------------------------
+# apply_agent_raise_tp — never lower, enforced in code (symmetric to tighten_sl)
+# ---------------------------------------------------------------------------
+
+
+class TestApplyAgentRaiseTP:
+    @pytest.mark.asyncio
+    async def test_rejects_lowering(self):
+        pm = _agent_pm()
+        pos = _trade(current_tp_price=120.0)
+        ok = await pm.apply_agent_raise_tp(pos, 110.0)  # lower than 120
+        assert ok is False
+        pm._connector.set_tpsl.assert_not_called()
+        assert pos.current_tp_price == 120.0
+
+    @pytest.mark.asyncio
+    async def test_rejects_equal_price(self):
+        pm = _agent_pm()
+        pos = _trade(current_tp_price=120.0)
+        ok = await pm.apply_agent_raise_tp(pos, 120.0)
+        assert ok is False
+
+    @pytest.mark.asyncio
+    async def test_accepts_raising(self):
+        pm = _agent_pm()
+        pos = _trade(current_tp_price=120.0)
+        ok = await pm.apply_agent_raise_tp(pos, 130.0)
+        assert ok is True
+        assert pos.current_tp_price == 130.0
+        pm._connector.set_tpsl.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_falls_back_to_computed_tp_when_unset(self):
+        """No current_tp_price recorded yet → derive from entry/config (5% SL × 3.0 RR = 15%)."""
+        pm = _agent_pm()
+        pos = _trade(current_tp_price=None, entry_price=100.0)  # computed TP = 115.0
+        ok = await pm.apply_agent_raise_tp(pos, 110.0)  # lower than computed 115.0
+        assert ok is False
+
+    @pytest.mark.asyncio
+    async def test_exchange_failure_does_not_update_state(self):
+        pm = _agent_pm()
+        pm._connector.set_tpsl.side_effect = Exception("boom")
+        pos = _trade(current_tp_price=120.0)
+        ok = await pm.apply_agent_raise_tp(pos, 130.0)
+        assert ok is False
+        assert pos.current_tp_price == 120.0
+
+
+# ---------------------------------------------------------------------------
+# apply_agent_partial_close — fixed 50%, no SL side effect, once per trade
+# ---------------------------------------------------------------------------
+
+
+class TestApplyAgentPartialClose:
+    @pytest.mark.asyncio
+    async def test_rejects_if_already_partial_closed(self):
+        pm = _agent_pm()
+        pos = _trade(partial_closed=True, quantity=2.0)
+        ok = await pm.apply_agent_partial_close(pos, current_price=110.0)
+        assert ok is False
+        pm._connector._call.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_closes_half_and_updates_bookkeeping(self):
+        pm = _agent_pm()
+        pm._connector.fetch_positions = AsyncMock(return_value=[{"contracts": 1.0}])
+        pos = _trade(entry_price=100.0, quantity=2.0, partial_closed=False)
+        ok = await pm.apply_agent_partial_close(pos, current_price=110.0)
+        assert ok is True
+        assert pos.partial_closed is True
+        assert pos.quantity == pytest.approx(1.0)
+        assert pos.partial_pnl == pytest.approx((110.0 - 100.0) * 1.0)
+        pm._connector.cancel_all_orders.assert_awaited_once()
+        pm._connector._call.assert_awaited_once()
+        pm._connector.set_tpsl.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_does_not_touch_sl(self):
+        """Partial close is independent of tighten_sl — no automatic breakeven move."""
+        pm = _agent_pm()
+        pos = _trade(entry_price=100.0, quantity=2.0, current_sl_price=94.0)
+        await pm.apply_agent_partial_close(pos, current_price=110.0)
+        assert pos.current_sl_price == 94.0
+
+    @pytest.mark.asyncio
+    async def test_order_failure_returns_false_without_mutating_position(self):
+        pm = _agent_pm()
+        pm._connector._call.side_effect = Exception("boom")
+        pos = _trade(entry_price=100.0, quantity=2.0)
+        ok = await pm.apply_agent_partial_close(pos, current_price=110.0)
+        assert ok is False
+        assert not pos.partial_closed
+        assert pos.quantity == 2.0
+
+
+# ---------------------------------------------------------------------------
+# Pending-order management — reprice / convert-to-market / cancel
+# ---------------------------------------------------------------------------
+
+
+class TestApplyAgentPendingManagement:
+    @pytest.mark.asyncio
+    async def test_reprice_moves_limit_and_resets_timeout(self, session):
+        pm = _agent_pm()
+        pm._get_current_price = AsyncMock(return_value=100.0)
+        pos = _trade(status="pending", entry_price=98.0, quantity=1.0)
+        ok = await pm.apply_agent_reprice_pending(session, pos, new_pullback_pct=2.0)
+        assert ok is True
+        assert pos.entry_price == pytest.approx(98.0)  # 100 * (1 - 2/100)
+        assert pos.pending_expires_at is not None
+        pm._connector.cancel_all_orders.assert_awaited_once()
+        pm._connector.create_limit_order.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_reprice_fails_without_price(self, session):
+        pm = _agent_pm()
+        pm._get_current_price = AsyncMock(return_value=None)
+        pos = _trade(status="pending", entry_price=98.0)
+        ok = await pm.apply_agent_reprice_pending(session, pos, new_pullback_pct=2.0)
+        assert ok is False
+        pm._connector.create_limit_order.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_convert_to_market_activates_position(self):
+        pm = _agent_pm()
+        pos = _trade(status="pending", entry_price=98.0, quantity=1.0)
+        ok = await pm.apply_agent_convert_to_market(pos)
+        assert ok is True
+        assert pos.status == "open"
+        assert pos.entry_price == 100.0  # from mocked create_market_order fill_price
+        pm._connector.cancel_all_orders.assert_awaited_once()
+        pm._connector.create_market_order.assert_awaited_once()
+        pm._connector.set_tpsl.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_convert_to_market_failure_keeps_pending(self):
+        pm = _agent_pm()
+        pm._connector.create_market_order.side_effect = Exception("boom")
+        pos = _trade(status="pending", entry_price=98.0)
+        ok = await pm.apply_agent_convert_to_market(pos)
+        assert ok is False
+        assert pos.status == "pending"
+
+    @pytest.mark.asyncio
+    async def test_cancel_pending_marks_cancelled(self):
+        pm = _agent_pm()
+        pos = _trade(status="pending", entry_price=98.0)
+        ok = await pm.apply_agent_cancel_pending(pos)
+        assert ok is True
+        assert pos.status == "cancelled"
+        pm._connector.cancel_all_orders.assert_awaited_once()
 
 
 # ---------------------------------------------------------------------------

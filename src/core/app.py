@@ -15,6 +15,7 @@ from src.analytics.price_surge_service import PriceSurgeSignalProcessor
 from src.collectors.market_data import MarketDataCollector
 from src.config import Settings
 from src.connectors.exchange import ExchangeConnector
+from src.executor.agent_position_manager import AgentPositionManager
 from src.executor.position_manager import PositionManager
 from src.notifier.telegram_bot import TelegramNotifier
 from src.storage.database import async_session, init_db
@@ -47,7 +48,7 @@ class Application:
         # reeval-agent, см. .claude/skills/vibetrade-agent-loop) — Python здесь только
         # держит механическую синхронизацию позиций, LLM сам не вызывает.
         self._agent_connector: ExchangeConnector | None = None
-        self._agent_positions: PositionManager | None = None
+        self._agent_positions: AgentPositionManager | None = None
         self._agent_watch_task: asyncio.Task | None = None
         self._agent_position_task: asyncio.Task | None = None
 
@@ -226,7 +227,7 @@ class Application:
                     api_key=agent_cfg.api_key,
                     secret=agent_cfg.secret,
                 )
-                self._agent_positions = PositionManager(
+                self._agent_positions = AgentPositionManager(
                     config=self.settings.trading,
                     send_message=None,
                     trading_connector=self._agent_connector,

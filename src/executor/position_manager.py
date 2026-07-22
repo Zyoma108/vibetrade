@@ -20,7 +20,12 @@ class PositionManager:
     Один экземпляр = один "пайплайн" (source='algo' или source='agent') на своём
     аккаунте биржи (trading_connector). Оба пайплайна используют одну таблицу
     trades, но все запросы/лимиты/кулдауны скоуплены по source — они не видят
-    и не блокируют друг друга."""
+    и не блокируют друг друга.
+
+    Здесь — только общая механика (алго- и ИИ-режим). Решения, которые принимает
+    ИИ-агент по своей сделке (tighten_sl/raise_tp/partial_close/reprice/...), живут
+    в подклассе `AgentPositionManager` (src/executor/agent_position_manager.py) —
+    чтобы менять их, не трогая этот файл и не рискуя поведением алго-режима."""
 
     def __init__(
         self,
@@ -188,7 +193,12 @@ class PositionManager:
         return 1.0
 
     async def open_position(
-        self, session: AsyncSession, signal: Signal, signal_id: int | None = None
+        self,
+        session: AsyncSession,
+        signal: Signal,
+        signal_id: int | None = None,
+        force_market: bool = False,
+        pullback_pct_override: float | None = None,
     ) -> tuple[Trade | None, str, str | None]:
         """Открыть позицию по сигналу (guard-проверки + диспетчер способа входа).
         Возвращает (trade, status, detail): status = 'opened' | 'pending' | 'limit' |
@@ -196,7 +206,11 @@ class PositionManager:
         'pending' — лимитник на вход выставлен на откате, ждёт исполнения
         (см. `pending_entry_pullback_pct`); TP/SL и partial-close выставляются
         позже, при активации в `check_pending_entries()`.
-        detail — описание ошибки (только если status не 'opened'/'pending')."""
+        detail — описание ошибки (только если status не 'opened'/'pending').
+
+        `force_market`/`pullback_pct_override` — используются только AgentPositionManager
+        (entry-agent сам выбирает способ входа); алго-путь их никогда не передаёт, поэтому
+        поведение по умолчанию не меняется."""
 
         # Проверка рыночного режима (risk_off или cautious+ST=red)
         if self.block_entries:
@@ -283,9 +297,15 @@ class PositionManager:
         except Exception as e:
             logger.warning(f"Не удалось выставить плечо для {signal.symbol}: {e}")
 
-        if self.config.pending_entry_pullback_pct > 0:
+        effective_pullback_pct = (
+            pullback_pct_override
+            if pullback_pct_override is not None
+            else self.config.pending_entry_pullback_pct
+        )
+        if not force_market and effective_pullback_pct > 0:
             return await self._place_pending_entry(
-                session, signal, signal_id, reference_price, risk_budget
+                session, signal, signal_id, reference_price, risk_budget,
+                pullback_pct_override=pullback_pct_override,
             )
         return await self._place_market_entry(
             session, signal, signal_id, reference_price, risk_budget
@@ -474,17 +494,24 @@ class PositionManager:
         signal_id: int | None,
         reference_price: float,
         risk_budget: float,
+        pullback_pct_override: float | None = None,
     ) -> tuple[Trade | None, str, str | None]:
         """Вход лимитным ордером на откате от цены сигнала (решает проблему
         покупки на пике пампа). TP/SL и partial-close выставляются позже,
-        при исполнении лимитника — см. `check_pending_entries()`."""
-        limit_price = reference_price * (1 - self.config.pending_entry_pullback_pct / 100)
+        при исполнении лимитника — см. `check_pending_entries()`.
+        `pullback_pct_override` — свой откат вместо конфигового (см. AgentPositionManager)."""
+        pullback_pct = (
+            pullback_pct_override
+            if pullback_pct_override is not None
+            else self.config.pending_entry_pullback_pct
+        )
+        limit_price = reference_price * (1 - pullback_pct / 100)
         sl_distance = limit_price * (self.config.stop_loss_pct / 100)
         quantity = risk_budget / sl_distance
 
         logger.info(
             f"Pending-вход {signal.symbol}: сигнал=${reference_price:.6f} → "
-            f"лимит=${limit_price:.6f} (откат {self.config.pending_entry_pullback_pct}%), "
+            f"лимит=${limit_price:.6f} (откат {pullback_pct}%), "
             f"qty={quantity:.2f}, размер=${quantity * limit_price:.0f}"
         )
 
@@ -526,7 +553,7 @@ class PositionManager:
             f"⏳ <b>Лимитник на вход выставлен</b> {signal.direction.upper()}\n"
             f"Монета: {signal.symbol}\n"
             f"Сигнал: ${reference_price:.6f} → Лимит: ${limit_price:.6f} "
-            f"(откат {self.config.pending_entry_pullback_pct}%)\n"
+            f"(откат {pullback_pct}%)\n"
             f"Истекает через {self.config.pending_entry_timeout_minutes:.0f} мин"
         )
         logger.info(f"Pending-вход выставлен: {signal.symbol} @ {limit_price:.6f}")
@@ -578,8 +605,30 @@ class PositionManager:
         pos.entry_price = fill_price
         pos.entry_time = datetime.now(tz=timezone.utc)
         pos.status = "open"
+
         # Лимитник на вход исполнился как maker (резидентный ордер в стакане)
-        pos.fee = (pos.fee or 0.0) + self._fee(pos.quantity * fill_price, taker=False)
+        tp_price, sl_price = await self._setup_tp_sl_and_partial(pos, fill_price, is_maker=True)
+
+        tp_pct = (tp_price / fill_price - 1) * 100
+        sl_pct = (1 - sl_price / fill_price) * 100
+        await self._notify(
+            f"✅ <b>Лимитник на вход исполнен</b> {pos.direction.upper()}\n"
+            f"Монета: {pos.symbol}\n"
+            f"Вход: ${fill_price:.6f}\n"
+            f"TP: ${tp_price:.6f} (+{tp_pct:.1f}%) | SL: ${sl_price:.6f} (-{sl_pct:.1f}%)"
+        )
+        logger.info(f"Pending-вход исполнен: {pos.symbol} @ {fill_price:.6f}")
+        self._reset_errors(pos.symbol)
+
+    async def _setup_tp_sl_and_partial(
+        self, pos: Trade, fill_price: float, is_maker: bool
+    ) -> tuple[float, float]:
+        """Общая часть активации позиции после исполнения входа (лимитником или
+        market-ордером): комиссия, TP/SL, лимитник частичной фиксации. Возвращает
+        (tp_price, sl_price). Используется `_activate_pending_entry` (механическое
+        исполнение лимитника, ОБА источника) и `AgentPositionManager.
+        apply_agent_convert_to_market` (агент перевёл pending в market)."""
+        pos.fee = (pos.fee or 0.0) + self._fee(pos.quantity * fill_price, taker=not is_maker)
 
         tp_price = self._tp_price(fill_price)
         sl_price = self._sl_price(fill_price)
@@ -612,16 +661,7 @@ class PositionManager:
                     f"Не удалось выставить лимитник частичной фиксации для {pos.symbol}"
                 )
 
-        tp_pct = (tp_price / fill_price - 1) * 100
-        sl_pct = (1 - sl_price / fill_price) * 100
-        await self._notify(
-            f"✅ <b>Лимитник на вход исполнен</b> {pos.direction.upper()}\n"
-            f"Монета: {pos.symbol}\n"
-            f"Вход: ${fill_price:.6f}\n"
-            f"TP: ${tp_price:.6f} (+{tp_pct:.1f}%) | SL: ${sl_price:.6f} (-{sl_pct:.1f}%)"
-        )
-        logger.info(f"Pending-вход исполнен: {pos.symbol} @ {fill_price:.6f}")
-        self._reset_errors(pos.symbol)
+        return tp_price, sl_price
 
     async def _expire_pending_entry(self, pos: Trade) -> None:
         """Лимитник на вход не исполнился за отведённое время — снять."""
@@ -1087,91 +1127,6 @@ class PositionManager:
                 await self._send_message(text)
             except Exception:
                 logger.exception("Ошибка отправки торгового уведомления")
-
-    # ==================================================================
-    # ИИ-АГЕНТ — исполнительные примитивы (source='agent' только).
-    # Решение принимает оркестратор (Claude Code /loop + сабагенты), эти методы
-    # вызываются из scripts/agent_actions.py — не из Python-цикла бота. Здесь же
-    # жёсткие рельсы (SL нельзя ослабить, продление капается конфигом), которые
-    # действуют независимо от того, что попросила модель.
-    # ==================================================================
-
-    def _current_sl_price(self, pos: Trade) -> float:
-        """Последний известный эффективный стоп. Нужен, чтобы гарантировать
-        монотонность: агент может только подтягивать SL, никогда не ослаблять."""
-        if pos.current_sl_price is not None:
-            return pos.current_sl_price
-        if pos.partial_closed:
-            return pos.entry_price  # переведено в безубыток, столбец ещё не проставлен (старые строки)
-        return self._sl_price(pos.entry_price)
-
-    async def apply_agent_tighten_sl(self, pos: Trade, new_sl_price: float) -> bool:
-        """Подтянуть стоп по решению агента. Отклоняет попытку ослабить SL —
-        это жёсткий рельс в коде, а не только инструкция модели."""
-        current_sl = self._current_sl_price(pos)
-        if new_sl_price <= current_sl:
-            logger.warning(
-                f"Agent: отклонена попытка ослабить SL для {pos.symbol} "
-                f"({new_sl_price:.6f} <= текущий {current_sl:.6f})"
-            )
-            return False
-        try:
-            await self._connector.set_tpsl(  # type: ignore[union-attr]
-                symbol=pos.symbol,
-                side="buy" if pos.direction == "long" else "sell",
-                amount=pos.quantity,
-                tp_price=self._tp_price(pos.entry_price),
-                sl_price=new_sl_price,
-            )
-        except Exception as e:
-            logger.warning(f"Agent: не удалось подтянуть SL для {pos.symbol}: {e}")
-            return False
-        pos.current_sl_price = new_sl_price
-        return True
-
-    async def apply_agent_hold_extension(self, pos: Trade, extend_hours: float) -> bool:
-        """Продлить дедлайн max_hold_hours. Капается и за раз, и суммарно
-        конфигом agent.max_hold_extension_hours / max_hold_extension_total_hours."""
-        cfg = self._agent_config
-        if not cfg:
-            return False
-        extend_hours = max(0.0, min(extend_hours, cfg.max_hold_extension_hours))
-        total_used = pos.llm_hold_extension_total_hours or 0.0
-        remaining_budget = cfg.max_hold_extension_total_hours - total_used
-        if remaining_budget <= 0:
-            logger.info(f"Agent: лимит продлений удержания исчерпан для {pos.symbol}")
-            return False
-        extend_hours = min(extend_hours, remaining_budget)
-        if extend_hours <= 0:
-            return False
-
-        base_deadline = pos.entry_time.replace(tzinfo=timezone.utc) + timedelta(
-            hours=self.config.max_hold_hours
-        )
-        current_deadline = (
-            pos.llm_hold_until.replace(tzinfo=timezone.utc) if pos.llm_hold_until else base_deadline
-        )
-        pos.llm_hold_until = current_deadline + timedelta(hours=extend_hours)
-        pos.llm_hold_extension_total_hours = total_used + extend_hours
-        return True
-
-    async def apply_agent_close(
-        self, session: AsyncSession, pos: Trade, current_price: float | None
-    ) -> bool:
-        """Закрыть позицию досрочно по решению агента (снимает висящий
-        лимитник частичной фиксации перед закрытием)."""
-        try:
-            await self._connector.cancel_all_orders(pos.symbol)  # type: ignore[union-attr]
-        except Exception:
-            logger.warning(f"Agent close: не удалось отменить ордера для {pos.symbol}")
-        try:
-            await self._connector.close_position(pos.symbol)  # type: ignore[union-attr]
-        except Exception:
-            logger.exception(f"Agent close: не удалось закрыть {pos.symbol}")
-            return False
-        exit_price = current_price or pos.entry_price
-        await self._close_position(pos, exit_price, "llm_close")
-        return True
 
     # ------------------------------------------------------------------
     # Error cascade protection

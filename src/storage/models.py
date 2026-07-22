@@ -105,7 +105,7 @@ class Trade(Base):
     exit_price: Mapped[float | None] = mapped_column(Float, nullable=True)
     exit_time: Mapped[datetime | None] = mapped_column(nullable=True)
     pnl: Mapped[float | None] = mapped_column(Float, nullable=True)
-    status: Mapped[str] = mapped_column(String(16), default="open")  # pending / open / closed / expired
+    status: Mapped[str] = mapped_column(String(16), default="open")  # pending / open / closed / expired / cancelled (cancelled — агент сам отказался от pending-сетапа, в отличие от expired — не докатился по таймауту)
     tp_sl_set: Mapped[bool] = mapped_column(default=False)  # выставлены ли TP/SL на бирже
     partial_closed: Mapped[bool] = mapped_column(default=False)  # выполнено ли частичное закрытие
     partial_pnl: Mapped[float | None] = mapped_column(Float, nullable=True, default=0.0)  # PnL от частичных закрытий
@@ -115,6 +115,7 @@ class Trade(Base):
     llm_hold_until: Mapped[datetime | None] = mapped_column(nullable=True, default=None)  # ИИ-агент продлил дедлайн max_hold_hours (только увеличивает, не уменьшает)
     llm_hold_extension_total_hours: Mapped[float] = mapped_column(Float, default=0.0)  # накопленное продление, капается agent.max_hold_extension_total_hours
     current_sl_price: Mapped[float | None] = mapped_column(Float, nullable=True, default=None)  # последний известный эффективный стоп (нужен, чтобы агент мог только подтягивать, не ослаблять)
+    current_tp_price: Mapped[float | None] = mapped_column(Float, nullable=True, default=None)  # последний известный эффективный тейк (нужен, чтобы агент мог только поднимать, не опускать); None = формульный (entry + SL_distance × risk_reward_ratio)
 
 
 class AgentDecision(Base):

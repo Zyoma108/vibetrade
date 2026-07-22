@@ -79,6 +79,7 @@ async def init_db() -> None:
             ("llm_hold_until", "DATETIME"),
             ("llm_hold_extension_total_hours", "FLOAT DEFAULT 0.0"),
             ("current_sl_price", "FLOAT"),
+            ("current_tp_price", "FLOAT"),
         ]:
             try:
                 await conn.exec_driver_sql(
