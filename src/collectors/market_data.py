@@ -126,6 +126,7 @@ class MarketDataCollector:
             for t in bybit_raw:
                 if self._passes_basic_filter(t):
                     session.add(Ticker(**t))
+            await session.commit()
 
             # 4. Собираем данные
             for connector in self._connectors:
@@ -156,8 +157,13 @@ class MarketDataCollector:
         # 3. Сохраняем отфильтрованные тикеры
         for t in selected:
             session.add(Ticker(**t))
+        await session.commit()
 
-        # 4. Собираем свечи для всех отобранных монет
+        # 4. Собираем свечи для всех отобранных монет. Коммитим после каждой монеты (а не
+        # одним commit в конце цикла) — иначе SQLAlchemy держит write-лок SQLite открытым
+        # с первого автофлаша (session.scalar ниже) и до конца всего ~5-минутного скана,
+        # блокируя параллельных писателей (агент ИИ-режима) на весь этот срок. См. AGENTS.md,
+        # "База данных".
         for t in selected:
             symbol = t["symbol"]
             try:
@@ -172,12 +178,14 @@ class MarketDataCollector:
                     )
                     if not exists:
                         session.add(Candle(**c))
+                await session.commit()
             except Exception as e:
                 logger.warning(
                     f"{connector.exchange_id}: свечи для {symbol}: {e}"
                 )
 
-        # 5. OI собираем для всех монет (с дедупликацией: только если значение изменилось)
+        # 5. OI собираем для всех монет (с дедупликацией: только если значение изменилось).
+        # Тоже коммитим по монете — см. комментарий выше.
         logger.info(
             f"{connector.exchange_id}: сбор OI для {len(selected)} монет..."
         )
@@ -198,6 +206,7 @@ class MarketDataCollector:
                     )
                     if last_oi is None or last_oi != oi["value"]:
                         session.add(OpenInterest(**oi))
+                        await session.commit()
             except Exception as e:
                 logger.warning(
                     f"{connector.exchange_id}: OI для {symbol}: {e}"
