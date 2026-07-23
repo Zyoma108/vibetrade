@@ -10,6 +10,7 @@ scripts/agent_data.py, чтение).
 
 Usage:
     python scripts/agent_actions.py open_entry /path/to/decision.json
+    python scripts/agent_actions.py create_manual_signal /path/to/decision.json
     python scripts/agent_actions.py tighten_sl /path/to/decision.json
     python scripts/agent_actions.py raise_tp /path/to/decision.json
     python scripts/agent_actions.py partial_close /path/to/decision.json
@@ -20,8 +21,13 @@ Usage:
     python scripts/agent_actions.py cancel_pending /path/to/decision.json
 
 Форматы decision.json по действиям:
-    open_entry:       {"signal_id": int, "approve": bool, "entry_mode": "limit"|"market",
-                        "pullback_pct": float (опционально, только для limit), "reasoning": str}
+    open_entry:          {"signal_id": int, "approve": bool, "entry_mode": "limit"|"market",
+                           "pullback_pct": float (опционально, только для limit), "reasoning": str}
+    create_manual_signal: {"symbol": str, "confidence": int (опционально, default 50),
+                            "message": str} — вставляет строку в signals с setup_type="manual"
+                            (детектор её не генерировал), возвращает signal_id для open_entry.
+                            Только оркестратор, по запросу пользователя вне обычного цикла —
+                            см. AGENTS.md, "Ручной запрос пользователя".
     tighten_sl:        {"trade_id": int, "new_sl_price": float, "reasoning": str}
     raise_tp:          {"trade_id": int, "new_tp_price": float, "reasoning": str}
     partial_close:     {"trade_id": int, "reasoning": str}
@@ -98,6 +104,33 @@ async def _verify_pending(pm: AgentPositionManager, trade: Trade) -> bool:
     if trade.status != "pending":
         return False
     return not await pm._exchange_has_open_position(trade.symbol)
+
+
+MANUAL_SIGNAL_MARKER = "[РУЧНОЙ ЗАПРОС — детектор объём/OI/цену не проверял] "
+
+
+async def create_manual_signal(session, pm: AgentPositionManager, cfg, payload: dict) -> dict:
+    """Вставляет строку в signals в обход детектора — по запросу пользователя вне
+    обычного цикла (оркестратор уже сделал первичную проверку своими руками через
+    agent_data.py и решил, что сетап стоит отдать на оценку entry-agent). Long-only,
+    как и весь остальной пайплайн. signal_id из ответа идёт прямиком в open_entry —
+    дальше вся цепочка (briefing → entry-agent → open_entry → race-guards → dry_run)
+    работает без изменений."""
+    symbol = payload["symbol"]
+    confidence = int(payload.get("confidence", 50))
+    message = MANUAL_SIGNAL_MARKER + payload["message"]
+
+    signal = SignalModel(
+        timestamp=datetime.now(tz=timezone.utc),
+        symbol=symbol,
+        setup_type="manual",
+        direction="long",
+        confidence=confidence,
+        message=message,
+    )
+    session.add(signal)
+    await session.flush()
+    return {"success": True, "signal_id": signal.id}
 
 
 async def open_entry(session, pm: AgentPositionManager, cfg, payload: dict) -> dict:
@@ -306,6 +339,7 @@ async def cancel_pending(session, pm: AgentPositionManager, cfg, payload: dict) 
 
 ACTIONS = {
     "open_entry": open_entry,
+    "create_manual_signal": create_manual_signal,
     "tighten_sl": tighten_sl,
     "raise_tp": raise_tp,
     "partial_close": partial_close,
