@@ -24,8 +24,6 @@ strategy:
     - DEXE
     - HOLO
     - WHITEWHALE
-    - ESPORTS
-    - LA
     # US-токены — требуют ByBit agreement, не сканируем
     - META
     - AMAT
