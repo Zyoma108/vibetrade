@@ -18,7 +18,7 @@ from src.agent.tools import AgentToolkit, build_strategy_briefing
 from src.config import AgentConfig, StrategyConfig, TradingConfig
 from src.executor.agent_position_manager import AgentPositionManager
 from src.executor.position_manager import PositionManager
-from src.storage.models import AgentDecision, Base, MarketContextSnapshot, Trade
+from src.storage.models import AgentDecision, Base, Candle, MarketContextSnapshot, OpenInterest, Trade
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -563,6 +563,76 @@ class TestAgentToolkitMarketContext:
         toolkit = AgentToolkit(session=session, connector=MagicMock(exchange_id="bybit"))
         result = await toolkit.dispatch("get_market_context", {})
         assert "error" in result
+
+
+# ---------------------------------------------------------------------------
+# AgentToolkit — candle/OI exchange fallback (collector dedups shared-symbol
+# candles onto binance; agent tools must not read that as "no data")
+# ---------------------------------------------------------------------------
+
+
+class TestAgentToolkitExchangeFallback:
+    @pytest.mark.asyncio
+    async def test_symbol_snapshot_falls_back_to_binance(self, session):
+        symbol = "ZIL/USDT:USDT"
+        now = datetime.now(tz=timezone.utc)
+        for i in range(3):
+            session.add(Candle(
+                exchange="binance", symbol=symbol, timestamp=now + timedelta(minutes=i),
+                open=1.0, high=1.1, low=0.9, close=1.0 + i * 0.01, volume=100.0,
+            ))
+        await session.commit()
+
+        toolkit = AgentToolkit(session=session, connector=MagicMock(exchange_id="bybit"))
+        result = await toolkit._tool_get_symbol_snapshot(symbol, bars=10)
+        assert "error" not in result
+        assert result["bars"] == 3
+
+    @pytest.mark.asyncio
+    async def test_symbol_snapshot_prefers_primary_exchange(self, session):
+        symbol = "ZIL/USDT:USDT"
+        now = datetime.now(tz=timezone.utc)
+        session.add(Candle(
+            exchange="bybit", symbol=symbol, timestamp=now,
+            open=1.0, high=1.0, low=1.0, close=2.0, volume=50.0,
+        ))
+        session.add(Candle(
+            exchange="binance", symbol=symbol, timestamp=now,
+            open=1.0, high=1.0, low=1.0, close=99.0, volume=50.0,
+        ))
+        await session.commit()
+
+        toolkit = AgentToolkit(session=session, connector=MagicMock(exchange_id="bybit"))
+        result = await toolkit._tool_get_symbol_snapshot(symbol, bars=10)
+        assert result["last_close"] == 2.0
+
+    @pytest.mark.asyncio
+    async def test_symbol_snapshot_error_when_no_exchange_has_data(self, session):
+        toolkit = AgentToolkit(session=session, connector=MagicMock(exchange_id="bybit"))
+        result = await toolkit._tool_get_symbol_snapshot("NOPE/USDT:USDT", bars=10)
+        assert result == {"error": "no candle data"}
+
+    @pytest.mark.asyncio
+    async def test_oi_trend_falls_back_to_binance(self, session):
+        symbol = "ZIL/USDT:USDT"
+        now = datetime.now(tz=timezone.utc)
+        for i in range(3):
+            session.add(OpenInterest(
+                exchange="binance", symbol=symbol, timestamp=now + timedelta(minutes=i),
+                value=1000.0 + i * 10,
+            ))
+        await session.commit()
+
+        toolkit = AgentToolkit(session=session, connector=MagicMock(exchange_id="bybit"))
+        result = await toolkit._tool_get_oi_trend(symbol, n_bars=10)
+        assert "error" not in result
+        assert result["points"] == 3
+
+    @pytest.mark.asyncio
+    async def test_oi_trend_error_when_no_exchange_has_data(self, session):
+        toolkit = AgentToolkit(session=session, connector=MagicMock(exchange_id="bybit"))
+        result = await toolkit._tool_get_oi_trend("NOPE/USDT:USDT", n_bars=10)
+        assert result == {"error": "insufficient OI history"}
 
 
 class TestAgentToolkitRecentAgentDecisions:

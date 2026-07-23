@@ -81,13 +81,27 @@ class AgentToolkit:
         row = (await self._session.execute(stmt)).first()
         return row[0] if row else None
 
+    async def _resolve_exchange(self, model: type[Candle] | type[OpenInterest], symbol: str) -> str:
+        """Сборщик (src/collectors/market_data.py) не дублирует свечи/OI для монет,
+        торгуемых и на Bybit, и на Binance одновременно — они пишутся только под
+        exchange='binance'. Если на бирже агентского аккаунта для символа пусто,
+        падаем на binance вместо того, чтобы считать данные отсутствующими."""
+        primary = self._connector.exchange_id
+        stmt = select(model.id).where(model.exchange == primary, model.symbol == symbol).limit(1)
+        if (await self._session.execute(stmt)).first():
+            return primary
+        stmt = select(model.id).where(model.exchange == "binance", model.symbol == symbol).limit(1)
+        if (await self._session.execute(stmt)).first():
+            return "binance"
+        return primary
+
     # ------------------------------------------------------------------
     # Data tools
     # ------------------------------------------------------------------
 
     async def _tool_get_symbol_snapshot(self, symbol: str, bars: int = 30) -> dict:
         """Последние N свечей текущего таймфрейма: диапазон цены, объём, % изменения."""
-        exchange = self._connector.exchange_id
+        exchange = await self._resolve_exchange(Candle, symbol)
         if self._candle_cache:
             candles = await self._candle_cache.load_or_refresh(self._session, exchange, symbol, bars)
         else:
@@ -120,7 +134,7 @@ class AgentToolkit:
         """Тренд открытого интереса за последние N точек. Рост OI вместе с
         объёмом = новые деньги; плоский/падающий OI при растущем объёме =
         вероятно перекладывание позиций, не новый спрос."""
-        exchange = self._connector.exchange_id
+        exchange = await self._resolve_exchange(OpenInterest, symbol)
         stmt = (
             select(OpenInterest.value)
             .where(OpenInterest.exchange == exchange, OpenInterest.symbol == symbol)
