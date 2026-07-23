@@ -19,6 +19,7 @@ Usage:
     python scripts/agent_actions.py reprice_pending /path/to/decision.json
     python scripts/agent_actions.py enter_market /path/to/decision.json
     python scripts/agent_actions.py cancel_pending /path/to/decision.json
+    python scripts/agent_actions.py hold /path/to/decision.json
 
 Форматы decision.json по действиям:
     open_entry:          {"signal_id": int, "approve": bool, "entry_mode": "limit"|"market",
@@ -36,6 +37,13 @@ Usage:
     reprice_pending:   {"trade_id": int, "new_pullback_pct": float, "reasoning": str}
     enter_market:      {"trade_id": int, "reasoning": str}
     cancel_pending:    {"trade_id": int, "reasoning": str}
+    hold:              {"trade_id": int, "reasoning": str} — чистое логирование reeval-вердикта
+                        hold/keep_pending (verdict берётся из Trade.status, ничего не меняет в
+                        сделке/на бирже). Нужен, чтобы cadence-проверка оркестратора (последняя
+                        kind='reeval' запись по trade_id) видела реальное время последнего
+                        реэвала, даже если сама сессия оркестратора это забудет (compaction,
+                        перезапуск /loop) — иначе она решает, что реэвала давно не было, и
+                        вызывает reeval-agent раньше срока.
 
 `entry_mode`/`pullback_pct`/`new_pullback_pct` клэмпятся на стороне кода в диапазон
 agent.entry_pullback_min_pct..max_pct — LLM выбирает число, но границу держит код,
@@ -337,6 +345,26 @@ async def cancel_pending(session, pm: AgentPositionManager, cfg, payload: dict) 
     return {"success": True, "applied": applied}
 
 
+async def hold(session, pm: AgentPositionManager, cfg, payload: dict) -> dict:
+    """Чистая запись reeval-вердикта hold/keep_pending — не трогает сделку/лимитник,
+    только agent_decisions. verdict определяется по Trade.status, а не приходит от
+    вызывающего, чтобы оркестратор мог передать один и тот же payload независимо от
+    того, каким словом это назвал reeval-agent."""
+    trade_id = payload["trade_id"]
+    reasoning = payload.get("reasoning", "")
+
+    trade = await session.get(Trade, trade_id)
+    if not trade:
+        return {"success": False, "error": f"trade {trade_id} not found"}
+
+    verdict = "keep_pending" if trade.status == "pending" else "hold"
+    await _record(
+        session, kind="reeval", symbol=trade.symbol, verdict=verdict,
+        reasoning=reasoning, applied=True, model=cfg.model, trade_id=trade_id,
+    )
+    return {"success": True, "applied": True, "verdict": verdict}
+
+
 ACTIONS = {
     "open_entry": open_entry,
     "create_manual_signal": create_manual_signal,
@@ -348,6 +376,7 @@ ACTIONS = {
     "reprice_pending": reprice_pending,
     "enter_market": enter_market,
     "cancel_pending": cancel_pending,
+    "hold": hold,
 }
 
 

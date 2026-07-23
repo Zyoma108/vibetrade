@@ -121,11 +121,15 @@ is malformed", 21.07.2026). Все команды ниже уже написан
    - Спавни `reeval-agent` с промптом: briefing + `trade_id={ID}`. Напомни ему вызвать
      `get_open_position` и `get_recent_agent_decisions` первым делом.
    - Распарси финальный JSON (`action` + поля по действию, см. `.claude/agents/reeval-agent.md`).
-   - Если `action` — `hold` или `keep_pending` — просто зафиксируй в своём резюме, ничего не
-     вызывай (можно логировать через `agent_actions.py`, но это не обязательно — не требует
-     записи ради чистоты БД от шума; на твоё усмотрение, если хочешь полноту истории — вызови
-     любое действие, `agent_actions.py` пока не поддерживает hold/keep_pending как отдельный
-     logging-путь, это ОК пропускать).
+   - Если `action` — `hold` или `keep_pending` — зафиксируй в своём резюме И вызови:
+     ```
+     docker exec trading-bot python scripts/agent_actions.py hold /tmp/decision.json  # {"trade_id", "reasoning"}
+     ```
+     (verdict `hold` vs `keep_pending` скрипт определит сам по `Trade.status`, ничего в сделке не
+     меняет). Это обязательно, а не по желанию: без записи cadence-проверка на шаге 3 (ищет
+     последнюю `kind='reeval'` по `trade_id`) не увидит, что реэвал только что был, если твоя
+     собственная память об этом потеряется (compaction, перезапуск `/loop`) — решит, что реэвала
+     давно не было, и вызовет `reeval-agent` раньше срока.
    - Иначе положи решение в `decision.json` внутри контейнера (см. шаг 2) и вызови
      соответствующее действие:
      ```
