@@ -62,7 +62,17 @@ is malformed", 21.07.2026). Все команды ниже уже написан
        SELECT id, symbol, setup_type, direction, confidence, message, timestamp FROM signals
        WHERE timestamp >= ?
          AND id NOT IN (SELECT signal_id FROM agent_decisions WHERE kind='entry' AND signal_id IS NOT NULL)
-         AND symbol NOT IN (SELECT symbol FROM agent_decisions WHERE kind='entry' AND timestamp >= ?)
+         AND symbol NOT IN (
+             SELECT ad.symbol FROM agent_decisions ad
+             WHERE ad.kind='entry' AND ad.timestamp >= ?
+               AND (
+                 ad.verdict != 'approve'
+                 OR EXISTS (
+                     SELECT 1 FROM trades t
+                     WHERE t.signal_id = ad.signal_id AND t.status NOT IN ('expired', 'cancelled')
+                 )
+               )
+         )
        ORDER BY timestamp
    ''', (fresh_cutoff, cooldown_cutoff)).fetchall()
    for r in rows: print(r)
@@ -72,6 +82,16 @@ is malformed", 21.07.2026). Все команды ниже уже написан
    entry-agent, но можешь упомянуть в резюме одной строкой, что сигнал был, но монета на кулдауне
    (памятка: 22.07.2026 ALICE дала 3 почти идентичных сигнала за 12 минут, каждый пришлось гонять
    через entry-agent — кулдаун избавляет от этого).
+
+   Важно: кулдаун держит монету только если решение было `reject`, ИЛИ `approve` реально привёл к
+   сделке, которая всё ещё жива/была реальной (`pending`/`open`/`closed`) — НЕ держит, если
+   `approve` кончился `expired` (лимитник не исполнился за `pending_entry_timeout_minutes` и снялся
+   по таймауту) или `cancelled` (агент сам передумал по pending, см. `reeval-agent`). В этих двух
+   случаях фактической сделки не было, и по возвращении новый сигнал по той же монете нужно
+   оценивать заново, а не молчать до истечения `entry_symbol_cooldown_minutes` (баг, найден
+   24.07.2026: `pending_entry_timeout_minutes` короче, чем `entry_symbol_cooldown_minutes`, поэтому
+   лимитник снимался по таймауту раньше, чем истекал кулдаун решения — монета оставалась
+   недоступной для переоценки ещё ~20 минут без реальной причины).
 
    Для каждого найденного сигнала:
    - Запусти `docker exec trading-bot python scripts/agent_briefing.py`, получи текст briefing.
