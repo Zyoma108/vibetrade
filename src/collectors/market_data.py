@@ -169,15 +169,26 @@ class MarketDataCollector:
             try:
                 candles = await connector.fetch_ohlcv(symbol, timeframe=self._timeframe, limit=100)
                 for c in candles:
-                    exists = await session.scalar(
-                        select(Candle.id).where(
+                    existing = await session.scalar(
+                        select(Candle).where(
                             Candle.exchange == c["exchange"],
                             Candle.symbol == c["symbol"],
                             Candle.timestamp == c["timestamp"],
                         ).limit(1)
                     )
-                    if not exists:
+                    if existing is None:
                         session.add(Candle(**c))
+                    else:
+                        # Свеча уже была сохранена, но могла быть ещё не закрыта
+                        # в момент первого опроса (interval_seconds << timeframe) —
+                        # объём/high/low/close на бирже с тех пор могли вырасти.
+                        # Обновляем, иначе в БД навсегда остаётся частичный объём
+                        # "младенческой" свечи, что ломает фильтры по объёму.
+                        existing.open = c["open"]
+                        existing.high = c["high"]
+                        existing.low = c["low"]
+                        existing.close = c["close"]
+                        existing.volume = c["volume"]
                 await session.commit()
             except Exception as e:
                 logger.warning(
