@@ -45,6 +45,17 @@ strategy:
     - SPCX
     - SHAZ
     - TSLA
+    - CBRS
+    - IBM
+    - INTC
+    - KORU
+    - MSFT
+    - MU
+    - MVLL
+    - ORCL
+    - SNDK
+    - SOXL
+    - TQQQ
   baseline_bars: 70              # свечей для расчёта нормального объёма
   volume_surge_mult: 5.0         # во сколько раз объём должен превысить норму
   min_baseline_volume_usdt: 5000 # мин. медиана объёма в USDT, 0 = выкл
