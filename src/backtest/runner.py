@@ -649,6 +649,13 @@ def main():
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
 
+    if not Path(args.db).exists():
+        # sqlite3 иначе молча создаст пустой файл по несуществующему пути, и
+        # ошибка всплывёт позже непонятным "no such table: candles" вместо
+        # очевидной "файла нет".
+        print(f"Файл БД не найден: {args.db}")
+        return
+
     result = asyncio.run(run_backtest(args.config, args.db, args.has_oi))
 
     if not result:
