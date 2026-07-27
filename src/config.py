@@ -135,6 +135,7 @@ class AgentConfig(BaseModel):
     entry_gate_enabled: bool = Field(default=True, description="Агент решает, открывать ли сделку по сигналу на своём аккаунте")
     reeval_enabled: bool = Field(default=True, description="Агент периодически переоценивает свои открытые позиции")
     reeval_interval_minutes: float = Field(default=20.0, ge=1.0, description="Раз во сколько минут переоценивать одну открытую позицию агента (проверяет оркестратор по agent_decisions)")
+    pending_reeval_interval_minutes: float = Field(default=2.0, ge=0.5, description="Раз во сколько минут переоценивать ещё не исполненный лимитник входа (status='pending') — короче reeval_interval_minutes, потому что pending живёт всего pending_entry_timeout_minutes (по умолчанию 9 мин): аудит июля 2026 показал, что общий 20-минутный каданс систематически не успевал среагировать до истечения таймаута")
     watch_interval_seconds: int = Field(default=30, ge=10, description="Раз во сколько секунд обновлять цену монет под наблюдением агента (его открытые/pending сделки), независимо от общего цикла сканирования")
     max_hold_extension_hours: float = Field(default=12.0, ge=0.0, description="Максимум, на который агент может продлить удержание сделки за один раз, часов")
     max_hold_extension_total_hours: float = Field(default=24.0, ge=0.0, description="Максимальное суммарное продление удержания на одну сделку, часов")
@@ -145,6 +146,7 @@ class AgentConfig(BaseModel):
     allow_pending_management: bool = Field(default=True, description="Разрешить агенту двигать/переводить в market/отменять свой неисполненный лимитник входа")
     entry_pullback_min_pct: float = Field(default=0.5, ge=0.0, le=20.0, description="Нижняя граница отката для лимитника входа, который может выбрать агент (клэмп на стороне кода, не только промпт)")
     entry_pullback_max_pct: float = Field(default=4.0, ge=0.0, le=20.0, description="Верхняя граница отката для лимитника входа, который может выбрать агент")
+    reprice_max_drift_from_signal_pct: float = Field(default=12.0, ge=0.0, le=100.0, description="Жёсткий рельс для reprice_pending: если текущая цена уже ушла от цены СИГНАЛА (не от предыдущего лимита) больше чем на этот %, репрайс отклоняется кодом — сетап уже состоялся, догонять его репрайсом нельзя (аудит июля 2026: так был потерян крупнейший убыток недели на LPT)")
     daily_call_budget: int = Field(default=200, ge=1, description="Максимум запусков сабагентов в сутки (оркестратор сверяет с кол-вом строк agent_decisions за сегодня)")
 
 

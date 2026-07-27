@@ -48,6 +48,10 @@ class PositionManager:
         # Circuit Breaker: защита от серий убытков
         self._consecutive_losses: int = 0
         self._circuit_breaker_until: datetime | None = None  # полная остановка до этого времени
+        # На каком значении _consecutive_losses уже была выдана полная остановка — чтобы после
+        # истечения таймера не остановить торговлю повторно на ТОЙ ЖЕ серии убытков (см.
+        # _check_circuit_breaker: сброс серии должен происходить только по факту победы).
+        self._circuit_breaker_stop_consumed_at: int = 0
 
         # Защита от каскада ошибок по символу
         self._error_counts: dict[str, int] = {}  # symbol → кол-во ошибок подряд
@@ -162,17 +166,26 @@ class PositionManager:
         if self._circuit_breaker_until is not None:
             if now < self._circuit_breaker_until:
                 return "circuit_breaker_stop"
-            # Таймер истёк — сбрасываем
+            # Таймер истёк — снимаем полную блокировку, но серию убытков НЕ сбрасываем
+            # (сброс — только по факту выигрыша, см. update_positions). Дальше проваливаемся
+            # в проверку ниже: та же серия убытков переводит торговлю в reduce-режим
+            # (уменьшенный размер), а не снова в stop — иначе это была бы бесконечная
+            # остановка без единой сделки, способной её прервать победой.
             self._circuit_breaker_until = None
-            self._consecutive_losses = 0
-            logger.info("Circuit Breaker: таймер остановки истёк, торговля возобновлена")
+            logger.info(
+                "Circuit Breaker: таймер остановки истёк, торговля возобновлена "
+                f"уменьшенным размером ({self._consecutive_losses} убытков подряд не сброшены)"
+            )
 
-        # Уменьшение размера?
-        if self._consecutive_losses >= self.config.circuit_breaker_loss_streak_stop:
-            # Полная остановка
+        # Новый убыток сверх уже "отработанной" остановки → полная остановка
+        if (
+            self._consecutive_losses >= self.config.circuit_breaker_loss_streak_stop
+            and self._consecutive_losses > self._circuit_breaker_stop_consumed_at
+        ):
             self._circuit_breaker_until = now + timedelta(
                 minutes=self.config.circuit_breaker_stop_minutes
             )
+            self._circuit_breaker_stop_consumed_at = self._consecutive_losses
             logger.warning(
                 f"Circuit Breaker: {self._consecutive_losses} убытков подряд → "
                 f"ПОЛНАЯ ОСТАНОВКА на {self.config.circuit_breaker_stop_minutes} мин "
@@ -546,6 +559,7 @@ class PositionManager:
             status="pending",
             pending_expires_at=expires_at,
             source=self.source,
+            signal_price=reference_price,
         )
         session.add(trade)
 
@@ -1100,6 +1114,7 @@ class PositionManager:
                     )
                 self._consecutive_losses = 0
                 self._circuit_breaker_until = None
+                self._circuit_breaker_stop_consumed_at = 0
 
         labels = {
             "tp": ("✅", "Тейк-профит"),

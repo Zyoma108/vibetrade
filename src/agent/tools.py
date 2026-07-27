@@ -278,6 +278,11 @@ class AgentToolkit:
                     round((current_price / trade.entry_price - 1) * 100, 2)
                     if current_price and trade.entry_price else None
                 ),
+                "signal_price": trade.signal_price,
+                "distance_from_signal_pct": (
+                    round((current_price / trade.signal_price - 1) * 100, 2)
+                    if current_price and trade.signal_price else None
+                ),
                 "minutes_until_expiry": minutes_until_expiry,
             }
 

@@ -243,16 +243,36 @@ class AgentPositionManager(PositionManager):
         self, session: AsyncSession, pos: Trade, new_pullback_pct: float
     ) -> bool:
         """Передвинуть неисполненный лимитник входа на новый откат
-        (свежая референсная цена, тот же объём, полный новый таймаут)."""
+        (свежая референсная цена, тот же объём, полный новый таймаут).
+
+        Жёсткий рельс: если текущая цена уже ушла от цены СИГНАЛА (`pos.signal_price`,
+        неизменный якорь — в отличие от `entry_price`, который репрайс перезаписывает)
+        дальше `reprice_max_drift_from_signal_pct`, репрайс отклоняется. Без этой
+        проверки репрайс от текущей (уже смещённой) цены может превратить "лимитник на
+        откате от сигнала" в "покупку почти на пике уже состоявшегося блоу-оффа" —
+        см. аудит июля 2026, крупнейший убыток недели на LPT."""
+        reference_price = await self._get_current_price(session, pos.symbol)
+        if reference_price is None or reference_price <= 0:
+            logger.warning(f"Agent reprice: нет цены для {pos.symbol}")
+            return False
+
+        if pos.signal_price and pos.signal_price > 0 and self._agent_config:
+            max_drift = self._agent_config.reprice_max_drift_from_signal_pct
+            drift_pct = abs(reference_price / pos.signal_price - 1) * 100
+            if drift_pct > max_drift:
+                logger.warning(
+                    f"Agent reprice: отклонено для {pos.symbol} — цена ушла от сигнала "
+                    f"на {drift_pct:.1f}% (сигнал=${pos.signal_price:.6f} → "
+                    f"тек.=${reference_price:.6f}), лимит {max_drift:.1f}%. "
+                    "Сетап уже состоялся, догонять репрайсом нельзя — только cancel/enter_market."
+                )
+                return False
+
         try:
             await self._connector.cancel_all_orders(pos.symbol)  # type: ignore[union-attr]
         except Exception:
             logger.warning(f"Agent reprice: не удалось отменить лимитник для {pos.symbol}")
 
-        reference_price = await self._get_current_price(session, pos.symbol)
-        if reference_price is None or reference_price <= 0:
-            logger.warning(f"Agent reprice: нет цены для {pos.symbol}")
-            return False
         new_limit_price = reference_price * (1 - new_pullback_pct / 100)
         try:
             await self._connector.create_limit_order(  # type: ignore[union-attr]

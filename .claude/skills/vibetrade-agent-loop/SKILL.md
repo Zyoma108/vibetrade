@@ -26,7 +26,8 @@ is malformed", 21.07.2026). Все команды ниже уже написан
 ## Перед первым циклом
 
 Прочитай `config/config.yaml`, секция `agent:` — тебе нужны `enabled`, `dry_run`,
-`reeval_interval_minutes`, `daily_call_budget`, `model`, `entry_symbol_cooldown_minutes`. Если
+`reeval_interval_minutes`, `pending_reeval_interval_minutes`, `daily_call_budget`, `model`,
+`entry_symbol_cooldown_minutes`. Если
 `agent.enabled: false` — сообщи пользователю и не продолжай цикл (спроси, включить ли).
 
 ## Один цикл
@@ -166,15 +167,22 @@ is malformed", 21.07.2026). Все команды ниже уже написан
      единственный естественный тормоз для этого цикла ретраев.
 
 3. **Открытые и pending сделки (сопровождение).** Найди сделки агента (открытые ИЛИ ещё
-   неисполненные лимитники на вход) без свежей `reeval`-записи за `reeval_interval_minutes`:
+   неисполненные лимитники на вход) без свежей `reeval`-записи — для `open` порог
+   `reeval_interval_minutes`, для `pending` — короткий `pending_reeval_interval_minutes`
+   (по умолчанию 2 мин, не 20): pending живёт всего `pending_entry_timeout_minutes` (9 мин),
+   общий каданс систематически не успевал среагировать до истечения таймаута (аудит июля 2026 —
+   все 4 просроченных лимитника получили reeval-решение уже ПОСЛЕ экспирации, `applied=0`).
    ```
    docker exec trading-bot python3 -c "
    import sqlite3, datetime
    con = sqlite3.connect('data/trading_bot.db')
-   interval_min = <reeval_interval_minutes из конфига>
-   cutoff = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=interval_min)).strftime('%Y-%m-%d %H:%M:%S.%f')
+   open_interval_min = <reeval_interval_minutes из конфига>
+   pending_interval_min = <pending_reeval_interval_minutes из конфига>
+   now = datetime.datetime.now(datetime.timezone.utc)
    trades = con.execute(\"SELECT id, symbol, status FROM trades WHERE status IN ('open','pending') AND source='agent'\").fetchall()
    for tid, symbol, status in trades:
+       interval_min = pending_interval_min if status == 'pending' else open_interval_min
+       cutoff = (now - datetime.timedelta(minutes=interval_min)).strftime('%Y-%m-%d %H:%M:%S.%f')
        last = con.execute(
            'SELECT timestamp FROM agent_decisions WHERE trade_id=? AND kind=\'reeval\' ORDER BY timestamp DESC LIMIT 1',
            (tid,),
@@ -183,6 +191,13 @@ is malformed", 21.07.2026). Все команды ниже уже написан
            print(tid, symbol, status)
    "
    ```
+   Обрабатывай найденные `pending`-сделки ПЕРВЫМИ (раньше `open` из того же списка) — у них
+   значительно более узкое окно на исполнение решения. Если `get_open_position` по pending-сделке
+   вернёт `minutes_until_expiry` меньше ~2 — это не просто "нашлось по кадансу", а гоночная
+   ситуация: решение (reprice/enter_market/cancel) должно быть применено НЕМЕДЛЕННО в этом же
+   шаге, без пауз на что-либо ещё в цикле, иначе `check_pending_entries()` механически
+   экспирирует сделку раньше, чем применится `agent_actions.py`.
+
    Для каждой найденной сделки (не важно, `open` или `pending` — `reeval-agent` сам определяет
    по `get_open_position.status`, какой набор действий уместен, см. `.claude/agents/
    reeval-agent.md`):

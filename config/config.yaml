@@ -112,8 +112,13 @@ trading:
   taker_fee_pct: 0.055             # комиссия тейкера (market-ордер), % от notional
   maker_fee_pct: 0.02              # комиссия мейкера (лимитный reduce-only ордер), % от notional
   backtest_slippage_pct: 0.3       # допущение на проскальзывание входа в бэктесте, % (0 = выкл)
-  pending_entry_pullback_pct: 1.5   # вход лимитником на откате от сигнала, % (0 = выкл, market сразу)
-  pending_entry_timeout_minutes: 9.0  # через сколько минут снять неисполненный лимитник входа
+  pending_entry_pullback_pct: 0    # выкл — market сразу по сигналу. Аудит июля 2026: на алго-пути (без
+                                    # гибкости reeval-agent) даёт обратную селекцию — исполняется именно
+                                    # там, где памп уже развернулся, и протухает там, где шёл дальше.
+                                    # Механизм остаётся в коде (см. pullback_pct_override в
+                                    # PositionManager.open_position) — используется только AgentPositionManager
+                                    # в ИИ-режиме, где откат подбирает entry-agent индивидуально под сетап.
+  pending_entry_timeout_minutes: 9.0  # актуально только для ИИ-режима (см. выше)
 
 # ИИ-режим: оркестратор-скилл (.claude/skills/vibetrade-agent-loop, автономный /loop) + сабагенты
 # entry-agent/reeval-agent оценивают те же сигналы и торгуют на ОТДЕЛЬНОМ аккаунте биржи,
@@ -128,7 +133,9 @@ agent:
   model: sonnet                        # модель Claude для сабагентов entry-agent/reeval-agent
   entry_gate_enabled: true             # агент решает, открывать ли сделку по сигналу
   reeval_enabled: true                 # агент периодически переоценивает свои открытые позиции
-  reeval_interval_minutes: 20.0        # раз во сколько минут переоценивать одну позицию (сверяет оркестратор)
+  reeval_interval_minutes: 20.0        # раз во сколько минут переоценивать одну ОТКРЫТУЮ позицию (сверяет оркестратор)
+  pending_reeval_interval_minutes: 2.0 # то же самое для ещё НЕ исполненного лимитника входа (status=pending) —
+                                        # короче, потому что pending живёт всего pending_entry_timeout_minutes (9 мин)
   watch_interval_seconds: 30           # раз во сколько секунд обновлять цену монет под наблюдением (независимо от общего цикла сканирования)
   max_hold_extension_hours: 12.0       # макс. продление удержания за раз, часов
   max_hold_extension_total_hours: 24.0 # макс. суммарное продление на сделку, часов

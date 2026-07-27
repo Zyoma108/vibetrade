@@ -123,15 +123,32 @@ class TestCircuitBreakerCheck:
         pm._circuit_breaker_until = datetime.now(tz=timezone.utc) + timedelta(minutes=30)
         assert pm._check_circuit_breaker() == "circuit_breaker_stop"
 
-    def test_after_stop_expires_resets_and_returns_none(self):
-        """When stop timer expires — reset losses, return None."""
+    def test_after_stop_expires_keeps_streak_and_returns_reduce(self):
+        """When stop timer expires — do NOT reset the loss streak (only a win does that);
+        resume trading in reduced-size mode instead of silently forgetting the streak."""
         pm = _pm()
         pm._consecutive_losses = 5
+        pm._circuit_breaker_stop_consumed_at = 5
         pm._circuit_breaker_until = datetime.now(tz=timezone.utc) - timedelta(minutes=1)
         result = pm._check_circuit_breaker()
-        assert result is None
-        assert pm._consecutive_losses == 0
+        assert result == "circuit_breaker_reduce"
+        assert pm._consecutive_losses == 5
         assert pm._circuit_breaker_until is None
+
+    def test_new_loss_after_expiry_retriggers_full_stop(self):
+        """A loss streak that grows PAST the already-served stop threshold re-triggers
+        a fresh full stop, even though the timer previously expired."""
+        pm = _pm()
+        pm._consecutive_losses = 5
+        pm._circuit_breaker_stop_consumed_at = 5
+        pm._circuit_breaker_until = datetime.now(tz=timezone.utc) - timedelta(minutes=1)
+        assert pm._check_circuit_breaker() == "circuit_breaker_reduce"
+
+        pm._consecutive_losses = 6  # one more loss arrives while in reduce-mode
+        result = pm._check_circuit_breaker()
+        assert result == "circuit_breaker_stop"
+        assert pm._circuit_breaker_until is not None
+        assert pm._circuit_breaker_stop_consumed_at == 6
 
 
 # ---------------------------------------------------------------------------
@@ -192,12 +209,14 @@ class TestClosePositionCounter:
     async def test_win_clears_stop_timer(self):
         pm = _pm()
         pm._consecutive_losses = 5
+        pm._circuit_breaker_stop_consumed_at = 5
         pm._circuit_breaker_until = datetime.now(tz=timezone.utc) + timedelta(minutes=30)
         pm._send_message = AsyncMock()
         trade = _trade(pnl=10.0)
         await pm._close_position(trade, exit_price=1.10, reason="tp")
         assert pm._consecutive_losses == 0
         assert pm._circuit_breaker_until is None
+        assert pm._circuit_breaker_stop_consumed_at == 0
 
     @pytest.mark.asyncio
     async def test_break_even_counts_as_loss(self):
@@ -536,6 +555,7 @@ class TestInitialState:
         pm = _pm()
         assert pm._consecutive_losses == 0
         assert pm._circuit_breaker_until is None
+        assert pm._circuit_breaker_stop_consumed_at == 0
         assert pm.market_regime == "unknown"
         assert pm.position_size_mult == 1.0
         assert len(pm._banned_symbols) == 0

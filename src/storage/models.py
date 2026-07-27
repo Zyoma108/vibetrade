@@ -116,6 +116,7 @@ class Trade(Base):
     llm_hold_extension_total_hours: Mapped[float] = mapped_column(Float, default=0.0)  # накопленное продление, капается agent.max_hold_extension_total_hours
     current_sl_price: Mapped[float | None] = mapped_column(Float, nullable=True, default=None)  # последний известный эффективный стоп (нужен, чтобы агент мог только подтягивать, не ослаблять)
     current_tp_price: Mapped[float | None] = mapped_column(Float, nullable=True, default=None)  # последний известный эффективный тейк (нужен, чтобы агент мог только поднимать, не опускать); None = формульный (entry + SL_distance × risk_reward_ratio)
+    signal_price: Mapped[float | None] = mapped_column(Float, nullable=True, default=None)  # референсная цена в момент сигнала (только pending-вход); entry_price перезаписывается при reprice_pending, это — неизменный якорь для проверки дрейфа (см. AgentPositionManager.apply_agent_reprice_pending)
 
 
 class AgentDecision(Base):

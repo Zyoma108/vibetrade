@@ -374,6 +374,40 @@ class TestApplyAgentPendingManagement:
         pm._connector.create_limit_order.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_reprice_rejected_when_price_drifted_past_signal(self, session):
+        """Guard against chasing an already-completed blow-off (July 2026 audit, LPT loss):
+        if price has moved >reprice_max_drift_from_signal_pct away from the ORIGINAL
+        signal price, reprice must be refused — no order cancelled, no new one placed."""
+        pm = _agent_pm(reprice_max_drift_from_signal_pct=12.0)
+        pm._get_current_price = AsyncMock(return_value=120.0)  # +20% vs signal_price=100
+        pos = _trade(status="pending", entry_price=98.0, signal_price=100.0)
+        ok = await pm.apply_agent_reprice_pending(session, pos, new_pullback_pct=2.0)
+        assert ok is False
+        pm._connector.cancel_all_orders.assert_not_called()
+        pm._connector.create_limit_order.assert_not_called()
+        assert pos.entry_price == 98.0  # untouched
+
+    @pytest.mark.asyncio
+    async def test_reprice_allowed_within_signal_drift_guard(self, session):
+        """Drift within the allowed range still reprices normally."""
+        pm = _agent_pm(reprice_max_drift_from_signal_pct=12.0)
+        pm._get_current_price = AsyncMock(return_value=105.0)  # +5% vs signal_price=100
+        pos = _trade(status="pending", entry_price=98.0, signal_price=100.0)
+        ok = await pm.apply_agent_reprice_pending(session, pos, new_pullback_pct=2.0)
+        assert ok is True
+        pm._connector.create_limit_order.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_reprice_skips_guard_when_signal_price_missing(self, session):
+        """Old rows without signal_price (pre-migration) fall back to the old
+        unguarded behavior rather than erroring out."""
+        pm = _agent_pm(reprice_max_drift_from_signal_pct=12.0)
+        pm._get_current_price = AsyncMock(return_value=200.0)
+        pos = _trade(status="pending", entry_price=98.0, signal_price=None)
+        ok = await pm.apply_agent_reprice_pending(session, pos, new_pullback_pct=2.0)
+        assert ok is True
+
+    @pytest.mark.asyncio
     async def test_convert_to_market_activates_position(self):
         pm = _agent_pm()
         pos = _trade(status="pending", entry_price=98.0, quantity=1.0)

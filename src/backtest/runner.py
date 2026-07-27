@@ -145,6 +145,9 @@ async def run_backtest(
     # Circuit Breaker state
     cb_losses = 0
     cb_stop_until: datetime | None = None
+    # На каком cb_losses уже была выдана полная остановка — таймер её снимает, но НЕ сбрасывает
+    # серию (сброс только по факту прибыли), см. PositionManager._check_circuit_breaker
+    cb_stop_consumed_at = 0
 
     # Кеш OI-данных (exchange, symbol) -> [(timestamp, value), ...]
     oi_cache: dict[tuple[str, str], list[tuple[datetime, float]]] = {}
@@ -241,6 +244,7 @@ async def run_backtest(
                 if cfg.circuit_breaker_enabled:
                     cb_losses = 0
                     cb_stop_until = None
+                    cb_stop_consumed_at = 0
                 continue
 
             # SL
@@ -274,6 +278,7 @@ async def run_backtest(
                     if pos.pnl > 0:
                         cb_losses = 0
                         cb_stop_until = None
+                        cb_stop_consumed_at = 0
                     else:
                         cb_losses += 1
 
@@ -317,11 +322,16 @@ async def run_backtest(
             if cb_stop_until is not None:
                 if ts < cb_stop_until:
                     continue
-                # Таймер истёк — сбрасываем
+                # Таймер истёк — снимаем блокировку, но серию НЕ сбрасываем (сброс только
+                # по факту прибыли выше) — иначе следующий сигнал вошёл бы полным размером
+                # посреди ещё незакончившейся серии убытков.
                 cb_stop_until = None
-                cb_losses = 0
-            if cb_losses >= cfg.circuit_breaker_loss_streak_stop:
+            if (
+                cb_losses >= cfg.circuit_breaker_loss_streak_stop
+                and cb_losses > cb_stop_consumed_at
+            ):
                 cb_stop_until = ts + timedelta(minutes=cfg.circuit_breaker_stop_minutes)
+                cb_stop_consumed_at = cb_losses
                 logger.warning(
                     f"Circuit Breaker: {cb_losses} убытков подряд → "
                     f"ПОЛНАЯ ОСТАНОВКА до {cb_stop_until}"
