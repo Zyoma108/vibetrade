@@ -237,10 +237,45 @@ is malformed", 21.07.2026). Все команды ниже уже написан
    одобрил/отклонил и почему вкратце, сколько сделок переоценил и что изменил (если что-то).
    Если бюджет исчерпан или ничего не произошло — так и скажи одной строкой, не растягивай.
 
-5. **Следующее пробуждение.** Используй `ScheduleWakeup` с интервалом ~2-3 минуты (вход по
-   сигналу времязависим — детектор помечает сигнал устаревшим уже через ~15 минут, редкие
-   проверки рискуют пропустить окно). Передай в `prompt` тот же литерал, которым был вызван этот
-   цикл (per механика `/loop` dynamic mode), чтобы продолжение снова прочитало этот скилл.
+5. **Следующее пробуждение.** Общий каданс цикла (сканирование новых сигналов) — **~5 минут**,
+   этого достаточно: сигнал считается устаревшим только через ~15 минут (шаг 2). НО сопровождение
+   уже открытых/pending сделок не должно ждать эти 5 минут, если по конкретной сделке reeval
+   требуется раньше (особенно `pending` с кадансом `pending_reeval_interval_minutes`, обычно 2
+   минуты — иначе тот же баг, что и раньше: цикл раз в 5 минут систематически не успевает
+   среагировать на лимитник, который живёт всего `pending_entry_timeout_minutes`).
+
+   Посчитай минимум из (a) базового каданса 5 минут и (b) времени до момента, когда САМОЙ БЛИЖНЕЙ
+   из отслеживаемых сделок снова потребуется reeval (по той же логике интервалов, что в шаге 3):
+   ```
+   docker exec trading-bot python3 -c "
+   import sqlite3, datetime
+   con = sqlite3.connect('data/trading_bot.db')
+   open_interval_min = <reeval_interval_minutes из конфига>
+   pending_interval_min = <pending_reeval_interval_minutes из конфига>
+   base_interval_min = 5.0
+   now = datetime.datetime.now(datetime.timezone.utc)
+   now_str = now.strftime('%Y-%m-%d %H:%M:%S.%f')
+   trades = con.execute(\"SELECT id, status FROM trades WHERE status IN ('open','pending') AND source='agent'\").fetchall()
+   soonest_min = base_interval_min
+   for tid, status in trades:
+       interval_min = pending_interval_min if status == 'pending' else open_interval_min
+       last = con.execute(
+           'SELECT timestamp FROM agent_decisions WHERE trade_id=? AND kind=\'reeval\' ORDER BY timestamp DESC LIMIT 1',
+           (tid,),
+       ).fetchone()
+       last_ts = datetime.datetime.strptime(last[0], '%Y-%m-%d %H:%M:%S.%f').replace(tzinfo=datetime.timezone.utc) if last else now
+       due_in_min = interval_min - (now - last_ts).total_seconds() / 60
+       soonest_min = min(soonest_min, max(due_in_min, 0))
+   print(round(soonest_min, 2))
+   "
+   ```
+   Переведи результат в секунды и передай в `ScheduleWakeup.delaySeconds` (инструмент сам
+   клэмпит в `[60, 3600]` — если получилось меньше 60 сек, всё равно сработает не раньше чем
+   через минуту, это нормально, а НЕ гоночная ситуация: настоящую гонку — `minutes_until_expiry`
+   < ~2 у pending-сделки — уже обрабатывает немедленно шаг 3 внутри текущего цикла, до всякого
+   планирования следующего). Если открытых/pending сделок агента нет вовсе — просто используй
+   базовые 5 минут. Передай в `prompt` тот же литерал, которым был вызван этот цикл (per механика
+   `/loop` dynamic mode), чтобы продолжение снова прочитало этот скилл.
 
 ## Ручной запрос пользователя
 
