@@ -8,12 +8,29 @@ from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from src.analytics.base import Signal
 from src.config import TradingConfig
+from src.executor import position_manager as position_manager_module
 from src.executor.position_manager import PositionManager
-from src.storage.models import Trade
+from src.storage.models import Base, Trade
+
+
+@pytest.fixture(autouse=True)
+async def _isolated_bot_state_db(monkeypatch):
+    """_save_state() (Circuit Breaker persistence, см. db-audit-august-2026)
+    открывает свою собственную сессию через src.storage.database.async_session
+    — без этой фикстуры тесты тихо стучались бы в реальный data/trading_bot.db
+    (таблицы bot_state там нет, запись просто проглатывается и логируется как
+    ошибка, но сам факт обращения к боевой БД из тестов — не то, что нужно)."""
+    engine = create_async_engine("sqlite+aiosqlite://")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    test_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    monkeypatch.setattr(position_manager_module, "async_session", test_session)
+    yield
+    await engine.dispose()
 
 
 # ---------------------------------------------------------------------------
@@ -375,8 +392,11 @@ class TestFeeCalculation:
 
     @pytest.mark.asyncio
     async def test_close_position_deducts_exit_fee_from_pnl(self):
-        """_close_position добавляет exit-fee к trade.fee и вычитает из pnl."""
-        pm = _pm(taker_fee_pct=0.055)
+        """_close_position добавляет exit-fee к trade.fee и вычитает из pnl.
+
+        tp_as_limit_order=False — тестируем базовый taker-путь; maker-путь
+        для TP покрыт отдельно в TestTakeProfitAsLimitOrder ниже."""
+        pm = _pm(taker_fee_pct=0.055, tp_as_limit_order=False)
         pm._send_message = AsyncMock()
 
         trade = _trade(entry_price=1.0, quantity=100, pnl=0.0)
@@ -393,7 +413,7 @@ class TestFeeCalculation:
     @pytest.mark.asyncio
     async def test_close_position_handles_none_fee(self):
         """Позиции, восстановленные при sync (без известной fee), не должны падать."""
-        pm = _pm(taker_fee_pct=0.055)
+        pm = _pm(taker_fee_pct=0.055, tp_as_limit_order=False)
         pm._send_message = AsyncMock()
 
         trade = _trade(entry_price=1.0, quantity=100, pnl=0.0)
@@ -401,6 +421,51 @@ class TestFeeCalculation:
 
         await pm._close_position(trade, exit_price=1.05, reason="tp")
         assert trade.fee == pytest.approx(0.05775)  # только exit-fee
+
+
+class TestTakeProfitAsLimitOrder:
+    """_close_position: TP закрывается лимитным ордером (maker) при
+    tp_as_limit_order=True — комиссия/PnL должны считаться по maker-ставке,
+    а не по дефолтной taker (см. AGENTS.md, tp_as_limit_order)."""
+
+    @pytest.mark.asyncio
+    async def test_tp_uses_maker_fee_when_enabled(self):
+        pm = _pm(taker_fee_pct=0.055, maker_fee_pct=0.02, tp_as_limit_order=True)
+        pm._send_message = AsyncMock()
+
+        trade = _trade(entry_price=1.0, quantity=100, pnl=0.0)
+        trade.fee = 0.055  # комиссия входа (всегда taker — market)
+
+        # exit_fee = 1.05 * 100 * 0.02% (maker) = 0.021
+        await pm._close_position(trade, exit_price=1.05, reason="tp")
+        assert trade.fee == pytest.approx(0.076)
+        assert trade.pnl == pytest.approx(4.924)
+
+    @pytest.mark.asyncio
+    async def test_sl_stays_taker_even_when_tp_as_limit_enabled(self):
+        """SL всегда market/taker независимо от tp_as_limit_order — надёжность
+        выхода важнее экономии на комиссии (см. AGENTS.md)."""
+        pm = _pm(taker_fee_pct=0.055, maker_fee_pct=0.02, tp_as_limit_order=True)
+        pm._send_message = AsyncMock()
+
+        trade = _trade(entry_price=1.0, quantity=100, pnl=0.0)
+        trade.fee = 0.055
+
+        await pm._close_position(trade, exit_price=0.95, reason="sl")
+        assert trade.fee == pytest.approx(0.055 + 0.95 * 100 * 0.00055)
+
+    @pytest.mark.asyncio
+    async def test_tp_sl_exchange_inferred_tp_uses_maker_fee(self):
+        """reason='tp_sl_exchange' с pnl>0 определяется как TP — тоже должен
+        получить maker-комиссию, а не застрять на предварительной taker-оценке."""
+        pm = _pm(taker_fee_pct=0.055, maker_fee_pct=0.02, tp_as_limit_order=True)
+        pm._send_message = AsyncMock()
+
+        trade = _trade(entry_price=1.0, quantity=100, pnl=0.0)
+        trade.fee = 0.055
+
+        await pm._close_position(trade, exit_price=1.05, reason="tp_sl_exchange")
+        assert trade.fee == pytest.approx(0.076)
 
 
 # ---------------------------------------------------------------------------
@@ -659,8 +724,11 @@ class TestPartialClosePnL:
 
     @pytest.mark.asyncio
     async def test_partial_loss_drags_down_winner(self):
-        """Отрицательный partial_pnl уменьшает общий PnL."""
-        pm = _pm()
+        """Отрицательный partial_pnl уменьшает общий PnL.
+
+        tp_as_limit_order=False — тест про комбинирование partial_pnl+remainder,
+        не про тип TP-ордера (тот покрыт в TestTakeProfitAsLimitOrder)."""
+        pm = _pm(tp_as_limit_order=False)
         pm._send_message = AsyncMock()
 
         trade = _trade(entry_price=1.0, quantity=100, pnl=0.0)
@@ -676,7 +744,7 @@ class TestPartialClosePnL:
     @pytest.mark.asyncio
     async def test_no_partial_pnl_is_zero(self):
         """Без частичного закрытия partial_pnl = 0."""
-        pm = _pm()
+        pm = _pm(tp_as_limit_order=False)
         pm._send_message = AsyncMock()
 
         trade = _trade(entry_price=1.0, quantity=100, pnl=0.0)

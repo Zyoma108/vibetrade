@@ -74,7 +74,7 @@ class FilteredSignal(Base):
     timestamp: Mapped[datetime] = mapped_column(index=True)
     exchange: Mapped[str] = mapped_column(String(32))
     symbol: Mapped[str] = mapped_column(String(32), index=True)
-    stage: Mapped[str] = mapped_column(String(32), index=True)  # volume_spike / volume_dump / volume_fading / volume_declining / oi_declining / oi_slope_low / pre_surge_pump / hourly_drop / price_growth_low / exhaustion / exhaustion_extreme / price_growth_high
+    stage: Mapped[str] = mapped_column(String(32), index=True)  # volume_spike / volume_dump / volume_fading / volume_declining / oi_declining / oi_slope_low / pre_surge_pump / hourly_drop / price_growth_low / exhaustion / exhaustion_extreme / retracement / price_growth_high
     reason: Mapped[str] = mapped_column(Text)
 
 

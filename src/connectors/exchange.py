@@ -246,20 +246,29 @@ class ExchangeConnector:
         amount: float,
         tp_price: float,
         sl_price: float,
+        tp_as_limit: bool = False,
     ) -> dict:
-        """Выставить TP/SL на открытую позицию (вызывается ПОСЛЕ ордера)."""
+        """Выставить TP/SL на открытую позицию (вызывается ПОСЛЕ ордера).
+
+        `tp_as_limit` — закрыть TP лимитным ордером по цене tp_price вместо
+        market: цена исполнения та же (TP и так закрывается по заранее
+        известной цене), но комиссия maker (0.02%) вместо taker (0.055%).
+        SL всегда остаётся market — риск непроскочить стоп при гэпе важнее
+        экономии на комиссии."""
         close_side = "sell" if side == "buy" else "buy"
         params = {
             "takeProfitPrice": tp_price,
             "stopLossPrice": sl_price,
         }
+        if tp_as_limit:
+            params["takeProfitLimitPrice"] = tp_price
         raw = await self._call(
             "create_order", symbol, "market", close_side, amount,
             None, params
         )
         logger.info(
             f"{self.exchange_id}: TP/SL {symbol} "
-            f"TP={tp_price:.6f} SL={sl_price:.6f}"
+            f"TP={tp_price:.6f}{'(limit)' if tp_as_limit else ''} SL={sl_price:.6f}"
         )
         return raw
 

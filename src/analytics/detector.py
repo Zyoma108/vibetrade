@@ -385,6 +385,33 @@ class SetupDetector(BaseDetector):
                     )
                 return None
 
+        # Retracement filter: сколько цена уже откатилась от пика (high) sustain-окна
+        # к моменту закрытия последней свечи. Ловит случаи, когда движение уже
+        # развернулось, ПОКА набиралось подтверждение объёма (sustain_bars=4 свечи =
+        # 12 минут) — по конструкции детектор видит только суммарный рост окна
+        # (change_pct = closes[-1]/opens[0]), а не его форму, и может пропустить
+        # сигнал уже на нисходящем участке. См. db-audit-august-2026: 92% живых
+        # лоссов на алго-пути ни разу не доходили даже до частичной фиксации +3.5%,
+        # средний вход — на 1.93% ниже недавнего пика. Выключен по умолчанию (0) —
+        # включать только после свипа порога на исторических данных.
+        max_retracement = self.config.max_window_retracement_pct
+        if max_retracement > 0:
+            window_high = np.max([c["high"] for c in candles[-sustain:]])
+            if window_high > 0:
+                retracement_pct = (window_high - closes[-1]) / window_high * 100
+                if retracement_pct > max_retracement:
+                    logger.info(
+                        f"Сигнал пропущен: откат {retracement_pct:.1f}% от пика "
+                        f"sustain-окна (>{max_retracement}%) — движение уже развернулось"
+                    )
+                    if context is not None:
+                        context["stage"] = "retracement"
+                        context["reason"] = (
+                            f"откат {retracement_pct:.1f}% от пика sustain-окна "
+                            f"(>{max_retracement}%) — движение уже развернулось"
+                        )
+                    return None
+
         max_growth = self.config.price_growth_max_pct
         if max_growth > 0 and change_pct > max_growth:
             logger.info(

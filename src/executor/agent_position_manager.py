@@ -103,6 +103,7 @@ class AgentPositionManager(PositionManager):
                 amount=pos.quantity,
                 tp_price=self._current_tp_price(pos),
                 sl_price=new_sl_price,
+                tp_as_limit=self.config.tp_as_limit_order,
             )
         except Exception as e:
             logger.warning(f"Agent: не удалось подтянуть SL для {pos.symbol}: {e}")
@@ -127,6 +128,7 @@ class AgentPositionManager(PositionManager):
                 amount=pos.quantity,
                 tp_price=new_tp_price,
                 sl_price=self._current_sl_price(pos),
+                tp_as_limit=self.config.tp_as_limit_order,
             )
         except Exception as e:
             logger.warning(f"Agent: не удалось поднять TP для {pos.symbol}: {e}")
@@ -218,6 +220,7 @@ class AgentPositionManager(PositionManager):
                 amount=remaining,
                 tp_price=self._current_tp_price(pos),
                 sl_price=self._current_sl_price(pos),
+                tp_as_limit=self.config.tp_as_limit_order,
             )
         except Exception as e:
             logger.warning(f"Agent partial close: не удалось переустановить TP/SL для {pos.symbol}: {e}")

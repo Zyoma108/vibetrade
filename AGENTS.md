@@ -181,6 +181,7 @@ Application.start()
    - **Pre-sustain pump filter**: если рост за 10 свечей (30 мин) ДО sustain-окна > `pre_surge_max_pct` → блок (монета уже улетела до сигнала)
    - **Exhaustion filter**: если рост > `exhaustion_gain_pct` И последняя свеча закрылась в верхних `exhaustion_pos_ratio` диапазона → сигнал блокируется (истощение покупателей)
    - **Страховочный потолок**: рост > `price_growth_max_pct` → блок (экстремальный памп внутри sustain-окна)
+   - **Retracement filter** (выкл. по умолчанию, `max_window_retracement_pct=0`): откат от пика (high) sustain-окна до последнего close > порога → блок. В отличие от exhaustion (смотрит только позицию закрытия ПОСЛЕДНЕЙ свечи в её собственном диапазоне), ловит более широкий паттерн — пик был на 1-2 свечи раньше, и с тех пор цена тихо снижалась, не триггеря exhaustion ни на одной отдельной свече. См. db-audit-august-2026 — нужен свип порога перед включением в проде
    - Защита от рагпулов: падение за час ≤ `max_hourly_drop_pct`
 5. **Уверенность** = `min(surge_multiple × 5, 100)`, где surge_multiple = средний_объём_окна / медиана_базового
 
@@ -203,6 +204,7 @@ Application.start()
 | `exhaustion_pos_ratio` | 0.7 | Позиция закрытия свечи (0=low, 1=high) |
 | `smooth_max_ratio` | 5.0 | Макс. отношение макс/медиана объёма |
 | `dump_volume_mult` | 0.0 | Защита от свечей-выбросов (0 = выкл) |
+| `max_window_retracement_pct` | 0.0 | Макс. откат от пика sustain-окна до последнего close, % (0 = выкл, нужен свип перед включением) |
 | `max_hourly_drop_pct` | 10.0% | Защита от рагпулов |
 | `cautious_volume_surge_mult_increase_pct` | 50.0% | На сколько % увеличить `volume_surge_mult` в CAUTIOUS режиме (0 = без изменений) |
 
@@ -576,7 +578,7 @@ Docker VM напрямую, не через host-bridge, поэтому `mmap` �
 
 `stage` — один из: `volume_spike`, `volume_dump`, `volume_fading`, `volume_declining`,
 `oi_declining`, `oi_slope_low`, `pre_surge_pump`, `hourly_drop`, `price_growth_low`,
-`exhaustion`, `exhaustion_extreme`, `price_growth_high`.
+`exhaustion`, `exhaustion_extreme`, `retracement`, `price_growth_high`.
 
 Намеренно **не** логируются монеты, которые даже не приблизились к порогу объёма (подавляющее
 большинство из ~450 сканируемых каждый цикл) — это шум, не сетап. `check_volume_pattern` /

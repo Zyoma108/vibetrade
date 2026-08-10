@@ -63,6 +63,13 @@ class StrategyConfig(BaseModel):
     dump_volume_mult: float = Field(
         default=3.0, description="Макс. отношение объёма последней свечи к медиане остальных свечей sustain-окна (защита от свечей-выбросов, 0 = выкл)"
     )
+    max_window_retracement_pct: float = Field(
+        default=0.0, ge=0.0, le=100.0,
+        description="Макс. допустимый откат цены от пика (high) sustain-окна к моменту закрытия последней свечи, % (0 = выкл). "
+        "Ловит случаи, когда движение уже развернулось, пока набиралось подтверждение объёма (см. db-audit-august-2026: "
+        "92% живых лоссов на алго-пути ни разу не доходили даже до частичной фиксации +3.5%). "
+        "Выключен по умолчанию — включать только после свипа порога на исторических данных (см. AGENTS.md)"
+    )
     smooth_max_ratio: float = Field(
         default=5.0, description="Макс. отношение макс/медиана объёма в окне (отсекает спайки, уменьшить для более жёсткого фильтра)"
     )
@@ -106,6 +113,7 @@ class TradingConfig(BaseModel):
     backtest_slippage_pct: float = Field(default=0.3, ge=0.0, le=5.0, description="Допущение на проскальзывание входа в бэктесте, % (0 = выкл). Бэктест иначе входит по цене закрытия свечи, что оптимистичнее реального market-ордера")
     pending_entry_pullback_pct: float = Field(default=0.0, ge=0.0, le=10.0, description="Вход лимитным ордером на откате от цены сигнала, % (0 = выкл — вход market сразу по сигналу, как раньше). Решает проблему покупки на пике пампа")
     pending_entry_timeout_minutes: float = Field(default=9.0, ge=1.0, le=180.0, description="Через сколько минут снять неисполненный лимитник входа (актуально только если pending_entry_pullback_pct > 0)")
+    tp_as_limit_order: bool = Field(default=True, description="Выставлять TP лимитным ордером (maker, 0.02%) вместо market (taker, 0.055%) — цена исполнения та же, экономия на комиссии. SL и time-exit всегда market (надёжность выхода важнее экономии)")
 
 
 class MarketContextConfig(BaseModel):

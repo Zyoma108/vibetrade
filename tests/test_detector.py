@@ -345,6 +345,89 @@ class TestPriceTrend:
 
 
 # ---------------------------------------------------------------------------
+# Retracement filter — catches a reversal already under way inside the
+# sustain window, before it fully unwinds change_pct (see db-audit-august-2026)
+# ---------------------------------------------------------------------------
+
+
+class TestRetracementFilter:
+    """max_window_retracement_pct: откат от пика (high) sustain-окна до
+    последнего close. Ловит паттерн, который exhaustion (позиция закрытия
+    ТОЛЬКО последней свечи в её собственном диапазоне) пропускает: пик был
+    на 1-2 свечи раньше, и цена с тех пор тихо снижалась."""
+
+    def _reversal_candles(self) -> list[dict]:
+        """Sustain-окно: рост до пика на 3-й свече (high=1.101), затем разворот
+        вниз на последней. change_pct за окно всё ещё положительный (+4%),
+        так что price_growth_min_pct пропустит сигнал дальше — фильтровать
+        должен именно retracement."""
+        candles = _candles(74, price=1.0)
+        candles[-4]["open"], candles[-4]["close"] = 1.00, 1.02
+        candles[-4]["high"], candles[-4]["low"] = 1.021, 0.999
+        candles[-3]["open"], candles[-3]["close"] = 1.02, 1.06
+        candles[-3]["high"], candles[-3]["low"] = 1.061, 1.019
+        candles[-2]["open"], candles[-2]["close"] = 1.06, 1.10
+        candles[-2]["high"], candles[-2]["low"] = 1.101, 1.059  # window peak
+        candles[-1]["open"], candles[-1]["close"] = 1.10, 1.04  # reversal
+        candles[-1]["high"], candles[-1]["low"] = 1.101, 1.035
+        # change_pct = (1.04 / 1.00 - 1) * 100 = +4.0%
+        # retracement = (1.101 - 1.04) / 1.101 * 100 ≈ 5.5%
+        return candles
+
+    def test_disabled_by_default_passes(self):
+        """max_window_retracement_pct=0 (дефолт) — фильтр выключен, откат не блокирует."""
+        d = _detector(sustain_bars=4, price_growth_min_pct=0.1,
+                      exhaustion_gain_pct=0.0, max_window_retracement_pct=0.0)
+        assert d.check_price_trend(self._reversal_candles()) == "long"
+
+    def test_retracement_exceeds_threshold_blocks(self):
+        """Откат ~5.5% > порога 3% → блок, даже несмотря на положительный change_pct."""
+        d = _detector(sustain_bars=4, price_growth_min_pct=0.1,
+                      exhaustion_gain_pct=0.0, max_window_retracement_pct=3.0)
+        assert d.check_price_trend(self._reversal_candles()) is None
+
+    def test_retracement_within_threshold_passes(self):
+        """Небольшой откат (< порога) не блокирует."""
+        d = _detector(sustain_bars=4, price_growth_min_pct=0.1,
+                      exhaustion_gain_pct=0.0, max_window_retracement_pct=3.0)
+        candles = self._reversal_candles()
+        # Откат всего ~0.5% вместо 5.5%
+        candles[-1]["close"] = 1.095
+        assert d.check_price_trend(candles) == "long"
+
+    def test_context_reports_retracement_stage(self):
+        """context['stage'] == 'retracement' для filtered_signals-аудита."""
+        d = _detector(sustain_bars=4, price_growth_min_pct=0.1,
+                      exhaustion_gain_pct=0.0, max_window_retracement_pct=3.0)
+        context: dict = {}
+        d.check_price_trend(self._reversal_candles(), context=context)
+        assert context["stage"] == "retracement"
+
+    def test_catches_reversal_that_exhaustion_misses(self):
+        """Ключевое отличие от exhaustion: последняя свеча закрылась у своего
+        НИЗА (close_pos ≈ 0.08), а не у верха — exhaustion (проверяет close
+        near HIGH) её не поймает, а retracement — поймает."""
+        candles = self._reversal_candles()
+        last = candles[-1]
+        close_pos = (last["close"] - last["low"]) / (last["high"] - last["low"])
+        assert close_pos < 0.1  # далеко не "close near high"
+
+        d_exhaustion_only = _detector(
+            sustain_bars=4, price_growth_min_pct=0.1,
+            exhaustion_gain_pct=3.0, exhaustion_pos_ratio=0.7,
+            max_window_retracement_pct=0.0,
+        )
+        assert d_exhaustion_only.check_price_trend(candles) == "long"  # проскакивает
+
+        d_with_retracement = _detector(
+            sustain_bars=4, price_growth_min_pct=0.1,
+            exhaustion_gain_pct=3.0, exhaustion_pos_ratio=0.7,
+            max_window_retracement_pct=3.0,
+        )
+        assert d_with_retracement.check_price_trend(candles) is None  # ловит
+
+
+# ---------------------------------------------------------------------------
 # Exhaustion filter v2 — extreme pump from baseline
 # ---------------------------------------------------------------------------
 

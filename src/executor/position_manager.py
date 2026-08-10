@@ -478,6 +478,7 @@ class PositionManager:
                     amount=quantity,
                     tp_price=tp_price,
                     sl_price=sl_price,
+                    tp_as_limit=self.config.tp_as_limit_order,
                 )
                 tp_sl_ok = True
             except Exception as e:
@@ -739,6 +740,7 @@ class PositionManager:
                 amount=pos.quantity,
                 tp_price=tp_price,
                 sl_price=sl_price,
+                tp_as_limit=self.config.tp_as_limit_order,
             )
             tp_sl_ok = True
         except Exception as e:
@@ -855,6 +857,7 @@ class PositionManager:
                 amount=pos.quantity,
                 tp_price=tp,
                 sl_price=sl,
+                tp_as_limit=self.config.tp_as_limit_order,
             )
             pos.tp_sl_set = True
             pos.current_sl_price = sl
@@ -944,6 +947,7 @@ class PositionManager:
                 amount=actual_contracts,
                 tp_price=self._tp_price(pos.entry_price),
                 sl_price=pos.entry_price,
+                tp_as_limit=self.config.tp_as_limit_order,
             )
             pos.current_sl_price = pos.entry_price
         except Exception as e:
@@ -1016,6 +1020,7 @@ class PositionManager:
                 amount=remaining,
                 tp_price=self._tp_price(pos.entry_price),
                 sl_price=pos.entry_price,
+                tp_as_limit=self.config.tp_as_limit_order,
             )
             pos.current_sl_price = pos.entry_price
         except Exception as e:
@@ -1161,22 +1166,33 @@ class PositionManager:
         else:
             remainder_pnl = (trade.entry_price - exit_price) * trade.quantity
 
-        # Финальный выход — market (TP/SL/time-exit/аварийное закрытие всегда taker)
-        trade.fee = (trade.fee or 0.0) + self._fee(exit_price * trade.quantity, taker=True)
+        prior_fee = trade.fee or 0.0
+        exit_notional = exit_price * trade.quantity
 
-        # Суммируем с частичными закрытиями, вычитаем комиссию всех "ног" сделки
-        total_pnl = remainder_pnl + (trade.partial_pnl or 0.0) - (trade.fee or 0.0)
+        # Предварительно считаем комиссию как taker (верно для SL/time/llm_close/
+        # аварийного закрытия — они всегда market) — этого достаточно, чтобы
+        # определить знак PnL и, для tp_sl_exchange, отличить TP от SL ниже.
+        trade.fee = prior_fee + self._fee(exit_notional, taker=True)
+        total_pnl = remainder_pnl + (trade.partial_pnl or 0.0) - trade.fee
         trade.pnl = total_pnl
+
+        # Если закрыто биржей — определяем TP или SL по PnL (sync-цикл видит
+        # только «позиция исчезла», не какой именно ордер её закрыл)
+        if reason == "tp_sl_exchange":
+            reason = "tp" if (trade.pnl or 0) > 0 else "sl"
+
+        # TP закрывается лимитным ордером (maker), если включено конфигом
+        # (tp_as_limit_order) — пересчитываем комиссию/PnL по реальной ставке.
+        if reason == "tp" and self.config.tp_as_limit_order:
+            trade.fee = prior_fee + self._fee(exit_notional, taker=False)
+            total_pnl = remainder_pnl + (trade.partial_pnl or 0.0) - trade.fee
+            trade.pnl = total_pnl
 
         pnl_pct = (
             (exit_price / trade.entry_price - 1) * 100
             if trade.direction == "long"
             else (trade.entry_price / exit_price - 1) * 100
         )
-
-        # Если закрыто биржей — определяем TP или SL по PnL
-        if reason == "tp_sl_exchange":
-            reason = "tp" if (trade.pnl or 0) > 0 else "sl"
 
         # Circuit Breaker: обновляем счётчик убытков подряд
         if self.config.circuit_breaker_enabled:
