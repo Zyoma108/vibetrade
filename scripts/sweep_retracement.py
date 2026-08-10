@@ -487,7 +487,10 @@ def simulate(settings, data, has_oi: bool = True, collect_retracement: bool = Tr
             "pnl": t.pnl,
             "exit_reason": t.exit_reason,
             "partial_closed": t.partial_closed,
+            "partial_pnl": t.partial_pnl,
             "retracement_pct": retr_map.get(id(t)),
+            "tp_price": t.tp_price,
+            "sl_price": t.sl_price,
         })
 
     return {
