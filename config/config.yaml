@@ -77,7 +77,7 @@ strategy:
   exhaustion_pos_ratio: 0.7      # позиция закрытия свечи (0=low, 1=high)
   max_hourly_drop_pct: 10.0      # макс. падение за час (защита от рагпулов), 0 = выкл
   pre_surge_max_pct: 8.0         # макс. рост за 30 мин до sustain-окна (0 = выкл)
-  max_window_retracement_pct: 0.0 # макс. откат от пика sustain-окна к моменту сигнала, 0 = выкл (нужен свип порога перед включением, см. AGENTS.md)
+  max_window_retracement_pct: 2.0 # макс. откат от пика sustain-окна к моменту сигнала, 0 = выкл. Live-эксперимент с 10.08.2026 (свип: th=2.0 → WR 66.7%/+$35 vs бейзлайн на n=39, но статистика слабая — r=-0.13; см. AGENTS.md). Пересмотреть через 2-3 недели живой торговли, сравнить с бейзлайном 47.9% WR / -$1.80; если не лучше — откатить на 0.0
   cautious_volume_surge_mult_increase_pct: 50.0  # +50% к volume_surge_mult в CAUTIOUS режиме
 
 strategy_price_surge:                    # детектор пампов по чистой цене (только сигналы)
