@@ -140,6 +140,26 @@ class AgentDecision(Base):
     latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
+class BotState(Base):
+    """Персистентное состояние Circuit Breaker / бан-листа / error-cooldown
+    (`PositionManager`) — до этого фикса жило только в памяти процесса, и
+    любой рестарт/деплой бесшумно обнулял защиту от серии убытков и бан-лист
+    проблемных монет (см. db-audit-august-2026, P0). Одна строка на source
+    (algo/agent) — пайплайны не делят состояние, как и все прочие
+    лимиты/кулдауны в PositionManager."""
+
+    __tablename__ = "bot_state"
+
+    source: Mapped[str] = mapped_column(String(16), primary_key=True)  # algo / agent
+    consecutive_losses: Mapped[int] = mapped_column(Integer, default=0)
+    circuit_breaker_until: Mapped[datetime | None] = mapped_column(nullable=True, default=None)
+    circuit_breaker_stop_consumed_at: Mapped[int] = mapped_column(Integer, default=0)
+    banned_symbols_json: Mapped[str] = mapped_column(Text, default="[]")
+    error_counts_json: Mapped[str] = mapped_column(Text, default="{}")
+    error_cooldown_until_json: Mapped[str] = mapped_column(Text, default="{}")
+    updated_at: Mapped[datetime | None] = mapped_column(nullable=True, default=None)
+
+
 class MarketContextSnapshot(Base):
     """Снимок рыночного контекста (BTC/OTHERS/режим/тренд) на момент времени."""
 

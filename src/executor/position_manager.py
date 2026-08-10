@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Coroutine
@@ -9,7 +10,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.analytics.base import Signal
 from src.config import AgentConfig, TradingConfig
 from src.connectors.exchange import ExchangeConnector
-from src.storage.models import Ticker, Trade
+from src.storage.database import async_session
+from src.storage.models import BotState, Ticker, Trade
 
 logger = logging.getLogger(__name__)
 
@@ -145,6 +147,66 @@ class PositionManager:
             f"{len(db_positions)} в БД"
         )
 
+    async def load_state(self, session: AsyncSession) -> None:
+        """Восстановить Circuit Breaker / бан-лист / error-cooldown из БД после
+        рестарта процесса. Без этого вызова состояние всегда стартует "с чистого
+        листа" (0 убытков подряд, пустой бан-лист) — вызывай один раз при старте,
+        сразу после sync_positions (см. src/core/app.py)."""
+        state = await session.get(BotState, self.source)
+        if state is None:
+            return
+        self._consecutive_losses = state.consecutive_losses
+        self._circuit_breaker_until = state.circuit_breaker_until
+        self._circuit_breaker_stop_consumed_at = state.circuit_breaker_stop_consumed_at
+        self._banned_symbols = set(json.loads(state.banned_symbols_json or "[]"))
+        self._error_counts = json.loads(state.error_counts_json or "{}")
+        self._error_cooldown_until = {
+            symbol: datetime.fromisoformat(ts)
+            for symbol, ts in json.loads(state.error_cooldown_until_json or "{}").items()
+        }
+        logger.info(
+            f"[{self.source}] Состояние восстановлено: "
+            f"{self._consecutive_losses} убытков подряд, "
+            f"{len(self._banned_symbols)} монет в чёрном списке, "
+            f"{len(self._error_cooldown_until)} символов в кулдауне"
+        )
+
+    async def _save_state(self) -> None:
+        """Сохранить Circuit Breaker / бан-лист / error-cooldown в БД.
+
+        Своя короткая транзакция (не session вызывающего метода) — состояние
+        мутируется в нескольких местах, часть из них синхронные (см. вызовы
+        через asyncio.create_task ниже), поэтому проще не тащить session через
+        весь стек вызовов ради редких и дешёвых write'ов бухгалтерии."""
+        try:
+            async with async_session() as session:
+                state = await session.get(BotState, self.source)
+                if state is None:
+                    state = BotState(source=self.source)
+                    session.add(state)
+                state.consecutive_losses = self._consecutive_losses
+                state.circuit_breaker_until = self._circuit_breaker_until
+                state.circuit_breaker_stop_consumed_at = self._circuit_breaker_stop_consumed_at
+                state.banned_symbols_json = json.dumps(sorted(self._banned_symbols))
+                state.error_counts_json = json.dumps(self._error_counts)
+                state.error_cooldown_until_json = json.dumps(
+                    {symbol: dt.isoformat() for symbol, dt in self._error_cooldown_until.items()}
+                )
+                state.updated_at = datetime.now(tz=timezone.utc)
+                await session.commit()
+        except Exception:
+            logger.exception(f"[{self.source}] Не удалось сохранить состояние Circuit Breaker")
+
+    def _schedule_save_state(self) -> None:
+        """Запланировать фоновое сохранение состояния из синхронного кода.
+        Безопасно вызывать и без работающего event loop (например, из
+        синхронных unit-тестов) — тогда просто пропускаем персист."""
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        asyncio.create_task(self._save_state())
+
     # ==================================================================
     # OPENING
     # ==================================================================
@@ -191,6 +253,9 @@ class PositionManager:
                 f"ПОЛНАЯ ОСТАНОВКА на {self.config.circuit_breaker_stop_minutes} мин "
                 f"(до {self._circuit_breaker_until.strftime('%H:%M:%S')})"
             )
+            # Метод синхронный (вызывается из горячего пути open_position) — сохраняем
+            # состояние фоновой задачей, не блокируя проверку сигнала на запись в БД.
+            self._schedule_save_state()
             return "circuit_breaker_stop"
 
         if self._consecutive_losses >= self.config.circuit_breaker_loss_streak_reduce:
@@ -301,6 +366,26 @@ class PositionManager:
             logger.info(
                 f"Circuit Breaker: размер позиции {signal.symbol} уменьшен "
                 f"до {cb_mult*100:.0f}% ({self._consecutive_losses} убытков подряд)"
+            )
+
+        # Проверка минимального лота ДО отправки ордера — иначе биржа/ccxt отклоняет
+        # его как "amount must be greater than minimum amount precision" (наблюдалось
+        # на COHR/IREN при уменьшенном Circuit Breaker'ом риске, см.
+        # db-audit-august-2026), а такая ошибка ошибочно засчитывалась в error cascade
+        # (_track_error) и уводила рабочий символ в кулдаун/бан на пустом месте.
+        sl_distance_est = reference_price * (self.config.stop_loss_pct / 100)
+        est_quantity = risk_budget / sl_distance_est if sl_distance_est > 0 else 0
+        min_amount = await self._connector.min_order_amount(signal.symbol)  # type: ignore[union-attr]
+        if min_amount and est_quantity < min_amount:
+            logger.info(
+                f"Сигнал {signal.symbol} пропущен: расчётный размер {est_quantity:.6f} "
+                f"< минимального лота биржи {min_amount} при риске ${risk_budget:.2f} "
+                f"— депозит слишком мал для этой монеты по текущей цене"
+            )
+            return (
+                None,
+                "amount_too_small",
+                f"qty={est_quantity:.6f} min={min_amount} risk=${risk_budget:.2f}",
             )
 
         try:
@@ -1115,6 +1200,7 @@ class PositionManager:
                 self._consecutive_losses = 0
                 self._circuit_breaker_until = None
                 self._circuit_breaker_stop_consumed_at = 0
+            await self._save_state()
 
         labels = {
             "tp": ("✅", "Тейк-профит"),
@@ -1162,8 +1248,14 @@ class PositionManager:
                 f"Error cascade: {symbol} — {count} ошибок подряд, "
                 f"кулдаун на {cooldown_hours}ч"
             )
+        # Метод синхронный (вызывается из мест без session под рукой, включая
+        # обработку исключений биржи) — сохраняем фоновой задачей, см. _save_state.
+        self._schedule_save_state()
 
     def _reset_errors(self, symbol: str) -> None:
         """Сбросить счётчик ошибок после успешной сделки."""
+        if symbol not in self._error_counts and symbol not in self._error_cooldown_until:
+            return
         self._error_counts.pop(symbol, None)
         self._error_cooldown_until.pop(symbol, None)
+        self._schedule_save_state()

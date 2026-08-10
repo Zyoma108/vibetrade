@@ -287,6 +287,24 @@ class ExchangeConnector:
         raw = await self._call("fetch_balance")
         return raw.get("USDT", raw.get("free", raw))
 
+    async def min_order_amount(self, symbol: str) -> float | None:
+        """Минимальный размер ордера (шаг precision / лимит биржи), либо None,
+        если определить не удалось. Используется, чтобы не отправлять
+        заведомо too-small ордер и не ловить ccxt.InvalidOrder ("amount ...
+        must be greater than minimum amount precision") — на малом депозите
+        risk_budget/price иногда меньше минимального лота (см. COHR/IREN,
+        db-audit-august-2026)."""
+        try:
+            await self._call("load_markets")  # не сетевой вызов повторно, если уже загружены
+            market = self._exchange.market(symbol)
+            precision = (market.get("precision") or {}).get("amount")
+            min_limit = ((market.get("limits") or {}).get("amount") or {}).get("min")
+            candidates = [v for v in (precision, min_limit) if v]
+            return max(candidates) if candidates else None
+        except Exception as e:
+            logger.debug(f"{self.exchange_id}: не удалось определить min amount для {symbol}: {e}")
+            return None
+
     async def set_leverage(self, symbol: str, leverage: int) -> None:
         """Установить плечо для символа."""
         logger.info(f"{self.exchange_id}: устанавливаю плечо {leverage}x для {symbol}")

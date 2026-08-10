@@ -202,6 +202,7 @@ class Application:
             try:
                 async with async_session() as session:
                     await self._positions.sync_positions(session)
+                    await self._positions.load_state(session)
                     await session.commit()
             except Exception:
                 logger.exception(
@@ -241,6 +242,7 @@ class Application:
                 try:
                     async with async_session() as session:
                         await self._agent_positions.sync_positions(session)
+                        await self._agent_positions.load_state(session)
                         await session.commit()
                 except Exception:
                     logger.exception("Не удалось синхронизировать позиции ИИ-режима")
