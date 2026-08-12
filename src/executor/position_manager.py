@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Callable, Coroutine
 
 from sqlalchemy import desc, select
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.analytics.base import Signal
@@ -171,31 +172,60 @@ class PositionManager:
             f"{len(self._error_cooldown_until)} символов в кулдауне"
         )
 
+    # Задержки перед повторной попыткой при "database is locked" — покрывают типичную
+    # длительность цикла сборщика (_on_collect_cycle_done держит одну транзакцию на
+    # весь скан рынка, см. AGENTS.md "Нюансы"): 10+20+40+80 = 150с общего бюджета.
+    _SAVE_STATE_RETRY_DELAYS_SEC = (10, 20, 40, 80)
+
     async def _save_state(self) -> None:
         """Сохранить Circuit Breaker / бан-лист / error-cooldown в БД.
 
         Своя короткая транзакция (не session вызывающего метода) — состояние
         мутируется в нескольких местах, часть из них синхронные (см. вызовы
         через asyncio.create_task ниже), поэтому проще не тащить session через
-        весь стек вызовов ради редких и дешёвых write'ов бухгалтерии."""
-        try:
-            async with async_session() as session:
-                state = await session.get(BotState, self.source)
-                if state is None:
-                    state = BotState(source=self.source)
-                    session.add(state)
-                state.consecutive_losses = self._consecutive_losses
-                state.circuit_breaker_until = self._circuit_breaker_until
-                state.circuit_breaker_stop_consumed_at = self._circuit_breaker_stop_consumed_at
-                state.banned_symbols_json = json.dumps(sorted(self._banned_symbols))
-                state.error_counts_json = json.dumps(self._error_counts)
-                state.error_cooldown_until_json = json.dumps(
-                    {symbol: dt.isoformat() for symbol, dt in self._error_cooldown_until.items()}
-                )
-                state.updated_at = datetime.now(tz=timezone.utc)
-                await session.commit()
-        except Exception:
-            logger.exception(f"[{self.source}] Не удалось сохранить состояние Circuit Breaker")
+        весь стек вызовов ради редких и дешёвых write'ов бухгалтерии.
+
+        Ретраится на "database is locked" (фикс 12.08.2026): основной цикл сборщика
+        (`Application._on_collect_cycle_done`) держит один общий `session` открытым
+        и коммитит его только один раз в самом конце — на полном скане рынка это
+        может быть несколько минут. Эта функция вызывается из fire-and-forget задачи
+        (`_schedule_save_state`), поэтому подождать дольше 30-секундного busy-timeout
+        коннекта — бесплатно, ничего этим не блокируем."""
+        attempt = 0
+        while True:
+            try:
+                async with async_session() as session:
+                    state = await session.get(BotState, self.source)
+                    if state is None:
+                        state = BotState(source=self.source)
+                        session.add(state)
+                    state.consecutive_losses = self._consecutive_losses
+                    state.circuit_breaker_until = self._circuit_breaker_until
+                    state.circuit_breaker_stop_consumed_at = self._circuit_breaker_stop_consumed_at
+                    state.banned_symbols_json = json.dumps(sorted(self._banned_symbols))
+                    state.error_counts_json = json.dumps(self._error_counts)
+                    state.error_cooldown_until_json = json.dumps(
+                        {symbol: dt.isoformat() for symbol, dt in self._error_cooldown_until.items()}
+                    )
+                    state.updated_at = datetime.now(tz=timezone.utc)
+                    await session.commit()
+                return
+            except OperationalError as e:
+                if "database is locked" in str(e).lower() and attempt < len(self._SAVE_STATE_RETRY_DELAYS_SEC):
+                    delay = self._SAVE_STATE_RETRY_DELAYS_SEC[attempt]
+                    attempt += 1
+                    logger.warning(
+                        f"[{self.source}] БД занята при сохранении состояния Circuit "
+                        f"Breaker, повтор через {delay}с (попытка {attempt}/"
+                        f"{len(self._SAVE_STATE_RETRY_DELAYS_SEC)})"
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+                logger.exception(f"[{self.source}] Не удалось сохранить состояние Circuit Breaker")
+                return
+            except Exception:
+                logger.exception(f"[{self.source}] Не удалось сохранить состояние Circuit Breaker")
+                return
 
     def _schedule_save_state(self) -> None:
         """Запланировать фоновое сохранение состояния из синхронного кода.
