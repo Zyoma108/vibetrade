@@ -63,6 +63,7 @@ strategy:
     - BSP
     - PLTR
     - IREN
+    - SAMSUNG                     # токенизированная акция — отдельное соглашение (bybit_agreement, 11.08.2026)
     - CL                          # нефтяной фьючерс — отдельное соглашение (Crude Oil Trading Terms)
   baseline_bars: 70              # свечей для расчёта нормального объёма
   volume_surge_mult: 5.0         # во сколько раз объём должен превысить норму
