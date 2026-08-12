@@ -181,16 +181,17 @@ class AgentPositionManager(PositionManager):
         return True
 
     async def apply_agent_partial_close(self, pos: Trade, current_price: float) -> bool:
-        """Зафиксировать половину позиции по рынку немедленно, не дожидаясь
-        автоматического триггера (`partial_close_pct`). Тот же процент (50%),
-        что и у автоматической фиксации — не усложняем выбором произвольной
-        доли. Не двигает SL — это отдельное самостоятельное решение
-        (`apply_agent_tighten_sl`), агент управляет ими независимо."""
+        """Зафиксировать часть позиции по рынку немедленно, не дожидаясь
+        автоматического триггера (`partial_close_pct`). Та же доля
+        (`partial_close_qty_pct`), что и у автоматической фиксации — не
+        усложняем выбором произвольной доли. Не двигает SL — это отдельное
+        самостоятельное решение (`apply_agent_tighten_sl`), агент управляет
+        ими независимо."""
         if pos.partial_closed:
             logger.info(f"Agent: частичная фиксация {pos.symbol} уже была, повторно не поддерживается")
             return False
 
-        close_qty = pos.quantity / 2
+        close_qty = pos.quantity * (self.config.partial_close_qty_pct / 100)
         try:
             await self._connector.cancel_all_orders(pos.symbol)  # type: ignore[union-attr]
         except Exception:

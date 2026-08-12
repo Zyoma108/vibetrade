@@ -374,7 +374,7 @@ def build_strategy_briefing(
             f"- Риск/исполнение на ЭТОМ (отдельном) аккаунте: риск {tc.risk_per_trade_pct}% "
             f"от депозита на сделку, SL {tc.stop_loss_pct}% от входа, TP на "
             f"{tc.risk_reward_ratio}x риска (~{tp_pct:.1f}% от входа), плечо {tc.leverage}x, "
-            f"частичная фиксация 50% на {tc.partial_close_pct}% пути до TP (стоп переводится "
+            f"частичная фиксация {tc.partial_close_qty_pct:.0f}% на {tc.partial_close_pct}% пути до TP (стоп переводится "
             f"в безубыток), макс. удержание {tc.max_hold_hours}ч{pullback}."
         )
         lines.append(

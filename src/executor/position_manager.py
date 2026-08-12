@@ -507,12 +507,12 @@ class PositionManager:
                         f"будут выставлены в следующем цикле: {e}"
                     )
 
-            # 4. Частичная фиксация — лимитный ордер на 50% позиции
+            # 4. Частичная фиксация — лимитный ордер на partial_close_qty_pct% позиции
             # Выставляется сразу при открытии, не зависит от цикла опроса.
             if tp_sl_ok:
                 try:
                     partial_trigger = self._partial_trigger_price(entry_price, tp_price)
-                    partial_qty = quantity / 2
+                    partial_qty = quantity * (self.config.partial_close_qty_pct / 100)
                     await self._connector.place_reduce_only_limit(  # type: ignore[union-attr]
                         symbol=signal.symbol,
                         side="buy",
@@ -754,7 +754,7 @@ class PositionManager:
                 await self._connector.place_reduce_only_limit(  # type: ignore[union-attr]
                     symbol=pos.symbol,
                     side="buy",
-                    amount=pos.quantity / 2,
+                    amount=pos.quantity * (self.config.partial_close_qty_pct / 100),
                     price=partial_trigger,
                 )
             except Exception:
@@ -957,7 +957,7 @@ class PositionManager:
         await self._notify(
             f"🔒 <b>Частичная фиксация (лимитник)</b> {pos.direction.upper()}\n"
             f"Монета: {pos.symbol}\n"
-            f"Закрыто 50% @ ${trigger:.6f}\n"
+            f"Закрыто {self.config.partial_close_qty_pct:.0f}% @ ${trigger:.6f}\n"
             f"Частичный PnL: ${partial_pnl:+.2f} ({pnl_pct:+.1f}%)\n"
             f"Стоп переведён в безубыток"
         )
@@ -979,7 +979,7 @@ class PositionManager:
         if not triggered:
             return False
 
-        close_qty = pos.quantity / 2
+        close_qty = pos.quantity * (self.config.partial_close_qty_pct / 100)
 
         # Проверить, нет ли уже лимитника на бирже (после рестарта)
         has_open_orders = False
@@ -1042,11 +1042,13 @@ class PositionManager:
         await self._notify(
             f"🔒 <b>Частичная фиксация</b> {pos.direction.upper()}\n"
             f"Монета: {pos.symbol}\n"
-            f"Закрыто 50% @ ${current_price:.6f}\n"
+            f"Закрыто {self.config.partial_close_qty_pct:.0f}% @ ${current_price:.6f}\n"
             f"Частичный PnL: ${partial_pnl:+.2f} ({pnl_pct:+.1f}%)\n"
             f"Стоп переведён в безубыток"
         )
-        logger.info(f"Частичное закрытие: {pos.symbol} 50% @ {current_price:.6f}")
+        logger.info(
+            f"Частичное закрытие: {pos.symbol} {self.config.partial_close_qty_pct:.0f}% @ {current_price:.6f}"
+        )
         return True
 
     async def _check_time_exit(

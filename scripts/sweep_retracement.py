@@ -232,7 +232,7 @@ def simulate(settings, data, has_oi: bool = True, collect_retracement: bool = Tr
             if not pos.partial_closed:
                 trigger = pos.entry_price + (pos.tp_price - pos.entry_price) * (cfg.partial_close_pct / 100)
                 if high >= trigger:
-                    close_qty = pos.quantity / 2
+                    close_qty = pos.quantity * (getattr(cfg, "partial_close_qty_pct", 50.0) / 100)
                     partial_pnl = (trigger - pos.entry_price) * close_qty
                     pos.quantity -= close_qty
                     pos.partial_closed = True
