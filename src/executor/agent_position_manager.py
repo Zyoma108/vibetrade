@@ -177,7 +177,7 @@ class AgentPositionManager(PositionManager):
             logger.exception(f"Agent close: не удалось закрыть {pos.symbol}")
             return False
         exit_price = current_price or pos.entry_price
-        await self._close_position(pos, exit_price, "llm_close")
+        await self._close_position(pos, exit_price, "llm_close", session)
         return True
 
     async def apply_agent_partial_close(self, pos: Trade, current_price: float) -> bool:

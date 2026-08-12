@@ -172,43 +172,69 @@ class PositionManager:
             f"{len(self._error_cooldown_until)} символов в кулдауне"
         )
 
-    # Задержки перед повторной попыткой при "database is locked" — покрывают типичную
-    # длительность цикла сборщика (_on_collect_cycle_done держит одну транзакцию на
-    # весь скан рынка, см. AGENTS.md "Нюансы"): 10+20+40+80 = 150с общего бюджета.
+    # Задержки перед повторной попыткой при "database is locked" — только для пути
+    # БЕЗ переданного session (см. docstring _save_state ниже).
     _SAVE_STATE_RETRY_DELAYS_SEC = (10, 20, 40, 80)
 
-    async def _save_state(self) -> None:
+    def _apply_state_to_row(self, state: BotState) -> None:
+        """Перенести текущее in-memory состояние CB/бан-листа/error-cooldown в ORM-строку."""
+        state.consecutive_losses = self._consecutive_losses
+        state.circuit_breaker_until = self._circuit_breaker_until
+        state.circuit_breaker_stop_consumed_at = self._circuit_breaker_stop_consumed_at
+        state.banned_symbols_json = json.dumps(sorted(self._banned_symbols))
+        state.error_counts_json = json.dumps(self._error_counts)
+        state.error_cooldown_until_json = json.dumps(
+            {symbol: dt.isoformat() for symbol, dt in self._error_cooldown_until.items()}
+        )
+        state.updated_at = datetime.now(tz=timezone.utc)
+
+    async def _save_state(self, session: AsyncSession | None = None) -> None:
         """Сохранить Circuit Breaker / бан-лист / error-cooldown в БД.
 
-        Своя короткая транзакция (не session вызывающего метода) — состояние
-        мутируется в нескольких местах, часть из них синхронные (см. вызовы
-        через asyncio.create_task ниже), поэтому проще не тащить session через
-        весь стек вызовов ради редких и дешёвых write'ов бухгалтерии.
+        Фикс 12.08.2026 (v2): изначально всегда открывала свою НЕЗАВИСИМУЮ сессию —
+        но при вызове из `_close_position` (единственный "горячий" путь, срабатывает
+        почти на КАЖДОМ закрытии сделки при включённом Circuit Breaker) это означало
+        гонку с сессией `Application._on_collect_cycle_done`, которая держит одну
+        транзакцию на весь ~5-минутный скан рынка и коммитит её только в конце —
+        причём сама `_close_position` вызывается ИЗНУТРИ этой же транзакции. Retry с
+        бэкоффом (150с бюджета, см. v1 этого фикса) не спасал: ждать было нечего —
+        транзакция физически не могла закоммититься раньше, чем этот же await
+        вернёт управление наверх по стеку, так что ожидание было эквивалентно
+        затягиванию собственного дедлока до истечения бюджета ретраев.
 
-        Ретраится на "database is locked" (фикс 12.08.2026): основной цикл сборщика
-        (`Application._on_collect_cycle_done`) держит один общий `session` открытым
-        и коммитит его только один раз в самом конце — на полном скане рынка это
-        может быть несколько минут. Эта функция вызывается из fire-and-forget задачи
-        (`_schedule_save_state`), поэтому подождать дольше 30-секундного busy-timeout
-        коннекта — бесплатно, ничего этим не блокируем."""
+        Теперь принимает опциональный `session` — если он передан (все вызовы из
+        `_close_position`, у которой он есть в стеке через `update_positions`/
+        `apply_agent_close`), пишем ПРЯМО В НЕГО (`flush`, без своего `commit` —
+        закоммитится вместе с остальным в конце вызывающей транзакции). Это та же
+        самая транзакция, гонки за блокировкой физически нет.
+
+        Независимая сессия с ретраем остаётся fallback для вызовов БЕЗ session
+        под рукой (`_track_error`/`_reset_errors` — синхронный код без session в
+        стеке, см. `_schedule_save_state`) — там гонка с циклом сборщика всё ещё
+        возможна, но эти пути срабатывают на порядок реже (только error-cascade),
+        а не на каждом закрытии сделки."""
+        if session is not None:
+            try:
+                state = await session.get(BotState, self.source)
+                if state is None:
+                    state = BotState(source=self.source)
+                    session.add(state)
+                self._apply_state_to_row(state)
+                await session.flush()
+            except Exception:
+                logger.exception(f"[{self.source}] Не удалось сохранить состояние Circuit Breaker")
+            return
+
         attempt = 0
         while True:
             try:
-                async with async_session() as session:
-                    state = await session.get(BotState, self.source)
+                async with async_session() as own_session:
+                    state = await own_session.get(BotState, self.source)
                     if state is None:
                         state = BotState(source=self.source)
-                        session.add(state)
-                    state.consecutive_losses = self._consecutive_losses
-                    state.circuit_breaker_until = self._circuit_breaker_until
-                    state.circuit_breaker_stop_consumed_at = self._circuit_breaker_stop_consumed_at
-                    state.banned_symbols_json = json.dumps(sorted(self._banned_symbols))
-                    state.error_counts_json = json.dumps(self._error_counts)
-                    state.error_cooldown_until_json = json.dumps(
-                        {symbol: dt.isoformat() for symbol, dt in self._error_cooldown_until.items()}
-                    )
-                    state.updated_at = datetime.now(tz=timezone.utc)
-                    await session.commit()
+                        own_session.add(state)
+                    self._apply_state_to_row(state)
+                    await own_session.commit()
                 return
             except OperationalError as e:
                 if "database is locked" in str(e).lower() and attempt < len(self._SAVE_STATE_RETRY_DELAYS_SEC):
@@ -850,7 +876,7 @@ class PositionManager:
             current_price = await self._get_current_price(session, pos.symbol)
 
             if pos.symbol not in ex_symbols:
-                await self._close_from_exchange(pos, current_price, closed)
+                await self._close_from_exchange(session, pos, current_price, closed)
                 continue
 
             if not pos.partial_closed and await self._check_limit_partial_fill(pos):
@@ -860,7 +886,7 @@ class PositionManager:
                 if await self._check_partial_close_fallback(pos, current_price):
                     continue
 
-            if await self._check_time_exit(pos, now, current_price, closed):
+            if await self._check_time_exit(session, pos, now, current_price, closed):
                 continue
 
         return closed
@@ -908,12 +934,12 @@ class PositionManager:
             except Exception:
                 logger.exception(f"Не удалось аварийно закрыть {pos.symbol}")
             current_price = await self._get_current_price(session, pos.symbol)
-            await self._close_position(pos, current_price or pos.entry_price, "sl")
+            await self._close_position(pos, current_price or pos.entry_price, "sl", session)
             closed.append(pos)
             return True
 
     async def _close_from_exchange(
-        self, pos: Trade, current_price: float | None, closed: list[Trade]
+        self, session: AsyncSession, pos: Trade, current_price: float | None, closed: list[Trade]
     ) -> None:
         """Позиция уже закрыта на бирже (сработал TP/SL) — синхронизировать в БД."""
         exit_price = current_price or pos.entry_price
@@ -926,7 +952,7 @@ class PositionManager:
                 exit_price = last_trade["price"]
         except Exception:
             pass
-        await self._close_position(pos, exit_price, "tp_sl_exchange")
+        await self._close_position(pos, exit_price, "tp_sl_exchange", session)
         closed.append(pos)
 
     def _partial_trigger_price(self, entry_price: float, tp_price: float) -> float:
@@ -1083,6 +1109,7 @@ class PositionManager:
 
     async def _check_time_exit(
         self,
+        session: AsyncSession,
         pos: Trade,
         now: datetime,
         current_price: float | None,
@@ -1109,7 +1136,7 @@ class PositionManager:
             return True
 
         exit_price = current_price or pos.entry_price
-        await self._close_position(pos, exit_price, "time")
+        await self._close_position(pos, exit_price, "time", session)
         closed.append(pos)
         return True
 
@@ -1186,8 +1213,11 @@ class PositionManager:
         return row[0] if row else None
 
     async def _close_position(
-        self, trade: Trade, exit_price: float, reason: str
+        self, trade: Trade, exit_price: float, reason: str,
+        session: AsyncSession | None = None,
     ) -> None:
+        """`session` (если передан вызывающим) прокидывается в `_save_state()` —
+        см. её docstring про фикс гонки за блокировкой БД 12.08.2026."""
         trade.exit_price = exit_price
         trade.exit_time = datetime.now(tz=timezone.utc)
         trade.status = "closed"
@@ -1248,7 +1278,7 @@ class PositionManager:
                 self._consecutive_losses = 0
                 self._circuit_breaker_until = None
                 self._circuit_breaker_stop_consumed_at = 0
-            await self._save_state()
+            await self._save_state(session)
 
         labels = {
             "tp": ("✅", "Тейк-профит"),

@@ -206,7 +206,7 @@ class TestCheckTimeExitWithAgentExtension:
             llm_hold_until=now + timedelta(hours=1),  # agent extended it further
         )
         closed: list = []
-        handled = await pm._check_time_exit(pos, now, 100.0, closed)
+        handled = await pm._check_time_exit(None, pos, now, 100.0, closed)
         assert handled is False
         assert closed == []
         pm._connector.close_position.assert_not_called()
@@ -217,7 +217,7 @@ class TestCheckTimeExitWithAgentExtension:
         now = datetime.now(tz=timezone.utc)
         pos = _trade(entry_time=now - timedelta(hours=50), llm_hold_until=None)
         closed: list = []
-        handled = await pm._check_time_exit(pos, now, 100.0, closed)
+        handled = await pm._check_time_exit(None, pos, now, 100.0, closed)
         assert handled is True
         assert closed == [pos]
         pm._connector.close_position.assert_awaited_once()
