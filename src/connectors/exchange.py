@@ -187,7 +187,17 @@ class ExchangeConnector:
         return result
 
     async def fetch_tickers(self) -> list[dict]:
-        """Забрать тикеры всех пар одним запросом."""
+        """Забрать тикеры всех пар одним запросом.
+
+        На linear-рынках (ByBit) тикер уже содержит открытый интерес
+        (`info.openInterest`) — это тот же показатель, что отдаёт отдельный
+        `fetch_open_interest()` (см. ccxt `parse_open_interest`: для linear
+        `openInterestAmount` берётся из того же поля `openInterest`).
+        Прокидываем его наружу как `open_interest`, чтобы вызывающий код
+        мог не делать лишний round-trip на биржу за тем, что уже приехало.
+        Ключ не входит в модель `Ticker` — вызывающий код обязан вынуть его
+        (`dict.pop`) перед `Ticker(**t)`.
+        """
         raw = await self._call("fetch_tickers")
         result = []
         now = datetime.now(tz=timezone.utc)
@@ -196,6 +206,7 @@ class ExchangeConnector:
                 continue
             ts = data.get("timestamp")
             volume = data.get("quoteVolume") or data.get("baseVolume") or 0
+            oi_raw = (data.get("info") or {}).get("openInterest")
             result.append({
                 "exchange": self.exchange_id,
                 "symbol": symbol,
@@ -206,6 +217,7 @@ class ExchangeConnector:
                 "last": data.get("last", 0),
                 "volume": volume,
                 "change_pct": data.get("percentage"),
+                "open_interest": float(oi_raw) if oi_raw not in (None, "") else None,
             })
         return result
 
