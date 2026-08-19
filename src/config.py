@@ -88,7 +88,12 @@ class StrategyConfig(BaseModel):
 
 
 class TelegramConfig(BaseModel):
-    bot_token: str = ""
+    # None (или пустая строка) = бот отключён — все места использования уже проверяют
+    # bot_token на truthy перед стартом (см. core/app.py), поэтому и `bot_token: null`
+    # в YAML, и просто отсутствие ключа — оба штатный способ выключить конкретного бота
+    # (telegram: основной, telegram_price_surge: второй, для сигналов памп-стратегии)
+    # не трогая остальную секцию (chat_ids и т.д.).
+    bot_token: str | None = None
     chat_ids: list[str] = []  # числовые ID, @username канала, или отрицательные ID
 
 
