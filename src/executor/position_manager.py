@@ -60,6 +60,10 @@ class PositionManager:
         self._error_counts: dict[str, int] = {}  # symbol → кол-во ошибок подряд
         self._error_cooldown_until: dict[str, datetime] = {}  # symbol → не пытаться до
 
+        # Алерт в Telegram при ошибках связи с биржей (истёкший/невалидный API-ключ и т.п.)
+        self._exchange_error_since: datetime | None = None  # None = сейчас всё ок
+        self._exchange_error_last_alert_at: datetime | None = None
+
     @property
     def _has_connector(self) -> bool:
         return self._connector is not None and self._connector.has_credentials
@@ -75,6 +79,7 @@ class PositionManager:
 
         try:
             exchange_positions = await self._connector.fetch_positions()  # type: ignore[union-attr]
+            await self._clear_exchange_error()
         except Exception as e:
             logger.error(f"Не удалось получить позиции с биржи: {e}")
             logger.error(
@@ -87,6 +92,7 @@ class PositionManager:
                 "     - Trade → Derivatives (фьючерсы)\n"
                 "     (в настройках API-ключа на сайте ByBit)"
             )
+            await self._alert_exchange_error("fetch_positions (sync при старте)", e)
             return
         ex_symbols = {p["symbol"] for p in exchange_positions}
 
@@ -407,12 +413,14 @@ class PositionManager:
         # Бюджет риска: % от депозита с биржи
         try:
             balance = await self._connector.fetch_balance()  # type: ignore[union-attr]
+            await self._clear_exchange_error()
             total = float(balance.get("total", balance.get("free", 0)))
             if total <= 0:
                 logger.warning("Баланс депозита = 0, позиция не открыта")
                 return None, "error", f"zero_balance: total={total}"
         except Exception as e:
             logger.warning(f"Не удалось получить баланс: {e}")
+            await self._alert_exchange_error("fetch_balance (открытие позиции)", e)
             return None, "error", f"balance_fetch: {e}"
 
         # Применяем множители рыночного режима и Circuit Breaker к бюджету риска
@@ -863,9 +871,11 @@ class PositionManager:
         # Сверить с биржей
         try:
             ex_positions = await self._connector.fetch_positions()  # type: ignore[union-attr]
+            await self._clear_exchange_error()
             ex_symbols = {p["symbol"] for p in ex_positions}
-        except Exception:
+        except Exception as e:
             logger.exception("Ошибка получения позиций с биржи")
+            await self._alert_exchange_error("fetch_positions (обновление позиций)", e)
             return []
 
         for pos in db_positions:
@@ -1306,6 +1316,64 @@ class PositionManager:
                 await self._send_message(text)
             except Exception:
                 logger.exception("Ошибка отправки торгового уведомления")
+
+    # ------------------------------------------------------------------
+    # Алерт на ошибки связи с биржей (истёкший API-ключ и т.п.)
+    # ------------------------------------------------------------------
+
+    _EXCHANGE_ERROR_ALERT_COOLDOWN = timedelta(minutes=30)
+    _EXCHANGE_ERROR_AUTH_HINTS = (
+        "expired", "api_key", "apikey", "invalid", "signature", "unauthorized",
+        "401", "403", "10003", "10004", "33004",  # характерные коды Bybit
+    )
+
+    async def _alert_exchange_error(self, context: str, error: Exception) -> None:
+        """Уведомить в Telegram об ошибке связи с биржей (например, протухший
+        API-ключ, см. db-audit-august-19-2026: ~40ч простоя без алертинга).
+
+        Не спамит на каждую попытку: первый алерт — сразу, повторные — не чаще
+        раза в _EXCHANGE_ERROR_ALERT_COOLDOWN, пока ошибка не исчезнет
+        (см. _clear_exchange_error)."""
+        now = datetime.now(tz=timezone.utc)
+        first_occurrence = self._exchange_error_since is None
+        if first_occurrence:
+            self._exchange_error_since = now
+
+        if not first_occurrence and self._exchange_error_last_alert_at is not None:
+            if now - self._exchange_error_last_alert_at < self._EXCHANGE_ERROR_ALERT_COOLDOWN:
+                return
+
+        self._exchange_error_last_alert_at = now
+        down_for = ""
+        if not first_occurrence:
+            minutes = int((now - self._exchange_error_since).total_seconds() // 60)  # type: ignore[operator]
+            down_for = f" (продолжается {minutes} мин)"
+
+        err_str = str(error).lower()
+        hint = ""
+        if any(marker in err_str for marker in self._EXCHANGE_ERROR_AUTH_HINTS):
+            hint = "\n⚠️ Похоже на протухший/неверный API-ключ — проверь ключ на бирже."
+
+        logger.error(f"Ошибка связи с биржей ({self.source}, {context}): {error}")
+        await self._notify(
+            f"🔴 <b>Ошибка связи с биржей ({self.source})</b>{down_for}\n"
+            f"Контекст: {context}\n"
+            f"{error}"
+            f"{hint}"
+        )
+
+    async def _clear_exchange_error(self) -> None:
+        """Вызывать после успешного запроса к бирже — сбрасывает состояние
+        алерта и, если до этого был алерт о простое, шлёт уведомление о восстановлении."""
+        if self._exchange_error_since is None:
+            return
+        now = datetime.now(tz=timezone.utc)
+        minutes = int((now - self._exchange_error_since).total_seconds() // 60)
+        self._exchange_error_since = None
+        self._exchange_error_last_alert_at = None
+        await self._notify(
+            f"🟢 Связь с биржей ({self.source}) восстановлена (простой ~{minutes} мин)"
+        )
 
     # ------------------------------------------------------------------
     # Error cascade protection

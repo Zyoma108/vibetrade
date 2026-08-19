@@ -613,6 +613,80 @@ class TestErrorCascade:
         assert detail and "error_cooldown" in detail
 
 
+# ---------------------------------------------------------------------------
+# Exchange error alerting — _alert_exchange_error / _clear_exchange_error
+# (см. db-audit-august-19-2026: истёкший API-ключ ~40ч не давал алертов)
+# ---------------------------------------------------------------------------
+
+
+class TestExchangeErrorAlert:
+    def _pm_with_notifier(self) -> tuple[PositionManager, AsyncMock]:
+        send_message = AsyncMock()
+        pm = PositionManager(config=_config(), send_message=send_message)
+        return pm, send_message
+
+    @pytest.mark.asyncio
+    async def test_first_error_alerts_immediately(self):
+        pm, send_message = self._pm_with_notifier()
+        await pm._alert_exchange_error("fetch_balance", Exception("boom"))
+        send_message.assert_awaited_once()
+        assert "boom" in send_message.await_args.args[0]
+        assert pm._exchange_error_since is not None
+
+    @pytest.mark.asyncio
+    async def test_repeated_error_within_cooldown_does_not_realert(self):
+        pm, send_message = self._pm_with_notifier()
+        await pm._alert_exchange_error("fetch_balance", Exception("boom"))
+        await pm._alert_exchange_error("fetch_balance", Exception("boom again"))
+        send_message.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_error_after_cooldown_realerts_with_downtime(self):
+        pm, send_message = self._pm_with_notifier()
+        await pm._alert_exchange_error("fetch_balance", Exception("boom"))
+        pm._exchange_error_since -= timedelta(minutes=31)  # type: ignore[operator]
+        pm._exchange_error_last_alert_at -= timedelta(minutes=31)  # type: ignore[operator]
+        await pm._alert_exchange_error("fetch_balance", Exception("still down"))
+        assert send_message.await_count == 2
+        assert "продолжается" in send_message.await_args.args[0]
+
+    @pytest.mark.asyncio
+    async def test_auth_like_error_includes_hint(self):
+        pm, send_message = self._pm_with_notifier()
+        await pm._alert_exchange_error(
+            "fetch_balance", Exception("Your api key has expired.")
+        )
+        assert "ключ" in send_message.await_args.args[0]
+
+    @pytest.mark.asyncio
+    async def test_non_auth_error_has_no_hint(self):
+        pm, send_message = self._pm_with_notifier()
+        await pm._alert_exchange_error("fetch_balance", Exception("network timeout"))
+        assert "ключ" not in send_message.await_args.args[0]
+
+    @pytest.mark.asyncio
+    async def test_clear_after_error_sends_recovery_message(self):
+        pm, send_message = self._pm_with_notifier()
+        await pm._alert_exchange_error("fetch_balance", Exception("boom"))
+        await pm._clear_exchange_error()
+        assert send_message.await_count == 2
+        assert "восстановлена" in send_message.await_args.args[0]
+        assert pm._exchange_error_since is None
+        assert pm._exchange_error_last_alert_at is None
+
+    @pytest.mark.asyncio
+    async def test_clear_without_prior_error_is_noop(self):
+        pm, send_message = self._pm_with_notifier()
+        await pm._clear_exchange_error()
+        send_message.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_no_notifier_configured_does_not_raise(self):
+        pm = PositionManager(config=_config())  # send_message=None
+        await pm._alert_exchange_error("fetch_balance", Exception("boom"))
+        await pm._clear_exchange_error()
+
+
 class TestInitialState:
     """PositionManager starts in expected state."""
 
