@@ -236,9 +236,14 @@ class MarketDataCollector:
             )
         )
         for c in candles:
-            if max_ts is not None and c["timestamp"] < max_ts:
+            # SQLite роняет tzinfo при round-trip (max_ts всегда naive), а свечи с биржи
+            # приходят aware (UTC) — сравниваем по naive-представлению того же момента,
+            # сам c["timestamp"] ниже (insert/update) не трогаем.
+            ts = c["timestamp"]
+            ts_naive = ts.replace(tzinfo=None) if ts.tzinfo is not None else ts
+            if max_ts is not None and ts_naive < max_ts:
                 continue  # закрытый бар уже сохранён и не меняется — пропускаем без запроса
-            if max_ts is not None and c["timestamp"] == max_ts:
+            if max_ts is not None and ts_naive == max_ts:
                 existing = await session.scalar(
                     select(Candle).where(
                         Candle.exchange == exchange,

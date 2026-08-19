@@ -12,7 +12,7 @@ exchange. This made the volume-fading/declining filters in SetupDetector
 trip on stale data instead of the real, closed-bar volume.
 """
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 import pytest_asyncio
 from sqlalchemy import select
@@ -143,3 +143,25 @@ async def test_new_bar_is_inserted_once(session_factory):
 
     assert len(rows) == 1
     assert rows[0].volume == 1_234.0
+
+
+async def test_tz_aware_candles_from_real_connector_do_not_crash(session_factory):
+    """Regression: ExchangeConnector.fetch_ohlcv() returns tz-aware (UTC) timestamps,
+    but SQLite drops tzinfo on round-trip (see module docstring), so max(Candle.timestamp)
+    read back from the DB is naive. Comparing the two directly used to raise
+    `TypeError: can't compare offset-naive and offset-aware datetimes`."""
+    collector = _make_collector()
+    aware_ts = BASE_TS.replace(tzinfo=timezone.utc)
+    newer_aware_ts = datetime(2026, 7, 24, 16, 3, 0, tzinfo=timezone.utc)
+    connector = FakeConnector([
+        [_bar(volume=5_000.0, timestamp=aware_ts)],
+        [_bar(volume=5_000.0, timestamp=aware_ts), _bar(volume=1_000.0, timestamp=newer_aware_ts)],
+    ])
+    selected = _selected_ticker()
+
+    async with session_factory() as session:
+        await collector._collect_for_exchange(connector, session, selected)
+        await collector._collect_for_exchange(connector, session, selected)
+        rows = (await session.execute(select(Candle))).scalars().all()
+
+    assert len(rows) == 2
