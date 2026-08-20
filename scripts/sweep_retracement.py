@@ -35,11 +35,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import numpy as np
 
 from src.analytics.detector import SetupDetector
-from src.analytics.utils import OI_TREND_BARS, calculate_oi_slope_pct
+from src.analytics.utils import OI_TREND_BARS, calculate_oi_slope_pct, timeframe_to_minutes
 from src.backtest.runner import SimPosition, PendingEntry, _fee, _bar
 from src.config import Settings
-
-CYCLE_DELAY_BARS = 3
 
 
 def log(msg: str) -> None:
@@ -209,6 +207,13 @@ def simulate(settings, data, has_oi: bool = True, collect_retracement: bool = Tr
     need_bars = detector.config.baseline_bars + detector.config.sustain_bars
     sustain = detector.config.sustain_bars
 
+    # Каданс поиска новых сигналов синхронизирован с реальной скоростью коллектора
+    # (settings.collectors.scan_cycle_seconds), а не захардкожен — см. runner.py
+    timeframe_minutes = timeframe_to_minutes(settings.collectors.timeframe)
+    cycle_delay_bars = max(
+        1, round(settings.collectors.scan_cycle_seconds / (timeframe_minutes * 60))
+    )
+
     for ts_idx, ts in enumerate(all_timestamps):
         if ts_idx < need_bars:
             continue
@@ -314,7 +319,7 @@ def simulate(settings, data, has_oi: bool = True, collect_retracement: bool = Tr
                 pending_expired += 1
                 retr_map.pop(id(pe), None)
 
-        if ts_idx % CYCLE_DELAY_BARS != 0:
+        if ts_idx % cycle_delay_bars != 0:
             continue
         if len(positions) + len(pending) >= cfg.max_positions:
             continue

@@ -1212,12 +1212,19 @@ class PositionManager:
     async def _get_current_price(
         self, session: AsyncSession, symbol: str
     ) -> float | None:
-        stmt = (
-            select(Ticker.last)
-            .where(Ticker.symbol == symbol)
-            .order_by(desc(Ticker.timestamp))
-            .limit(1)
-        )
+        """Последняя известная цена — ОБЯЗАТЕЛЬНО с биржи, на которой реально
+        торгует этот пайплайн (self._connector), а не любая свежайшая запись
+        по символу. Ticker собирается с нескольких бирж (данные — не только
+        Bybit, см. vibetrade-signal-detector-cross-exchange), и по 532 символам
+        в проде есть записи и от Binance, и от Bybit одновременно — без
+        фильтра по exchange здесь можно было получить цену с ЧУЖОЙ биржи
+        (например, Binance) и использовать её как reference_price для ордера,
+        который реально уходит в стакан Bybit (лимитник на откате, fallback
+        частичного закрытия, выход по времени)."""
+        stmt = select(Ticker.last).where(Ticker.symbol == symbol)
+        if self._connector is not None:
+            stmt = stmt.where(Ticker.exchange == self._connector.exchange_id)
+        stmt = stmt.order_by(desc(Ticker.timestamp)).limit(1)
         result = await session.execute(stmt)
         row = result.first()
         return row[0] if row else None

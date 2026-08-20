@@ -17,14 +17,13 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from src.analytics.detector import SetupDetector
-from src.analytics.utils import OI_TREND_BARS, calculate_oi_slope_pct
+from src.analytics.utils import OI_TREND_BARS, calculate_oi_slope_pct, timeframe_to_minutes
 from src.config import Settings
 from src.storage.models import Candle, MarketContextSnapshot, OpenInterest
 
 logger = logging.getLogger(__name__)
 
 BACKTEST_DB = Path("data/backtest.db")
-CYCLE_DELAY_BARS = 3
 
 
 # ---------------------------------------------------------------------------
@@ -134,6 +133,21 @@ async def run_backtest(
 
     detector = SetupDetector(settings.strategy, timeframe=settings.collectors.timeframe)
     cfg = settings.trading
+
+    # Каданс поиска новых сигналов: столько же баров, сколько реально проходит между
+    # полными циклами сканирования рынка (settings.collectors.scan_cycle_seconds) —
+    # раньше было захардкожено как 3 бара, вне зависимости от таймфрейма и реальной
+    # скорости коллектора (см. market-data-scan-speedup-august-2026: скан ускорился
+    # с 5-7 мин до ~90с, а константа не менялась).
+    timeframe_minutes = timeframe_to_minutes(settings.collectors.timeframe)
+    cycle_delay_bars = max(
+        1, round(settings.collectors.scan_cycle_seconds / (timeframe_minutes * 60))
+    )
+    logger.info(
+        f"Каданс сканирования сигналов: раз в {cycle_delay_bars} бар(а) "
+        f"(scan_cycle_seconds={settings.collectors.scan_cycle_seconds:.0f}с, "
+        f"таймфрейм={settings.collectors.timeframe})"
+    )
 
     positions: list[SimPosition] = []
     pending: list[PendingEntry] = []
@@ -312,7 +326,7 @@ async def run_backtest(
                 pending_expired += 1
 
         # Ищем сетапы только в «циклы сканирования»
-        if ts_idx % CYCLE_DELAY_BARS != 0:
+        if ts_idx % cycle_delay_bars != 0:
             continue
         if len(positions) + len(pending) >= cfg.max_positions:
             continue

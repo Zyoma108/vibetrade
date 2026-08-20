@@ -19,6 +19,18 @@ class ExchangeConfig(BaseModel):
 class CollectorsConfig(BaseModel):
     interval_seconds: int = Field(default=60, ge=10)
     timeframe: str = Field(default="5m", description="Таймфрейм свечей (1m, 5m, 15m, 1h)")
+    scan_cycle_seconds: float = Field(
+        default=105.0, ge=1.0,
+        description="Измеренная длительность полного цикла сканирования рынка "
+        "(сбор+анализ всех символов + interval_seconds паузы) — реальный каданс, с "
+        "которым бот ищет новые сигналы. Используется только бэктестом "
+        "(src/backtest/runner.py, scripts/sweep_retracement.py), чтобы не проверять "
+        "сигналы на каждом баре, а сэмплировать их так же редко/часто, как это "
+        "реально происходит. Не читается MarketDataCollector'ом (тот таймингует себя "
+        "сам через interval_seconds) — обновлять вручную при изменении скорости "
+        "скана (см. память market-data-scan-speedup-august-2026: ~90с после "
+        "оптимизации 20.08.2026, было 5-7 мин)"
+    )
 
 
 class StrategyConfig(BaseModel):
