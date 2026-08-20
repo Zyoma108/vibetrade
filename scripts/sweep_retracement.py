@@ -245,7 +245,8 @@ def simulate(settings, data, has_oi: bool = True, collect_retracement: bool = Tr
                 pos.exit_price = pos.tp_price
                 pos.exit_time = ts
                 pos.exit_reason = "tp"
-                pos.fee += _fee(cfg, pos.tp_price * pos.quantity, taker=True)
+                # tp_as_limit_order (прод-дефолт) → TP реально maker, не taker
+                pos.fee += _fee(cfg, pos.tp_price * pos.quantity, taker=not cfg.tp_as_limit_order)
                 pos.pnl = (pos.tp_price - pos.entry_price) * pos.quantity + pos.partial_pnl - pos.fee
                 pos.closed = True
                 closed_trades.append(pos)
@@ -407,8 +408,13 @@ def simulate(settings, data, has_oi: bool = True, collect_retracement: bool = Tr
             signals_count += 1
             signal_price = candle_slice[-1]["close"]
 
+            # regime здесь уже не risk_off и не cautious+ST=red (см. блокировку выше),
+            # поэтому "cautious" тут всегда соответствует реальному position_size_mult=0.5
             virtual_balance = 1000.0
-            risk_budget = virtual_balance * (cfg.risk_per_trade_pct / 100) * cb_mult
+            regime_size_mult = 0.5 if regime == "cautious" else 1.0
+            risk_budget = (
+                virtual_balance * (cfg.risk_per_trade_pct / 100) * cb_mult * regime_size_mult
+            )
 
             if cfg.pending_entry_pullback_pct > 0:
                 limit_price = signal_price * (1 - cfg.pending_entry_pullback_pct / 100)

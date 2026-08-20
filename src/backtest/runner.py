@@ -220,7 +220,7 @@ async def run_backtest(
                 trigger = pos.entry_price + (pos.tp_price - pos.entry_price) * (
                     cfg.partial_close_pct / 100)
                 if high >= trigger:
-                    close_qty = pos.quantity / 2
+                    close_qty = pos.quantity * (cfg.partial_close_qty_pct / 100)
                     partial_pnl = (trigger - pos.entry_price) * close_qty
                     pos.quantity -= close_qty
                     pos.partial_closed = True
@@ -230,12 +230,13 @@ async def run_backtest(
                     pos.fee += _fee(cfg, trigger * close_qty, taker=False)
                     continue
 
-            # TP
+            # TP — если tp_as_limit_order включён (прод-дефолт), TP реально исполняется
+            # лимитным ордером (maker, дешевле), не market (taker)
             if high >= pos.tp_price:
                 pos.exit_price = pos.tp_price
                 pos.exit_time = ts
                 pos.exit_reason = "tp"
-                pos.fee += _fee(cfg, pos.tp_price * pos.quantity, taker=True)
+                pos.fee += _fee(cfg, pos.tp_price * pos.quantity, taker=not cfg.tp_as_limit_order)
                 pos.pnl = (pos.tp_price - pos.entry_price) * pos.quantity + pos.partial_pnl - pos.fee
                 pos.closed = True
                 closed_trades.append(pos)
@@ -417,9 +418,16 @@ async def run_backtest(
             signals_count += 1
 
             signal_price = candle_slice[-1]["close"]
-            # Бюджет риска: % от виртуального депозита $1000
+            # Бюджет риска: % от виртуального депозита $1000, с учётом Circuit Breaker
+            # и множителя рыночного режима (cautious → 0.5x, см. MarketContext.
+            # position_size_multiplier). risk_off и cautious+ST=red уже отсеяны выше
+            # (block_entries), поэтому regime здесь либо не "cautious", либо
+            # "cautious"+не-red — 0.5x соответствует реальному position_size_mult.
             virtual_balance = 1000.0
-            risk_budget = virtual_balance * (cfg.risk_per_trade_pct / 100) * cb_mult
+            regime_size_mult = 0.5 if regime == "cautious" else 1.0
+            risk_budget = (
+                virtual_balance * (cfg.risk_per_trade_pct / 100) * cb_mult * regime_size_mult
+            )
 
             if cfg.pending_entry_pullback_pct > 0:
                 # Вход лимитником на откате — TP/SL/qty известны заранее (лимит фиксирован)
