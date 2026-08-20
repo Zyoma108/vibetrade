@@ -47,17 +47,12 @@ src/
 ├── backtest/
 │   └── runner.py              # Симуляция стратегии на исторических свечах
 ├── scripts/
-│   ├── backtest_sweep.py       # Подбор оптимальных параметров стратегии — legacy, без комиссий/слиппеджа
-│   ├── sweep_focused.py         # Фокусированный свип (RR×SL, vol, dump, risk, partial) — legacy, без комиссий/слиппеджа
 │   ├── sweep_retracement.py     # Быстрый O(1)-движок бэктеста (свечи по timestamp), 1:1 повторяет runner.py (комиссии+слиппедж учтены); свип max_window_retracement_pct, база для скриптов ниже
 │   ├── sweep_partial_close.py   # Свип partial_close_pct (ценовой порог партиала) на движке sweep_retracement.py
 │   ├── sweep_partial_close_qty.py # Свип partial_close_qty_pct (доля объёма на партиале) на том же движке
 │   ├── sweep_rr.py              # Свип risk_reward_ratio (TP=SL×RR) на том же движке
 │   ├── analyze_tp_upside.py     # Для сделок, дошедших до полного TP — сколько доп. движения было упущено после хардового TP-выхода
 │   ├── analyze_missed_signals.py # Поиск пропущенных сетапов (сильные движения без сигналов)
-│   ├── analyze_performance.py  # Комплексный анализ на нескольких БД (свип + комбинации) — legacy, без комиссий/слиппеджа
-│   ├── test_blowoff_filter.py  # Тест фильтра памп-энд-дампов
-│   ├── test_improved_filters.py # Тест расширенных фильтров (breadth, extended price)
 │   ├── agent_data.py            # ИИ-режим: CLI для сабагентов (только чтение, AgentToolkit)
 │   ├── agent_briefing.py        # ИИ-режим: печатает strategy briefing из живого конфига
 │   └── agent_actions.py         # ИИ-режим: CLI для оркестратора (открыть/подтянуть SL/продлить/закрыть)
@@ -715,13 +710,23 @@ WHERE date(timestamp) = date('now') ORDER BY timestamp DESC;
 - **Двойной механизм миграций** — Alembic для структуры + `ALTER TABLE` в `init_db()` для добавления колонок. При больших изменениях схемы лучше использовать только Alembic.
 - **Partial close в бэктесте** — срабатывает только если цена достигает ценового порога `partial_close_pct` (доля пути до TP, сейчас 35%, не "halfway"). Сделки, где цена сразу пошла к SL, не получают защиты от частичной фиксации. Доля объёма, закрываемая при срабатывании (`partial_close_qty_pct`) — независимый параметр, см. "Partial close qty — статус эксперимента" выше.
 - **MarketContext в бэктесте** — если в БД есть таблица `market_context_snapshots` (записи от live-бота), бэктест загружает их и применяет: risk_off блокирует входы, cautious повышает `volume_surge_mult`. Если таблицы нет — логируется предупреждение, бэктест продолжает без режимной фильтрации.
-- **Комиссии и slippage — зависит от того, каким движком свипаешь.** Старое поколение
-  (`backtest_sweep.py`, `sweep_focused.py`, `analyze_performance.py`) — независимые копии цикла
-  симуляции (историческая дупликация кода) БЕЗ комиссий/слиппеджа, gross-of-fee. Новое поколение
-  (`sweep_retracement.py` и всё, что на нём построено — `sweep_partial_close.py`,
-  `sweep_partial_close_qty.py`, `sweep_rr.py`, `analyze_tp_upside.py`) переиспользует `_fee`/
-  `backtest_slippage_pct` напрямую из `src/backtest/runner.py` — комиссии и слиппедж учтены.
-  Перед запуском любого свипа проверяй, к какому поколению принадлежит скрипт.
+- **Комиссии и slippage в свипах** — `sweep_retracement.py` и всё, что на нём построено
+  (`sweep_partial_close.py`, `sweep_partial_close_qty.py`, `sweep_rr.py`, `analyze_tp_upside.py`)
+  переиспользует `_fee`/`backtest_slippage_pct` напрямую из `src/backtest/runner.py` — комиссии
+  и слиппедж учтены. Старое поколение скриптов без комиссий/слиппеджа (`backtest_sweep.py`,
+  `sweep_focused.py`, `analyze_performance.py`, `test_blowoff_filter.py`,
+  `test_improved_filters.py`) удалено 20.08.2026 — устарело, дублировало код цикла симуляции без
+  сопровождения.
+- **Фикс parity бэктеста (20.08.2026): `oi_declining` отсутствовал во всех бэктест-движках.**
+  `SetupDetector._check_oi_trend` блокирует сигнал по ДВУМ независимым условиям — хардкод
+  `oi_declining` (`oi[-1] < oi[-2]` → блок безусловно) И `oi_slope_min_pct`. Все бэктест-скрипты
+  (включая `src/backtest/runner.py`) проверяли только `oi_slope_min_pct`, пропуская
+  `oi_declining` — по замерам это правило блокирует сопоставимое число кандидатов с самим порогом
+  наклона, то есть прошлые свипы (RR, partial-close-qty, retracement) систематически завышали
+  число сигналов/сделок относительно боевой логики. Фикс добавлен в `src/backtest/runner.py` и
+  `scripts/sweep_retracement.py` (наследуется `sweep_rr.py`/`sweep_partial_close.py`/
+  `sweep_partial_close_qty.py` через `import simulate`). Прошлые решения по RR/partial-close-qty/
+  retracement приняты ДО этого фикса — при пересмотре учитывать, что их база могла быть искажена.
 
 ## Конфигурация и секреты
 
@@ -749,10 +754,8 @@ make backtest-load        # Загрузка 7 дней истории
 make backtest-run ARGS="--days 30"  # Прогон на истории
 make backtest-run-live                # Бэктест на живой БД + сравнение с реальными сделками
 
-# Поиск оптимальных параметров (подбор конфигурации)
-.venv/bin/python scripts/backtest_sweep.py   # Прогон 37 конфигураций на trading_bot_*.db
-                                             # Результаты: data/backtest_sweep_results.json
-                                             # Лог: data/backtest_sweep_output.txt
+# Поиск оптимальных параметров (подбор конфигурации) — см. scripts/sweep_retracement.py и
+# производные (sweep_rr.py, sweep_partial_close.py, sweep_partial_close_qty.py)
 
 # Миграции
 make migrate-create name=add_column
@@ -763,33 +766,7 @@ make test
 
 # Анализ пропущенных сигналов
 .venv/bin/python scripts/analyze_missed_signals.py    # Поиск монет с сильными движениями без сигналов
-.venv/bin/python scripts/analyze_performance.py        # Комплексный бэктест-анализ (параметр-свип + комбинации)
-.venv/bin/python scripts/test_blowoff_filter.py        # Тест фильтра "blow-off top" против памп-энд-дампов
-.venv/bin/python scripts/test_improved_filters.py      # Тест расширенных фильтров (market breadth, extended price)
 ```
-
-## Подбор параметров (`scripts/backtest_sweep.py`)
-
-Скрипт для автоматического перебора ключевых параметров стратегии на исторических данных. Прогоняет заданный набор значений для каждого параметра, сохраняет результаты и определяет наилучшую конфигурацию.
-
-**Что перебирается:**
-- `risk_reward_ratio` — соотношение TP/SL (2.0, 2.5, 3.0, 3.5, 4.0, 5.0)
-- `volume_surge_mult` — порог объёма (10, 12, 15, 18, 20, 25)
-- `cooldown_hours` — кулдаун после закрытия (0, 0.5, 1, 2, 4, 8)
-- `stop_loss_pct` — ширина стопа (3%, 4%, 5%, 6%, 7.5%, 10%)
-- `sustain_bars` — длительность сустейна (3, 4, 5, 6)
-- `exhaustion_gain_pct` — exhaustion-фильтр (0=выкл, 5%, 8%, 10%)
-- `dump_volume_mult` — фильтр свечей-выбросов (0=выкл, 2, 3, 5, 8)
-- `partial_close_pct` — % пути до TP для частичной фиксации (40%, 50%, 60%)
-
-**Использование:**
-```bash
-# Положить БД в data/ и указать путь в скрипте (DB_PATH)
-.venv/bin/python scripts/backtest_sweep.py
-```
-Занимает ~3 часа на БД размером ~1GB. Каждый параметр тестируется независимо, результаты — PnL, win rate, TP/SL/Time, partials.
-
-**Важно:** скрипт НЕ тестирует комбинации параметров — каждый параметр перебирается при фиксированных остальных (базовый конфиг). Для проверки совместного эффекта лучших параметров нужно запустить отдельный прогон с комбинированными настройками.
 
 ## Архитектурные решения (не пересматривать без новых данных)
 
