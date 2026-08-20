@@ -11,6 +11,16 @@ from src.storage.models import FilteredSignal
 
 logger = logging.getLogger(__name__)
 
+# Стадии check_volume_pattern, при которых последняя свеча УЖЕ прошла порог
+# всплеска, но её форма говорит о развороте/иссякании (не "ещё не доросла").
+# Ретраить сдвигом здесь нельзя — это выбросило бы из окна ровно ту свечу,
+# которую эти же проверки (и retracement/exhaustion-фильтры ниже, считающиеся
+# на том же окне) должны ловить. См. анализ в памяти
+# shift-compensation-narrowing (детектор-vs-бэктест).
+VOLUME_REVERSAL_STAGES = frozenset({
+    "volume_spike", "volume_dump", "volume_fading", "volume_declining",
+})
+
 
 class SetupDetector(BaseDetector):
     """Детектор сетапов: плавный рост объёмов + OI → начало пампа."""
@@ -62,21 +72,31 @@ class SetupDetector(BaseDetector):
                 if len(candles) < min_bars:
                     continue
 
-                # Проверяем volume pattern с lookback:
-                # если текущее окно не проходит — пробуем сдвинутые
-                # (компенсация timing'а: цикл мог попасть между свечей)
+                # Проверяем volume pattern с lookback: если текущее окно не проходит —
+                # пробуем на свечу раньше. Коллектор обновляет последнюю свечу по мере
+                # её формирования (interval_seconds << timeframe, см.
+                # MarketDataCollector._upsert_candles), поэтому в моменте скана самая
+                # свежая свеча в окне часто ещё не закрыта и её объём занижен — это и
+                # компенсирует сдвиг. НО: ретраим только если исходный отказ был
+                # "тихим" (свеча ещё не доросла до порога всплеска, vol_ctx пуст) —
+                # если отказ пришёл с explicit-причиной из VOLUME_REVERSAL_STAGES
+                # (спайк/дамп/угасание/падение объёма), это значит свеча УЖЕ прошла
+                # порог и её форма говорит о развороте — сдвиг тогда выбросил бы из
+                # окна ровно ту свечу, которую эти же проверки (и retracement/
+                # exhaustion-фильтры ниже, считающиеся на том же окне) должны ловить.
                 vol_window = None
                 vol_ctx: dict = {}
                 if self.check_volume_pattern(candles, vol_ctx):
                     vol_window = candles
-                else:
-                    for shift in range(1, 2):  # -1 свеча (компенсация timing'а)
+                elif vol_ctx.get("stage") not in VOLUME_REVERSAL_STAGES:
+                    for shift in range(1, 2):  # -1 свеча
                         shifted = candles[:-shift]
                         shift_ctx: dict = {}
                         if len(shifted) >= min_bars and self.check_volume_pattern(shifted, shift_ctx):
                             vol_window = shifted
                             logger.info(
-                                f"Сетап {symbol}: volume найден со сдвигом -{shift} свечей"
+                                f"Сетап {symbol}: volume найден со сдвигом -{shift} свечей "
+                                f"(исходный отказ: тихий — порог всплеска ещё не достигнут)"
                             )
                             break
                         if shift_ctx:

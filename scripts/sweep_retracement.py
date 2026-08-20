@@ -34,7 +34,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import numpy as np
 
-from src.analytics.detector import SetupDetector
+from src.analytics.detector import VOLUME_REVERSAL_STAGES, SetupDetector
 from src.analytics.utils import OI_TREND_BARS, calculate_oi_slope_pct, timeframe_to_minutes
 from src.backtest.runner import SimPosition, PendingEntry, _fee, _bar
 from src.config import Settings
@@ -196,6 +196,7 @@ def simulate(settings, data, has_oi: bool = True, collect_retracement: bool = Tr
     retr_map: dict[int, float] = {}
     price_stage_counts: dict[str, int] = {}
     vol_stage_counts: dict[str, int] = {}
+    shift_used_count = 0  # сколько сигналов найдено только благодаря сдвигу на -1 свечу
 
     cb_losses = 0
     cb_stop_until = None
@@ -376,18 +377,33 @@ def simulate(settings, data, has_oi: bool = True, collect_retracement: bool = Tr
             if len(candle_slice) < need_bars:
                 continue
 
+            # Volume pattern с тем же shift-ретраем, что и в SetupDetector.analyze()
+            # (см. src/analytics/detector.py) — воспроизведено 1:1, чтобы можно было
+            # свипом измерить реальный вклад сдвига в сигналы/PnL, а не гадать вслепую.
+            vol_window = None
             vol_ctx: dict = {}
-            if not detector.check_volume_pattern(candle_slice, vol_ctx):
+            if detector.check_volume_pattern(candle_slice, vol_ctx):
+                vol_window = candle_slice
+            elif vol_ctx.get("stage") not in VOLUME_REVERSAL_STAGES:
+                shifted = candle_slice[:-1]
+                shift_ctx: dict = {}
+                if len(shifted) >= need_bars and detector.check_volume_pattern(shifted, shift_ctx):
+                    vol_window = shifted
+                    shift_used_count += 1
+                elif shift_ctx:
+                    vol_ctx = shift_ctx
+
+            if vol_window is None:
                 if vol_ctx.get("stage"):
                     vol_stage_counts[vol_ctx["stage"]] = vol_stage_counts.get(vol_ctx["stage"], 0) + 1
                 continue
 
             retracement_pct = None
             if collect_retracement:
-                retracement_pct = compute_retracement_pct(candle_slice, sustain)
+                retracement_pct = compute_retracement_pct(vol_window, sustain)
 
             price_ctx: dict = {}
-            direction = detector.check_price_trend(candle_slice, price_ctx)
+            direction = detector.check_price_trend(vol_window, price_ctx)
             if direction != "long":
                 if price_ctx.get("stage"):
                     price_stage_counts[price_ctx["stage"]] = price_stage_counts.get(price_ctx["stage"], 0) + 1
@@ -411,7 +427,7 @@ def simulate(settings, data, has_oi: bool = True, collect_retracement: bool = Tr
                     continue
 
             signals_count += 1
-            signal_price = candle_slice[-1]["close"]
+            signal_price = vol_window[-1]["close"]
 
             # regime здесь уже не risk_off и не cautious+ST=red (см. блокировку выше),
             # поэтому "cautious" тут всегда соответствует реальному position_size_mult=0.5
@@ -523,6 +539,7 @@ def simulate(settings, data, has_oi: bool = True, collect_retracement: bool = Tr
         "pending_expired": pending_expired,
         "price_stage_counts": price_stage_counts,
         "vol_stage_counts": vol_stage_counts,
+        "shift_used_count": shift_used_count,
         "trades_list": trades_out,
         "period": f"{all_timestamps[0]} -> {all_timestamps[-1]}" if all_timestamps else "",
     }
@@ -561,6 +578,7 @@ def main():
             f"th={th}: signals={result['signals']} trades={result['trades']} "
             f"win_rate={result['win_rate']}% total_pnl={result['total_pnl']} "
             f"retracement_blocked={result['price_stage_counts'].get('retracement', 0)} "
+            f"shift_used={result['shift_used_count']} "
             f"({elapsed:.1f}s)"
         )
         out_path = out_dir / f"retracement_{th}.json"
