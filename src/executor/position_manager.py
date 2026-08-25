@@ -482,6 +482,13 @@ class PositionManager:
         risk_budget: float,
     ) -> tuple[Trade | None, str, str | None]:
         """Немедленный вход market-ордером (pending_entry_pullback_pct == 0)."""
+        # Цена, по которой сетап был замечен, до отправки ордера. Ниже entry_price
+        # перезаписывается фактической ценой заполнения с биржи, поэтому без этого
+        # якоря реальное проскальзывание нигде не остаётся и его нечем измерить
+        # (до 25.08.2026 trades.signal_price заполнялся только в pending-ветке, и у
+        # всех алго-сделок был NULL — а бэктест при этом закладывал допущение
+        # backtest_slippage_pct вслепую).
+        reference_price = entry_price
         sl_distance = entry_price * (self.config.stop_loss_pct / 100)
         tp_distance = sl_distance * self.config.risk_reward_ratio
         quantity = risk_budget / sl_distance
@@ -626,6 +633,7 @@ class PositionManager:
             fee=entry_fee,
             source=self.source,
             current_sl_price=sl_price if tp_sl_ok else None,
+            signal_price=reference_price,
         )
         session.add(trade)
 

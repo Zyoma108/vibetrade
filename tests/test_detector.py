@@ -276,9 +276,10 @@ class TestPriceTrend:
         assert d.check_price_trend(candles) is None
 
     def test_max_growth_cap_disabled(self):
-        """price_growth_max_pct=0 disables the cap (exhaustion also off)."""
+        """price_growth_max_pct=0 disables the cap (both exhaustion filters off)."""
         d = _detector(sustain_bars=4, price_growth_min_pct=0.1,
-                      price_growth_max_pct=0.0, exhaustion_gain_pct=0.0)
+                      price_growth_max_pct=0.0, exhaustion_gain_pct=0.0,
+                      exhaustion_extreme_pct=0.0)
         candles = _candles(74, price=1.0)
         candles[-4]["open"] = 1.00
         candles[-1]["close"] = 2.00  # 100% growth
@@ -432,6 +433,60 @@ class TestRetracementFilter:
 # ---------------------------------------------------------------------------
 
 
+class TestWindowRangeFilter:
+    """max_window_range_pct: размах (high/low - 1) sustain-окна.
+
+    Отдельно от retracement: тот ловит «пик был раньше, сейчас снижаемся»,
+    а этот — «монета в принципе ходит слишком широко для фиксированного стопа».
+    Окно может расти ровно, без отката, и всё равно быть непригодным: если за
+    12 минут коридор 6%, то stop_loss_pct=5 стоит внутри обычного шума
+    (аудит августа 2026)."""
+
+    def _wide_but_rising(self) -> list[dict]:
+        """Ровный рост без отката, но с широким коридором: low 0.97, high 1.04
+        -> размах ≈ 7.2%. Ни retracement, ни exhaustion такое не блокируют."""
+        candles = _candles(74, price=1.0)
+        candles[-4]["open"], candles[-4]["close"] = 1.000, 1.010
+        candles[-4]["high"], candles[-4]["low"] = 1.015, 0.970
+        candles[-3]["open"], candles[-3]["close"] = 1.010, 1.018
+        candles[-3]["high"], candles[-3]["low"] = 1.025, 1.005
+        candles[-2]["open"], candles[-2]["close"] = 1.018, 1.026
+        candles[-2]["high"], candles[-2]["low"] = 1.032, 1.014
+        candles[-1]["open"], candles[-1]["close"] = 1.026, 1.038
+        candles[-1]["high"], candles[-1]["low"] = 1.040, 1.022
+        return candles
+
+    def test_disabled_by_default_passes(self):
+        d = _detector(sustain_bars=4, price_growth_min_pct=0.1,
+                      exhaustion_gain_pct=0.0, exhaustion_extreme_pct=0.0)
+        assert d.config.max_window_range_pct == 0.0
+        assert d.check_price_trend(self._wide_but_rising()) == "long"
+
+    def test_wide_window_blocked(self):
+        d = _detector(sustain_bars=4, price_growth_min_pct=0.1,
+                      exhaustion_gain_pct=0.0, exhaustion_extreme_pct=0.0,
+                      max_window_range_pct=4.0)
+        ctx: dict = {}
+        assert d.check_price_trend(self._wide_but_rising(), ctx) is None
+        assert ctx["stage"] == "window_range"
+
+    def test_narrow_window_passes(self):
+        candles = _candles(74, price=1.0)
+        candles[-4]["open"], candles[-4]["close"] = 1.000, 1.008
+        candles[-4]["high"], candles[-4]["low"] = 1.010, 0.999
+        candles[-3]["open"], candles[-3]["close"] = 1.008, 1.014
+        candles[-3]["high"], candles[-3]["low"] = 1.016, 1.006
+        candles[-2]["open"], candles[-2]["close"] = 1.014, 1.019
+        candles[-2]["high"], candles[-2]["low"] = 1.021, 1.012
+        candles[-1]["open"], candles[-1]["close"] = 1.019, 1.024
+        candles[-1]["high"], candles[-1]["low"] = 1.026, 1.017
+        # размах = 1.026 / 0.999 - 1 ≈ 2.7% < 4.0
+        d = _detector(sustain_bars=4, price_growth_min_pct=0.1,
+                      exhaustion_gain_pct=0.0, exhaustion_extreme_pct=0.0,
+                      max_window_range_pct=4.0)
+        assert d.check_price_trend(candles) == "long"
+
+
 class TestExhaustionV2:
     """Exhaustion v2: блокирует экстремальный памп от baseline (независимо от close_pos)."""
 
@@ -496,12 +551,18 @@ class TestExhaustionV2:
         # extreme_pump = (1.15 / 1.0 - 1) * 100 = 15% (< 30% v2)
         assert d.check_price_trend(candles) == "long"
 
-    def test_extreme_pump_disabled_when_exhaustion_gain_zero(self):
-        """exhaustion_gain_pct=0 → v2 also disabled (guarded by ex_gain > 0)."""
+    def test_extreme_pump_disabled_by_its_own_knob(self):
+        """exhaustion_extreme_pct=0 → v2 off.
+
+        v2 has its own threshold since the августовский аудит 2026: раньше он был
+        захардкожен как exhaustion_gain_pct * 6 и выключался только вместе с v1,
+        хотя фильтры измеряют разное (v1 — форму последней свечи, v2 — насколько
+        цена уже улетела от baseline) и оптимальные пороги у них не связаны."""
         d = _detector(
             baseline_bars=70, sustain_bars=4,
             price_growth_min_pct=0.1,
-            exhaustion_gain_pct=0.0,  # disabled
+            exhaustion_gain_pct=0.0,
+            exhaustion_extreme_pct=0.0,  # disabled
             exhaustion_pos_ratio=0.7,
         )
         candles = _candles(74, price=1.0)
@@ -779,6 +840,14 @@ class TestConfigDefaults:
         assert cfg.volume_surge_mult == 2.0
         assert cfg.oi_slope_min_pct == 2.0
         assert cfg.price_growth_min_pct == 1.0
+
+    def test_oi_gate_and_new_audit_knobs(self):
+        """Дефолты сохраняют прежнее поведение; выключается всё явным конфигом."""
+        cfg = StrategyConfig()
+        assert cfg.oi_filter_enabled is True
+        assert cfg.max_window_range_pct == 0.0
+        # v2-exhaustion: дефолт равен прежнему захардкоженному ex_gain*6 = 30%
+        assert cfg.exhaustion_extreme_pct == 30.0
 
     def test_cautious_increase_bounds(self):
         """cautious_volume_surge_mult_increase_pct is within valid range."""

@@ -106,10 +106,11 @@ class SetupDetector(BaseDetector):
                     self._log_filtered(session, exchange, symbol, vol_ctx)
                     continue
 
-                oi_ctx: dict = {}
-                if not await self._check_oi_trend(session, exchange, symbol, oi_ctx):
-                    self._log_filtered(session, exchange, symbol, oi_ctx)
-                    continue
+                if self.config.oi_filter_enabled:
+                    oi_ctx: dict = {}
+                    if not await self._check_oi_trend(session, exchange, symbol, oi_ctx):
+                        self._log_filtered(session, exchange, symbol, oi_ctx)
+                        continue
 
                 price_ctx: dict = {}
                 direction = self.check_price_trend(vol_window, price_ctx)
@@ -356,6 +357,30 @@ class SetupDetector(BaseDetector):
                 )
             return None
 
+        # Window-range filter: насколько широко ходила цена внутри sustain-окна.
+        # stop_loss_pct — фиксированный процент, поэтому у монеты с размахом 5-7%
+        # за 12 минут стоп стоит внутри обычного шума и выбивается почти
+        # гарантированно, независимо от того, куда пойдёт движение дальше.
+        # См. max_window_range_pct в StrategyConfig (аудит августа 2026).
+        max_range = self.config.max_window_range_pct
+        if max_range > 0:
+            win_high = np.max([c["high"] for c in candles[-sustain:]])
+            win_low = np.min([c["low"] for c in candles[-sustain:]])
+            if win_low > 0:
+                range_pct = (win_high / win_low - 1) * 100
+                if range_pct > max_range:
+                    logger.info(
+                        f"Сигнал пропущен: размах sustain-окна {range_pct:.1f}% "
+                        f"(>{max_range}%) — фиксированный стоп внутри шума"
+                    )
+                    if context is not None:
+                        context["stage"] = "window_range"
+                        context["reason"] = (
+                            f"размах sustain-окна {range_pct:.1f}% (>{max_range}%) — "
+                            f"фиксированный стоп внутри шума"
+                        )
+                    return None
+
         # Exhaustion filter v1: цена выросла за sustain-окно И свеча закрылась у верха
         # (покупатели выдохлись). Пропускаем только если свеча в середине/снизу —
         # это pullback в восходящем движении.
@@ -380,12 +405,14 @@ class SetupDetector(BaseDetector):
                     return None
 
         # Exhaustion filter v2: экстремальный памп от baseline (pump-and-dump).
-        # Если цена улетала > ex_gain * 5 (по умолчанию 25%) выше медианы baseline —
-        # блокируем независимо от close_pos. Ловит случаи, когда памп и дамп
-        # произошли до/внутри sustain-окна и последняя свеча уже развернулась.
-        extreme_mult = 6.0  # ex_gain * 6 = 30% — экстремальный памп от baseline
-        extreme_threshold = ex_gain * extreme_mult
-        if ex_gain > 0 and extreme_threshold > 0:
+        # Если цена улетала выше медианы baseline больше чем на
+        # exhaustion_extreme_pct — блокируем независимо от close_pos. Ловит случаи,
+        # когда памп и дамп произошли до/внутри sustain-окна и последняя свеча уже
+        # развернулась. Порог отдельный от exhaustion_gain_pct (v1): фильтры меряют
+        # разное — v1 форму последней свечи, v2 удалённость от baseline — и их
+        # оптимумы не связаны (раньше v2 был захардкожен как ex_gain * 6 = 30%).
+        extreme_threshold = self.config.exhaustion_extreme_pct
+        if extreme_threshold > 0:
             baseline_closes = np.array(
                 [c["close"] for c in candles[: self.config.baseline_bars]]
             )

@@ -23,12 +23,26 @@ from src.storage.models import Candle, OpenInterest, Ticker
 logger = logging.getLogger(__name__)
 
 
+# Сколько последних баров перечитывать из БД на каждом цикле.
+# НЕ 0 и не 1: самая свежая свеча в момент кеширования почти всегда ещё
+# формируется (interval_seconds << timeframe), и коллектор дописывает её
+# объём/high/low/close до самого закрытия бара (см.
+# MarketDataCollector._upsert_candles). Если перечитывать только «строго
+# новее последней закешированной», её частичный объём замерзает в кеше
+# навсегда, и все объёмные фильтры детектора считаются по числам, которых
+# на бирже никогда не существовало. Хвоста в 3 бара хватает, чтобы поймать
+# и дозревание последней свечи, и бар, впервые увиденный с volume=0
+# (такой отбрасывается фильтром `volume > 0` и иначе пропал бы из окна).
+REFRESH_TAIL_BARS = 3
+
+
 class CandleCache:
     """Persistent candle cache across collection cycles.
 
     On first request for a symbol: loads full history (up to ``limit`` bars).
-    On subsequent requests: loads only candles newer than the latest cached
-    timestamp, appends them, and trims to ``limit``.
+    On subsequent requests: re-reads only the last ``REFRESH_TAIL_BARS`` bars
+    plus anything newer, splices them over the cached tail, and trims to
+    ``limit``.
     """
 
     def __init__(self) -> None:
@@ -48,16 +62,18 @@ class CandleCache:
         cached = self._candles.get(cache_key)
 
         if cached is not None and len(cached) >= limit:
-            # We have enough — only fetch new candles since the last one
-            new_candles = await self._fetch_newer_than(
-                session, exchange, symbol, self._max_ts[cache_key],
-            )
-            if new_candles:
-                cached.extend(new_candles)
-                self._max_ts[cache_key] = cached[-1]["timestamp"]  # type: ignore[typeddict-item]
-                # Trim to limit
-                if len(cached) > limit:
-                    self._candles[cache_key] = cached[-limit:]
+            # Хвост перечитываем целиком (см. REFRESH_TAIL_BARS), а не только
+            # «строго новее последней» — последняя свеча в кеше почти всегда
+            # была ещё не закрыта, когда попала туда.
+            since = cached[-min(REFRESH_TAIL_BARS, len(cached))]["timestamp"]
+            fresh = await self._fetch_from(session, exchange, symbol, since)
+            if fresh:
+                head = [c for c in cached if c["timestamp"] < since]
+                merged = head + fresh
+                if len(merged) > limit:
+                    merged = merged[-limit:]
+                self._candles[cache_key] = merged
+                self._max_ts[cache_key] = merged[-1]["timestamp"]  # type: ignore[typeddict-item]
             return self._candles[cache_key][-limit:]
 
         # First load — full history, or cache had fewer bars than requested
@@ -94,16 +110,20 @@ class CandleCache:
         ]
 
     @staticmethod
-    async def _fetch_newer_than(
+    async def _fetch_from(
         session: AsyncSession, exchange: str, symbol: str, since: datetime,
     ) -> list[dict[str, Any]]:
-        """Load candles with timestamp strictly greater than ``since``."""
+        """Load candles with timestamp >= ``since`` (inclusive).
+
+        Inclusive on purpose: the bars at and after ``since`` may still have
+        been forming when they were cached, so their stored OHLCV must be
+        replaced with what the collector has written since."""
         stmt = (
             select(Candle)
             .where(
                 Candle.exchange == exchange,
                 Candle.symbol == symbol,
-                Candle.timestamp > since,
+                Candle.timestamp >= since,
             )
             .order_by(Candle.timestamp)  # chronological — oldest first
         )

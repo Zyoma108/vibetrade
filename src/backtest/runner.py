@@ -110,15 +110,36 @@ async def run_backtest(
     async with session_factory() as session:
         stmt = (
             select(Candle.symbol, Candle.timestamp, Candle.open, Candle.high,
-                   Candle.low, Candle.close, Candle.volume)
-            .order_by(Candle.symbol, Candle.timestamp)
+                   Candle.low, Candle.close, Candle.volume, Candle.exchange)
+            # volume > 0: незакрытые/пустые бары боевой DataProvider.load_candles
+            # отбрасывает, и окно детектора у него схлопывается на этот бар. Бэктест
+            # раньше их оставлял — окна расходились уже на входных данных.
+            .where(Candle.volume > 0)
+            .order_by(Candle.symbol, Candle.exchange, Candle.timestamp)
         )
         result = await session.execute(stmt)
         rows = result.all()
 
-    symbols: dict[str, list] = {}
+    # Ключ — (биржа, символ), как в DataProvider.get_active_symbols. Раньше группировка
+    # шла по одному символу, и у монет, торгующихся и на binance, и на bybit, два ряда
+    # свечей склеивались в один с дублирующимися timestamp'ами. Коллектор пишет свечи
+    # только с ОДНОЙ биржи на монету (см. MarketDataCollector._collect_cycle: binance,
+    # если монета там есть, иначе bybit), поэтому оставляем ряд с большей историей.
+    by_pair: dict[tuple[str, str], list] = {}
     for r in rows:
-        symbols.setdefault(r[0], []).append(r)
+        by_pair.setdefault((r[7], r[0]), []).append(r)
+    symbols: dict[str, list] = {}
+    for (ex, sym), bars in by_pair.items():
+        if len(bars) > len(symbols.get(sym, ())):
+            symbols[sym] = bars
+
+    # timestamp -> индекс бара, по одному словарю на монету. Без этого каждая
+    # проверка позиции и каждый поиск сетапа линейно сканировали весь ряд свечей
+    # монеты: на 15-дневной БД (638 монет x ~5000 баров x 7110 срезов) прогон не
+    # завершался вообще. Теперь это O(1).
+    ts_index: dict[str, dict] = {
+        sym: {r[1]: i for i, r in enumerate(bars)} for sym, bars in symbols.items()
+    }
 
     all_timestamps = sorted(set(r[1] for r in rows))
     if not all_timestamps:
@@ -165,6 +186,8 @@ async def run_backtest(
 
     # Кеш OI-данных (exchange, symbol) -> [(timestamp, value), ...]
     oi_cache: dict[tuple[str, str], list[tuple[datetime, float]]] = {}
+    if has_oi and not settings.strategy.oi_filter_enabled:
+        logger.info("OI-гейт выключен в конфиге (strategy.oi_filter_enabled=false)")
     if has_oi:
         async with session_factory() as session:
             oi_stmt = select(OpenInterest.exchange, OpenInterest.symbol,
@@ -217,13 +240,10 @@ async def run_backtest(
             if not sym_data:
                 continue
 
-            current_bar = None
-            for r in sym_data:
-                if r[1] == ts:
-                    current_bar = r
-                    break
-            if not current_bar:
+            bar_i = ts_index[pos.symbol].get(ts)
+            if bar_i is None:
                 continue
+            current_bar = sym_data[bar_i]
 
             high = current_bar[3]
             low = current_bar[4]
@@ -303,14 +323,10 @@ async def run_backtest(
             sym_data = symbols.get(pe.symbol)
             if not sym_data:
                 continue
-            current_bar = None
-            for r in sym_data:
-                if r[1] == ts:
-                    current_bar = r
-                    break
-            if not current_bar:
+            bar_i = ts_index[pe.symbol].get(ts)
+            if bar_i is None:
                 continue
-            low = current_bar[4]
+            low = sym_data[bar_i][4]
             if low <= pe.limit_price:
                 pos = SimPosition(
                     symbol=pe.symbol, entry_price=pe.limit_price, entry_time=ts,
@@ -366,11 +382,7 @@ async def run_backtest(
             if len(positions) + len(pending) >= cfg.max_positions:
                 break
 
-            bar_idx = -1
-            for i, r in enumerate(sym_data):
-                if r[1] == ts:
-                    bar_idx = i
-                    break
+            bar_idx = ts_index[sym].get(ts, -1)
             if bar_idx < 0:
                 continue
 
@@ -391,8 +403,12 @@ async def run_backtest(
             ):
                 continue
 
+            # Ровно столько же баров, сколько грузит боевой детектор
+            # (SetupDetector.analyze: limit = baseline_bars + sustain_bars + 10).
+            # Было на один бар больше — baseline (первые baseline_bars элементов
+            # среза) съезжал на бар назад относительно живого.
             candle_slice = []
-            for j in range(bar_idx - need_bars - 10, bar_idx + 1):
+            for j in range(bar_idx - need_bars - 10 + 1, bar_idx + 1):
                 bar = _bar(sym_data, j)
                 if bar:
                     candle_slice.append({
@@ -410,8 +426,8 @@ async def run_backtest(
             if direction != "long":
                 continue
 
-            # OI check (если есть данные)
-            if has_oi:
+            # OI check (если есть данные и гейт не выключен в конфиге)
+            if has_oi and detector.config.oi_filter_enabled:
                 oi_pass = False
                 for ex in ("bybit", "binance"):
                     key = (ex, sym)

@@ -8,6 +8,7 @@ simulating 5, 10, and 15 minute collector cycles.
 from datetime import datetime, timedelta
 
 import pytest_asyncio
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from src.analytics.data_provider import CandleCache, DataProvider
@@ -573,3 +574,98 @@ class TestDataProviderWithPersistentCache:
                 )
 
             await eng.dispose()
+
+
+# ---------------------------------------------------------------------------
+# Stale-tail regression (см. аудит августа 2026)
+# ---------------------------------------------------------------------------
+
+
+class TestCandleCacheStaleTail:
+    """Последняя закешированная свеча в момент кеширования ещё формируется.
+
+    Коллектор дописывает её объём/high/low/close каждые interval_seconds
+    (см. MarketDataCollector._upsert_candles — там это чинится явно). Кеш
+    обязан подхватывать эти обновления: иначе в окне детектора навсегда
+    остаётся частичный объём «младенческой» свечи, и все объёмные фильтры
+    (volume_surge_mult, volume_fading, volume_declining) считаются по данным,
+    которых на бирже никогда не было.
+    """
+
+    async def test_last_cached_candle_picks_up_updates(self, session_factory):
+        limit = 84
+
+        async with session_factory() as sess:
+            await _seed_candles(sess, "binance", "TEST/USDT", count=limit)
+
+        cache = CandleCache()
+        async with session_factory() as sess:
+            first = await cache.load_or_refresh(sess, "binance", "TEST/USDT", limit=limit)
+        assert _candle_volumes(first)[-1] == 100_000.0 + (limit - 1) * 1000
+
+        # Свеча дозрела: коллектор обновил её объём на бирже-финальный
+        last_ts = BASE_TIME + timedelta(minutes=(limit - 1) * 3)
+        async with session_factory() as sess:
+            row = await sess.scalar(
+                select(Candle).where(
+                    Candle.exchange == "binance",
+                    Candle.symbol == "TEST/USDT",
+                    Candle.timestamp == last_ts,
+                )
+            )
+            row.volume = 999_999.0
+            row.high = 42.0
+            row.close = 41.0
+            await sess.commit()
+
+        async with session_factory() as sess:
+            second = await cache.load_or_refresh(sess, "binance", "TEST/USDT", limit=limit)
+
+        assert len(second) == limit
+        assert _candle_volumes(second)[-1] == 999_999.0, (
+            "кеш вернул замороженный частичный объём вместо обновлённого"
+        )
+        assert second[-1]["high"] == 42.0
+        assert second[-1]["close"] == 41.0
+
+    async def test_zero_volume_tail_is_not_skipped_forever(self, session_factory):
+        """Свеча, впервые увиденная с volume=0, отбрасывается фильтром `volume > 0`.
+
+        Она не должна пропасть из окна навсегда — на следующем цикле, когда объём
+        уже ненулевой, свеча обязана появиться (иначе окно детектора молча
+        теряет бар и все индексы съезжают)."""
+        limit = 10
+
+        async with session_factory() as sess:
+            await _seed_candles(sess, "binance", "TEST/USDT", count=limit)
+
+        cache = CandleCache()
+        async with session_factory() as sess:
+            await cache.load_or_refresh(sess, "binance", "TEST/USDT", limit=limit)
+
+        # Новая свеча появляется сначала с нулевым объёмом, следом — уже с реальным
+        new_ts_offset = (limit - 1) * 3 + 3
+        async with session_factory() as sess:
+            sess.add(_make_candle("binance", "TEST/USDT", minutes_offset=new_ts_offset, volume=0.0))
+            await sess.commit()
+
+        async with session_factory() as sess:
+            await cache.load_or_refresh(sess, "binance", "TEST/USDT", limit=limit)
+
+        async with session_factory() as sess:
+            row = await sess.scalar(
+                select(Candle).where(
+                    Candle.exchange == "binance",
+                    Candle.symbol == "TEST/USDT",
+                    Candle.timestamp == BASE_TIME + timedelta(minutes=new_ts_offset),
+                )
+            )
+            row.volume = 123_456.0
+            await sess.commit()
+
+        async with session_factory() as sess:
+            third = await cache.load_or_refresh(sess, "binance", "TEST/USDT", limit=limit)
+
+        assert _candle_volumes(third)[-1] == 123_456.0, (
+            "свеча, впервые увиденная с нулевым объёмом, потеряна навсегда"
+        )
