@@ -22,10 +22,9 @@ import sqlite3
 import time
 from datetime import datetime, timedelta
 
-import numpy as np
 
 from src.analytics.detector import VOLUME_REVERSAL_STAGES, SetupDetector
-from src.analytics.utils import OI_TREND_BARS, calculate_oi_slope_pct, timeframe_to_minutes
+from src.analytics.utils import OI_TREND_BARS, oi_trend_passes, timeframe_to_minutes
 
 
 class SimPosition:
@@ -286,7 +285,7 @@ def simulate(settings, data, has_oi: bool = True, collect_retracement: bool = Tr
             if not pos.partial_closed:
                 trigger = pos.entry_price + (pos.tp_price - pos.entry_price) * (cfg.partial_close_pct / 100)
                 if high >= trigger:
-                    close_qty = pos.quantity * (getattr(cfg, "partial_close_qty_pct", 50.0) / 100)
+                    close_qty = pos.quantity * (cfg.partial_close_qty_pct / 100)
                     partial_pnl = (trigger - pos.entry_price) * close_qty
                     pos.quantity -= close_qty
                     pos.partial_closed = True
@@ -460,7 +459,12 @@ def simulate(settings, data, has_oi: bool = True, collect_retracement: bool = Tr
                     price_stage_counts[price_ctx["stage"]] = price_stage_counts.get(price_ctx["stage"], 0) + 1
                 continue
 
-            if has_oi:
+            # `oi_filter_enabled` — ГЕЙТ ЦЕЛИКОМ (и oi_declining, и oi_slope_min_pct).
+            # Выключен в проде 25.08.2026 по итогам аудита детектора. Пропуск этой
+            # проверки при унификации движков молча вернул гейт в строй и срезал
+            # выборку с 49 сигналов до 8 на той же БД — см. тест
+            # test_oi_filter_disabled_lets_signals_through.
+            if has_oi and detector.config.oi_filter_enabled:
                 oi_pass = False
                 for ex in ("bybit", "binance"):
                     key = (ex, sym)
@@ -469,20 +473,16 @@ def simulate(settings, data, has_oi: bool = True, collect_retracement: bool = Tr
                     oi_points = [v for t, v in oi_cache[key] if t <= ts]
                     if len(oi_points) < OI_TREND_BARS:
                         continue
-                    oi_vals = np.array(oi_points[-OI_TREND_BARS:])
-                    # oi_declining (см. SetupDetector._check_oi_trend): последняя точка OI
-                    # ниже предпоследней → приток уже иссякает, блок независимо от порога
-                    # наклона. Раньше отсутствовало здесь — искусственно завышало число
-                    # сигналов относительно боевой логики. Флаг читается из того же
-                    # конфига, что и в детекторе, чтобы порог можно было свипать.
-                    if (
-                        detector.config.oi_declining_enabled
-                        and len(oi_vals) >= 2
-                        and oi_vals[-1] < oi_vals[-2]
-                    ):
-                        continue
-                    slope_pct = calculate_oi_slope_pct(oi_vals)
-                    if slope_pct is not None and slope_pct >= detector.config.oi_slope_min_pct:
+                    # Решение гейта — ОБЩЕЕ с боевым детектором (`oi_trend_passes`),
+                    # а не своя копия. Копия здесь уже дважды разъезжалась с проливом:
+                    # сначала из неё выпал `oi_declining`, потом — учёт
+                    # `oi_filter_enabled`. Оба раза это молча меняло результаты свипов.
+                    passed, _stage, _reason = oi_trend_passes(
+                        oi_points[-OI_TREND_BARS:],
+                        detector.config.oi_declining_enabled,
+                        detector.config.oi_slope_min_pct,
+                    )
+                    if passed:
                         oi_pass = True
                         break
                 if not oi_pass:

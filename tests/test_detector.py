@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 
 from src.analytics.detector import SetupDetector
-from src.analytics.utils import OI_TREND_BARS, calculate_oi_slope_pct
+from src.analytics.utils import OI_TREND_BARS, calculate_oi_slope_pct, oi_trend_passes
 from src.config import StrategyConfig
 
 
@@ -945,3 +945,44 @@ class TestDeHardcodedThresholds:
         mult = StrategyConfig().confidence_surge_mult
         assert min(round(20.0 * mult), 100) == 100
         assert min(round(60.0 * mult), 100) == 100
+
+
+# ---------------------------------------------------------------------------
+# Общее решение OI-гейта (детектор и бэктест зовут одну функцию)
+# ---------------------------------------------------------------------------
+
+
+class TestOiTrendPasses:
+    """`oi_trend_passes` — единственная реализация гейта на прод и бэктест.
+
+    До 26.08.2026 движок бэктеста повторял эту логику своим кодом, и она дважды
+    разъезжалась с боевой: сначала выпала проверка `oi_declining` (завысила
+    прошлые свипы), потом — учёт `oi_filter_enabled` (срезал выборку с 49
+    сигналов до 8 на архивной БД). Теперь копии нет.
+    """
+
+    def test_rising_oi_passes(self):
+        passed, stage, _ = oi_trend_passes([100.0, 110.0, 120.0], True, 1.0)
+        assert passed is True and stage is None
+
+    def test_last_point_lower_blocks(self):
+        """Падение на последней точке режет независимо от наклона."""
+        passed, stage, reason = oi_trend_passes([100.0, 130.0, 129.0], True, 0.0)
+        assert passed is False
+        assert stage == "oi_declining"
+        assert "OI снижается" in reason
+
+    def test_declining_check_can_be_disabled(self):
+        passed, stage, _ = oi_trend_passes([100.0, 130.0, 129.0], False, 0.0)
+        assert passed is True and stage is None
+
+    def test_slope_below_minimum_blocks(self):
+        passed, stage, reason = oi_trend_passes([100.0, 101.0, 102.0], True, 50.0)
+        assert passed is False
+        assert stage == "oi_slope_low"
+        assert "наклон OI" in reason
+
+    def test_no_data_blocks_without_stage(self):
+        """Нет данных — не сигнал, но и не «отказ фильтра» для filtered_signals."""
+        assert oi_trend_passes(None, True, 1.0) == (False, None, None)
+        assert oi_trend_passes([100.0], True, 1.0) == (False, None, None)

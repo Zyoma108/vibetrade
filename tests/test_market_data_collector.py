@@ -12,14 +12,14 @@ exchange. This made the volume-fading/declining filters in SetupDetector
 trip on stale data instead of the real, closed-bar volume.
 """
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest_asyncio
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from src.collectors.market_data import MarketDataCollector
-from src.storage.models import Base, Candle, Ticker
+from src.storage.models import Base, Candle, OpenInterest, Ticker
 
 # Naive datetimes: SQLite drops tzinfo on round-trip, so tz-aware timestamps
 # written in would come back naive and no longer match dict keys built here.
@@ -242,3 +242,92 @@ async def test_upsert_tickers_empty_batch_is_noop(session_factory):
         await collector._upsert_tickers(session, [])
         await session.commit()
         assert (await session.execute(select(Ticker))).scalars().all() == []
+
+
+# ---------------------------------------------------------------------------
+# История для бэктестов: свечи и OI пишутся по ВСЕМ сканируемым монетам
+# ---------------------------------------------------------------------------
+
+
+class _MultiCoinConnector:
+    """Заглушка биржи на несколько монет — ни одна из них не «торгуется»."""
+
+    def __init__(self, exchange_id: str, symbols: list[str], volume: float = 5_000_000.0):
+        self.exchange_id = exchange_id
+        self._symbols = symbols
+        self._volume = volume
+        self._poll = 0
+
+    async def fetch_tickers(self) -> list[dict]:
+        self._poll += 1
+        return [
+            {
+                "exchange": self.exchange_id, "symbol": s, "timestamp": BASE_TS,
+                "bid": 1.0, "ask": 1.1, "last": 1.0 + self._poll * 0.01,
+                "volume": self._volume, "change_pct": 1.0,
+                # OI меняется от цикла к циклу — иначе _write_oi дедуплицирует его
+                "open_interest": 1000.0 + self._poll,
+            }
+            for s in self._symbols
+        ]
+
+    async def fetch_ohlcv(self, symbol: str, timeframe: str = "3m", limit: int = 100):
+        # На каждом опросе — новый закрытый бар, чтобы копилась история
+        return [
+            {
+                "exchange": self.exchange_id, "symbol": symbol,
+                "timestamp": BASE_TS + timedelta(minutes=3 * i),
+                "open": 1.0, "high": 1.1, "low": 0.9, "close": 1.0,
+                "volume": 100.0 * (i + 1),
+            }
+            for i in range(self._poll)
+        ]
+
+    async def fetch_open_interest(self, symbol: str):
+        return {
+            "exchange": self.exchange_id, "symbol": symbol,
+            "timestamp": BASE_TS, "value": 1000.0 + self._poll,
+        }
+
+
+async def test_history_kept_for_all_scanned_coins(session_factory, monkeypatch):
+    """Свечи и OI копятся по КАЖДОЙ сканируемой монете, даже если ею не торгуют.
+
+    Это фундамент бэктестов: движок читает candles/open_interest, а не tickers.
+    Перевод tickers на снимок (одна строка на монету) историю рынка не трогает —
+    зафиксировано здесь, чтобы это нельзя было сломать незаметно.
+    """
+    import src.collectors.market_data as md
+
+    monkeypatch.setattr(md, "async_session", session_factory)
+    symbols = ["AAA/USDT:USDT", "BBB/USDT:USDT", "CCC/USDT:USDT"]
+    collector = MarketDataCollector(
+        connectors=[_MultiCoinConnector("bybit", symbols)],
+        exclude_coins=[], min_volume_usdt=0.0, interval_seconds=15, timeframe="3m",
+    )
+
+    for _ in range(3):  # три цикла сбора подряд
+        await collector._collect_cycle()
+
+    async with session_factory() as session:
+        candles = (await session.execute(select(Candle))).scalars().all()
+        ois = (await session.execute(select(OpenInterest))).scalars().all()
+        tickers = (await session.execute(select(Ticker))).scalars().all()
+
+    # Свечи: история по каждой монете, а не только последний бар
+    by_symbol: dict[str, set] = {}
+    for c in candles:
+        by_symbol.setdefault(c.symbol, set()).add(c.timestamp)
+    assert set(by_symbol) == set(symbols), "свечи должны быть по всем монетам"
+    for sym in symbols:
+        assert len(by_symbol[sym]) == 3, f"{sym}: ожидалось 3 бара истории"
+
+    # OI: тоже история (дедуп только по неизменившемуся значению)
+    oi_by_symbol: dict[str, int] = {}
+    for oi in ois:
+        oi_by_symbol[oi.symbol] = oi_by_symbol.get(oi.symbol, 0) + 1
+    assert set(oi_by_symbol) == set(symbols)
+    assert all(count == 3 for count in oi_by_symbol.values()), oi_by_symbol
+
+    # Тикеры: ровно один снимок на монету — это и есть экономия места
+    assert len(tickers) == len(symbols)

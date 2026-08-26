@@ -234,6 +234,34 @@ def test_oi_declining_blocks_signal(golden_db, tmp_path):
     assert off["signals"] == 1
 
 
+def test_oi_filter_disabled_lets_signals_through(tmp_path, golden_db):
+    """`oi_filter_enabled=false` обязан снимать ГЕЙТ ЦЕЛИКОМ.
+
+    Регрессия 26.08.2026, найдена пользователем. При унификации движков проверка
+    флага потерялась (`if has_oi:` вместо `if has_oi and cfg.oi_filter_enabled:`),
+    и гейт, выключенный в проде 25.08.2026, молча вернулся в строй: на архивной БД
+    за 10.08-25.08 выборка упала с 49 сигналов до 8. Флаг выключен в боевом
+    config.yaml, так что именно этот путь и работает в реальности.
+    """
+    n_baseline, n_sustain, n_after = 20, 4, 60
+    total = n_baseline + n_sustain + n_after
+    path = tmp_path / "bad_oi.db"
+    # OI и падает на последней точке, и имеет отрицательный наклон — гейт
+    # зарубил бы сигнал по обеим причинам сразу
+    oi = [
+        ("bybit", SYMBOL, _ts(i), 1_000_000.0 * (1 - 0.01 * i))
+        for i in range(total)
+    ]
+    _write_db(path, _build_candles(n_baseline, n_sustain, n_after), oi)
+
+    with_gate = simulate(_settings(oi_filter_enabled=True), load_data(str(path)), has_oi=True)
+    assert with_gate["signals"] == 0, "при включённом гейте плохой OI режет сигнал"
+
+    without_gate = simulate(_settings(oi_filter_enabled=False), load_data(str(path)), has_oi=True)
+    assert without_gate["signals"] == 1, "при выключенном гейте OI не должен влиять вообще"
+    assert without_gate["trades"] == 1
+
+
 def test_risk_off_blocks_entries(golden_db, tmp_path):
     """risk_off из market_context_snapshots запрещает открытие позиций."""
     n_baseline, n_sustain, n_after = 20, 4, 60

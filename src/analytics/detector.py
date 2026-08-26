@@ -5,7 +5,7 @@ import numpy as np
 
 from src.analytics.base import BaseDetector, Signal
 from src.analytics.data_provider import DataProvider
-from src.analytics.utils import OI_TREND_BARS, calculate_oi_slope_pct, timeframe_to_minutes
+from src.analytics.utils import OI_TREND_BARS, oi_trend_passes, timeframe_to_minutes
 from src.config import StrategyConfig
 from src.storage.models import FilteredSignal
 
@@ -267,35 +267,14 @@ class SetupDetector(BaseDetector):
         oi_values = await self._dp.load_oi_values(
             session, exchange, symbol, OI_TREND_BARS
         )
-        if oi_values is None:
-            return False
-
-        # Если последняя точка OI ниже предпоследней — приток уже иссякает
-        if (
-            self.config.oi_declining_enabled
-            and len(oi_values) >= 2
-            and oi_values[-1] < oi_values[-2]
-        ):
-            self._reject(
-                context,
-                "oi_declining",
-                "OI снижается — последняя точка ниже предпоследней",
-            )
-            return False
-
-        slope_pct = calculate_oi_slope_pct(np.array(oi_values))
-        if slope_pct is None:
-            return False
-
-        if slope_pct < self.config.oi_slope_min_pct:
-            self._reject(
-                context,
-                "oi_slope_low",
-                f"наклон OI {slope_pct:.1f}% < минимума {self.config.oi_slope_min_pct}%",
-            )
-            return False
-
-        return True
+        passed, stage, reason = oi_trend_passes(
+            oi_values,
+            self.config.oi_declining_enabled,
+            self.config.oi_slope_min_pct,
+        )
+        if not passed and stage:
+            self._reject(context, stage, reason)
+        return passed
 
     # ------------------------------------------------------------------
     # Price direction (public — used by backtest)
