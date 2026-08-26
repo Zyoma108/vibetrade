@@ -1,5 +1,9 @@
 """
-Прогон стратегии на исторических данных.
+Прогон стратегии на исторических данных: отчёт поверх `src/backtest/engine.py`.
+
+Сам цикл симуляции живёт в движке и здесь НЕ дублируется — см. `engine.py`
+про то, почему реализаций было три и чем это обошлось. Здесь только загрузка
+конфига, сравнение с реальными сделками из той же БД и печать.
 
 Использование:
     python -m src.backtest.runner
@@ -7,552 +11,22 @@
 """
 
 import argparse
-import asyncio
 import logging
-from datetime import datetime, timedelta
 from pathlib import Path
 
-import numpy as np
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-
-from src.analytics.detector import SetupDetector
-from src.analytics.utils import OI_TREND_BARS, calculate_oi_slope_pct, timeframe_to_minutes
+from src.backtest.engine import load_data, simulate
 from src.config import Settings
-from src.storage.models import Candle, MarketContextSnapshot, OpenInterest
 
 logger = logging.getLogger(__name__)
 
-BACKTEST_DB = Path("data/backtest.db")
 
-
-# ---------------------------------------------------------------------------
-# Virtual position (без биржи)
-# ---------------------------------------------------------------------------
-
-class SimPosition:
-    __slots__ = (
-        "symbol", "entry_price", "entry_time", "quantity",
-        "tp_price", "sl_price", "partial_closed", "partial_pnl",
-        "closed", "exit_price", "exit_time", "pnl", "exit_reason", "fee",
-    )
-
-    def __init__(self, symbol: str, entry_price: float, entry_time: datetime,
-                 quantity: float, tp_price: float, sl_price: float, fee: float = 0.0):
-        self.symbol = symbol
-        self.entry_price = entry_price
-        self.entry_time = entry_time
-        self.quantity = quantity
-        self.tp_price = tp_price
-        self.sl_price = sl_price
-        self.partial_closed = False
-        self.partial_pnl = 0.0
-        self.closed = False
-        self.exit_price = 0.0
-        self.exit_time: datetime | None = None
-        self.pnl = 0.0
-        self.exit_reason = ""
-        self.fee = fee  # накопленная комиссия по всем "ногам" сделки
-
-
-class PendingEntry:
-    """Лимитник на вход, ожидающий отката от цены сигнала (pending_entry_pullback_pct)."""
-
-    __slots__ = (
-        "symbol", "limit_price", "signal_time", "expires_at",
-        "quantity", "tp_price", "sl_price", "fee",
-    )
-
-    def __init__(self, symbol: str, limit_price: float, signal_time: datetime,
-                 expires_at: datetime, quantity: float, tp_price: float,
-                 sl_price: float, fee: float):
-        self.symbol = symbol
-        self.limit_price = limit_price
-        self.signal_time = signal_time
-        self.expires_at = expires_at
-        self.quantity = quantity
-        self.tp_price = tp_price
-        self.sl_price = sl_price
-        self.fee = fee  # комиссия входа, известна заранее (maker, лимит известен)
-
-
-def _bar(rows, idx):
-    if 0 <= idx < len(rows):
-        return rows[idx]
-    return None
-
-
-def _fee(cfg, notional: float, taker: bool) -> float:
-    """Комиссия биржи за одну "ногу" сделки (см. PositionManager._fee).
-    taker=True — market-ордер (вход, TP/SL/time-exit, fallback partial).
-    taker=False — резервный reduce-only лимитник частичной фиксации (maker)."""
-    rate = cfg.taker_fee_pct if taker else cfg.maker_fee_pct
-    return notional * (rate / 100)
-
-
-# ---------------------------------------------------------------------------
-# Main loop
-# ---------------------------------------------------------------------------
-
-async def run_backtest(
-    config_path: str = "config/config.yaml",
-    db_path: str = "data/backtest.db",
-    has_oi: bool = True
-) -> dict:
-    """Запустить бэктест и вернуть статистику."""
+def run_backtest(config_path: str, db_path: str, has_oi: bool = True) -> dict | None:
+    """Загрузить БД и прогнать симуляцию. Тонкая обёртка над движком."""
     settings = Settings.from_yaml(config_path)
-    db_path = Path(db_path)
-
-    engine = create_async_engine(f"sqlite+aiosqlite:///{db_path}", echo=False)
-    session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-
-    # Загружаем все свечи в память
-    async with session_factory() as session:
-        stmt = (
-            select(Candle.symbol, Candle.timestamp, Candle.open, Candle.high,
-                   Candle.low, Candle.close, Candle.volume, Candle.exchange)
-            # volume > 0: незакрытые/пустые бары боевой DataProvider.load_candles
-            # отбрасывает, и окно детектора у него схлопывается на этот бар. Бэктест
-            # раньше их оставлял — окна расходились уже на входных данных.
-            .where(Candle.volume > 0)
-            .order_by(Candle.symbol, Candle.exchange, Candle.timestamp)
-        )
-        result = await session.execute(stmt)
-        rows = result.all()
-
-    # Ключ — (биржа, символ), как в DataProvider.get_active_symbols. Раньше группировка
-    # шла по одному символу, и у монет, торгующихся и на binance, и на bybit, два ряда
-    # свечей склеивались в один с дублирующимися timestamp'ами. Коллектор пишет свечи
-    # только с ОДНОЙ биржи на монету (см. MarketDataCollector._collect_cycle: binance,
-    # если монета там есть, иначе bybit), поэтому оставляем ряд с большей историей.
-    by_pair: dict[tuple[str, str], list] = {}
-    for r in rows:
-        by_pair.setdefault((r[7], r[0]), []).append(r)
-    symbols: dict[str, list] = {}
-    for (ex, sym), bars in by_pair.items():
-        if len(bars) > len(symbols.get(sym, ())):
-            symbols[sym] = bars
-
-    # timestamp -> индекс бара, по одному словарю на монету. Без этого каждая
-    # проверка позиции и каждый поиск сетапа линейно сканировали весь ряд свечей
-    # монеты: на 15-дневной БД (638 монет x ~5000 баров x 7110 срезов) прогон не
-    # завершался вообще. Теперь это O(1).
-    ts_index: dict[str, dict] = {
-        sym: {r[1]: i for i, r in enumerate(bars)} for sym, bars in symbols.items()
-    }
-
-    all_timestamps = sorted(set(r[1] for r in rows))
-    if not all_timestamps:
-        logger.error("Нет данных для бэктеста")
-        return {}
-
-    start_time = all_timestamps[0]
-    end_time = all_timestamps[-1]
-    logger.info(f"БД: {db_path} | OI: {'✅' if has_oi else '❌'}")
-    logger.info(f"Символов: {len(symbols)} | Период: {start_time} → {end_time}")
-    logger.info(f"Временных срезов: {len(all_timestamps)}")
-
-    detector = SetupDetector(settings.strategy, timeframe=settings.collectors.timeframe)
-    cfg = settings.trading
-
-    # Каданс поиска новых сигналов: столько же баров, сколько реально проходит между
-    # полными циклами сканирования рынка (settings.collectors.scan_cycle_seconds) —
-    # раньше было захардкожено как 3 бара, вне зависимости от таймфрейма и реальной
-    # скорости коллектора (см. market-data-scan-speedup-august-2026: скан ускорился
-    # с 5-7 мин до ~90с, а константа не менялась).
-    timeframe_minutes = timeframe_to_minutes(settings.collectors.timeframe)
-    cycle_delay_bars = max(
-        1, round(settings.collectors.scan_cycle_seconds / (timeframe_minutes * 60))
-    )
-    logger.info(
-        f"Каданс сканирования сигналов: раз в {cycle_delay_bars} бар(а) "
-        f"(scan_cycle_seconds={settings.collectors.scan_cycle_seconds:.0f}с, "
-        f"таймфрейм={settings.collectors.timeframe})"
-    )
-
-    positions: list[SimPosition] = []
-    pending: list[PendingEntry] = []
-    closed_trades: list[SimPosition] = []
-    signals_count = 0
-    pending_filled = 0
-    pending_expired = 0
-
-    # Circuit Breaker state
-    cb_losses = 0
-    cb_stop_until: datetime | None = None
-    # На каком cb_losses уже была выдана полная остановка — таймер её снимает, но НЕ сбрасывает
-    # серию (сброс только по факту прибыли), см. PositionManager._check_circuit_breaker
-    cb_stop_consumed_at = 0
-
-    # Кеш OI-данных (exchange, symbol) -> [(timestamp, value), ...]
-    oi_cache: dict[tuple[str, str], list[tuple[datetime, float]]] = {}
-    if has_oi and not settings.strategy.oi_filter_enabled:
-        logger.info("OI-гейт выключен в конфиге (strategy.oi_filter_enabled=false)")
-    if has_oi:
-        async with session_factory() as session:
-            oi_stmt = select(OpenInterest.exchange, OpenInterest.symbol,
-                             OpenInterest.timestamp, OpenInterest.value).order_by(
-                OpenInterest.exchange, OpenInterest.symbol, OpenInterest.timestamp)
-            oi_result = await session.execute(oi_stmt)
-            for ex, sym, ts, val in oi_result.all():
-                oi_cache.setdefault((ex, sym), []).append((ts, val))
-        logger.info(f"Загружено OI: {len(oi_cache)} монет")
-
-    # Загружаем снимки рыночного контекста
-    mc_snapshots: list[tuple[datetime, "MarketContextSnapshot"]] = []
-    try:
-        async with session_factory() as session:
-            mc_stmt = (
-                select(MarketContextSnapshot)
-                .order_by(MarketContextSnapshot.timestamp)
-            )
-            mc_result = await session.execute(mc_stmt)
-            for row in mc_result.scalars().all():
-                mc_snapshots.append((row.timestamp, row))
-        logger.info(f"Загружено снимков MarketContext: {len(mc_snapshots)}")
-    except Exception:
-        logger.warning(
-            "MarketContext не загружен — фильтрация по режиму отключена"
-        )
-
-    # Проходим по каждому временному срезу
-    for ts_idx, ts in enumerate(all_timestamps):
-        if ts_idx < detector.config.baseline_bars + detector.config.sustain_bars:
-            continue
-
-        # Определяем режим рынка на этот момент времени
-        regime = "unknown"
-        st_color = "green"
-        for mc_ts, mc_row in reversed(mc_snapshots):
-            if mc_ts <= ts:
-                regime = mc_row.regime
-                st_color = mc_row.supertrend_color
-                break
-        if regime == "risk_off" or (regime == "cautious" and st_color == "red"):
-            continue
-
-        # Проверяем открытые позиции на TP/SL/время
-        for pos in list(positions):
-            if pos.closed:
-                continue
-
-            sym_data = symbols.get(pos.symbol)
-            if not sym_data:
-                continue
-
-            bar_i = ts_index[pos.symbol].get(ts)
-            if bar_i is None:
-                continue
-            current_bar = sym_data[bar_i]
-
-            high = current_bar[3]
-            low = current_bar[4]
-            close = current_bar[5]
-
-            # Частичное закрытие (всегда включено)
-            if not pos.partial_closed:
-                trigger = pos.entry_price + (pos.tp_price - pos.entry_price) * (
-                    cfg.partial_close_pct / 100)
-                if high >= trigger:
-                    close_qty = pos.quantity * (cfg.partial_close_qty_pct / 100)
-                    partial_pnl = (trigger - pos.entry_price) * close_qty
-                    pos.quantity -= close_qty
-                    pos.partial_closed = True
-                    pos.partial_pnl = partial_pnl
-                    pos.sl_price = pos.entry_price
-                    # Резервный лимитник частичной фиксации — maker
-                    pos.fee += _fee(cfg, trigger * close_qty, taker=False)
-                    continue
-
-            # TP — если tp_as_limit_order включён (прод-дефолт), TP реально исполняется
-            # лимитным ордером (maker, дешевле), не market (taker)
-            if high >= pos.tp_price:
-                pos.exit_price = pos.tp_price
-                pos.exit_time = ts
-                pos.exit_reason = "tp"
-                pos.fee += _fee(cfg, pos.tp_price * pos.quantity, taker=not cfg.tp_as_limit_order)
-                pos.pnl = (pos.tp_price - pos.entry_price) * pos.quantity + pos.partial_pnl - pos.fee
-                pos.closed = True
-                closed_trades.append(pos)
-                positions.remove(pos)
-                # Circuit Breaker: сброс счётчика при прибыли
-                if cfg.circuit_breaker_enabled:
-                    cb_losses = 0
-                    cb_stop_until = None
-                    cb_stop_consumed_at = 0
-                continue
-
-            # SL
-            if low <= pos.sl_price:
-                pos.exit_price = pos.sl_price
-                pos.exit_time = ts
-                pos.exit_reason = "sl"
-                pos.fee += _fee(cfg, pos.sl_price * pos.quantity, taker=True)
-                pos.pnl = (pos.sl_price - pos.entry_price) * pos.quantity + pos.partial_pnl - pos.fee
-                pos.closed = True
-                closed_trades.append(pos)
-                positions.remove(pos)
-                # Circuit Breaker: увеличиваем счётчик убытков
-                if cfg.circuit_breaker_enabled:
-                    cb_losses += 1
-                continue
-
-            # Выход по времени
-            age = (ts - pos.entry_time).total_seconds() / 3600
-            if age >= cfg.max_hold_hours:
-                pos.exit_price = close
-                pos.exit_time = ts
-                pos.exit_reason = "time"
-                pos.fee += _fee(cfg, close * pos.quantity, taker=True)
-                pos.pnl = (close - pos.entry_price) * pos.quantity + pos.partial_pnl - pos.fee
-                pos.closed = True
-                closed_trades.append(pos)
-                positions.remove(pos)
-                # Circuit Breaker: по PnL
-                if cfg.circuit_breaker_enabled:
-                    if pos.pnl > 0:
-                        cb_losses = 0
-                        cb_stop_until = None
-                        cb_stop_consumed_at = 0
-                    else:
-                        cb_losses += 1
-
-        # Проверяем pending-заявки на вход: исполнение (low коснулся лимита) или истечение таймаута.
-        # Проверяется на каждом баре, а не только в циклы сканирования — так же, как TP/SL/partial выше.
-        for pe in list(pending):
-            sym_data = symbols.get(pe.symbol)
-            if not sym_data:
-                continue
-            bar_i = ts_index[pe.symbol].get(ts)
-            if bar_i is None:
-                continue
-            low = sym_data[bar_i][4]
-            if low <= pe.limit_price:
-                pos = SimPosition(
-                    symbol=pe.symbol, entry_price=pe.limit_price, entry_time=ts,
-                    quantity=pe.quantity, tp_price=pe.tp_price, sl_price=pe.sl_price,
-                    fee=pe.fee,
-                )
-                positions.append(pos)
-                pending.remove(pe)
-                pending_filled += 1
-                continue
-            if ts >= pe.expires_at:
-                pending.remove(pe)
-                pending_expired += 1
-
-        # Ищем сетапы только в «циклы сканирования»
-        if ts_idx % cycle_delay_bars != 0:
-            continue
-        if len(positions) + len(pending) >= cfg.max_positions:
-            continue
-
-        # Circuit Breaker: проверка полной остановки
-        cb_mult = 1.0
-        if cfg.circuit_breaker_enabled:
-            if cb_stop_until is not None:
-                if ts < cb_stop_until:
-                    continue
-                # Таймер истёк — снимаем блокировку, но серию НЕ сбрасываем (сброс только
-                # по факту прибыли выше) — иначе следующий сигнал вошёл бы полным размером
-                # посреди ещё незакончившейся серии убытков.
-                cb_stop_until = None
-            if (
-                cb_losses >= cfg.circuit_breaker_loss_streak_stop
-                and cb_losses > cb_stop_consumed_at
-            ):
-                cb_stop_until = ts + timedelta(minutes=cfg.circuit_breaker_stop_minutes)
-                cb_stop_consumed_at = cb_losses
-                logger.warning(
-                    f"Circuit Breaker: {cb_losses} убытков подряд → "
-                    f"ПОЛНАЯ ОСТАНОВКА до {cb_stop_until}"
-                )
-                continue
-            if cb_losses >= cfg.circuit_breaker_loss_streak_reduce:
-                cb_mult = cfg.circuit_breaker_reduce_mult_pct / 100.0
-
-        # Применяем множитель рыночного режима к детектору
-        if regime == "cautious":
-            increase_pct = detector.config.cautious_volume_surge_mult_increase_pct
-            detector.apply_regime_multiplier(1.0 + increase_pct / 100.0)
-        else:
-            detector.apply_regime_multiplier(1.0)
-
-        for sym, sym_data in symbols.items():
-            if len(positions) + len(pending) >= cfg.max_positions:
-                break
-
-            bar_idx = ts_index[sym].get(ts, -1)
-            if bar_idx < 0:
-                continue
-
-            need_bars = detector.config.baseline_bars + detector.config.sustain_bars
-            if bar_idx < need_bars:
-                continue
-
-            base = sym.split("/")[0].upper()
-            if base in getattr(detector, '_exclude_coins', set()):
-                continue
-            if any(p.symbol == sym for p in positions) or any(pe.symbol == sym for pe in pending):
-                continue
-
-            cooldown_cutoff = ts - timedelta(hours=cfg.cooldown_hours)
-            if cfg.cooldown_hours > 0 and any(
-                t.symbol == sym and t.exit_time and t.exit_time >= cooldown_cutoff
-                for t in closed_trades
-            ):
-                continue
-
-            # Ровно столько же баров, сколько грузит боевой детектор
-            # (SetupDetector.analyze: limit = baseline_bars + sustain_bars + 10).
-            # Было на один бар больше — baseline (первые baseline_bars элементов
-            # среза) съезжал на бар назад относительно живого.
-            candle_slice = []
-            for j in range(bar_idx - need_bars - 10 + 1, bar_idx + 1):
-                bar = _bar(sym_data, j)
-                if bar:
-                    candle_slice.append({
-                        "open": bar[2], "high": bar[3],
-                        "low": bar[4], "close": bar[5], "volume": bar[6],
-                    })
-
-            if len(candle_slice) < need_bars:
-                continue
-
-            # Volume + price checks
-            if not detector.check_volume_pattern(candle_slice):
-                continue
-            direction = detector.check_price_trend(candle_slice)
-            if direction != "long":
-                continue
-
-            # OI check (если есть данные и гейт не выключен в конфиге)
-            if has_oi and detector.config.oi_filter_enabled:
-                oi_pass = False
-                for ex in ("bybit", "binance"):
-                    key = (ex, sym)
-                    if key not in oi_cache:
-                        continue
-                    # Берём OI точки до текущего timestamp
-                    oi_points = [v for t, v in oi_cache[key] if t <= ts]
-                    if len(oi_points) < OI_TREND_BARS:
-                        continue
-                    oi_vals = np.array(oi_points[-OI_TREND_BARS:])
-                    # oi_declining (см. SetupDetector._check_oi_trend): последняя точка OI
-                    # ниже предпоследней → приток уже иссякает, блок независимо от порога
-                    # наклона. Раньше отсутствовало здесь — искусственно завышало число
-                    # сигналов относительно боевой логики.
-                    if len(oi_vals) >= 2 and oi_vals[-1] < oi_vals[-2]:
-                        continue
-                    slope_pct = calculate_oi_slope_pct(oi_vals)
-                    if slope_pct is not None and slope_pct >= detector.config.oi_slope_min_pct:
-                        oi_pass = True
-                        break
-                if not oi_pass:
-                    continue
-
-            signals_count += 1
-
-            signal_price = candle_slice[-1]["close"]
-            # Бюджет риска: % от виртуального депозита $1000, с учётом Circuit Breaker
-            # и множителя рыночного режима (cautious → 0.5x, см. MarketContext.
-            # position_size_multiplier). risk_off и cautious+ST=red уже отсеяны выше
-            # (block_entries), поэтому regime здесь либо не "cautious", либо
-            # "cautious"+не-red — 0.5x соответствует реальному position_size_mult.
-            virtual_balance = 1000.0
-            regime_size_mult = 0.5 if regime == "cautious" else 1.0
-            risk_budget = (
-                virtual_balance * (cfg.risk_per_trade_pct / 100) * cb_mult * regime_size_mult
-            )
-
-            if cfg.pending_entry_pullback_pct > 0:
-                # Вход лимитником на откате — TP/SL/qty известны заранее (лимит фиксирован)
-                limit_price = signal_price * (1 - cfg.pending_entry_pullback_pct / 100)
-                sl_distance = limit_price * (cfg.stop_loss_pct / 100)
-                tp_distance = sl_distance * cfg.risk_reward_ratio
-                qty = risk_budget / sl_distance
-                tp = limit_price + tp_distance
-                sl = limit_price - sl_distance
-                entry_fee = _fee(cfg, qty * limit_price, taker=False)  # резидентный лимитник — maker
-                expires_at = ts + timedelta(minutes=cfg.pending_entry_timeout_minutes)
-
-                pending.append(PendingEntry(
-                    symbol=sym, limit_price=limit_price, signal_time=ts,
-                    expires_at=expires_at, quantity=qty, tp_price=tp, sl_price=sl,
-                    fee=entry_fee,
-                ))
-                continue
-
-            # Реальный вход рыночным ордером хуже цены сигнала на величину проскальзывания
-            entry_price = signal_price * (1 + cfg.backtest_slippage_pct / 100)
-
-            # TP/SL: фиксированные проценты от цены входа (после проскальзывания)
-            sl_distance = entry_price * (cfg.stop_loss_pct / 100)
-            tp_distance = sl_distance * cfg.risk_reward_ratio
-            qty = risk_budget / sl_distance
-            tp = entry_price + tp_distance
-            sl = entry_price - sl_distance
-            entry_fee = _fee(cfg, qty * entry_price, taker=True)
-
-            pos = SimPosition(
-                symbol=sym, entry_price=entry_price, entry_time=ts,
-                quantity=qty, tp_price=tp, sl_price=sl, fee=entry_fee,
-            )
-            positions.append(pos)
-
-    # Закрываем оставшиеся позиции
-    for pos in positions:
-        sym_data = symbols.get(pos.symbol)
-        if sym_data:
-            last_close = sym_data[-1][5]
-            pos.exit_price = last_close
-            pos.exit_time = end_time
-            pos.exit_reason = "eod"
-            pos.fee += _fee(cfg, last_close * pos.quantity, taker=True)
-            pos.pnl = (last_close - pos.entry_price) * pos.quantity + pos.partial_pnl - pos.fee
-        pos.closed = True
-        closed_trades.append(pos)
-
-    # Неисполненные к концу периода pending-заявки считаем истёкшими
-    pending_expired += len(pending)
-
-    # Статистика
-    wins = sum(1 for t in closed_trades if t.pnl > 0)
-    losses = sum(1 for t in closed_trades if t.pnl <= 0)
-    total_pnl = sum(t.pnl for t in closed_trades)
-    win_rate = (wins / len(closed_trades) * 100) if closed_trades else 0
-
-    tp_wins = sum(1 for t in closed_trades if t.exit_reason == "tp")
-    sl_losses = sum(1 for t in closed_trades if t.exit_reason == "sl")
-    time_exits = sum(1 for t in closed_trades if t.exit_reason == "time")
-    partials = sum(1 for t in closed_trades if t.partial_closed)
-    total_fees = sum(t.fee for t in closed_trades)
-
-    await engine.dispose()
-
-    return {
-        "signals": signals_count,
-        "trades": len(closed_trades),
-        "wins": wins,
-        "losses": losses,
-        "win_rate": round(win_rate, 1),
-        "total_pnl": round(total_pnl, 2),
-        "avg_pnl": round(total_pnl / len(closed_trades), 2) if closed_trades else 0,
-        "total_fees": round(total_fees, 2),
-        "avg_fee": round(total_fees / len(closed_trades), 4) if closed_trades else 0,
-        "tp_wins": tp_wins,
-        "sl_losses": sl_losses,
-        "time_exits": time_exits,
-        "partials": partials,
-        "pending_filled": pending_filled,
-        "pending_expired": pending_expired,
-        "best": max(closed_trades, key=lambda t: t.pnl) if closed_trades else None,
-        "worst": min(closed_trades, key=lambda t: t.pnl) if closed_trades else None,
-        "period": f"{start_time} → {end_time}",
-        "trades_list": closed_trades,
-        "has_oi": has_oi,
-        "has_mc": len(mc_snapshots) > 0,
-    }
+    data = load_data(db_path)
+    if not data["all_timestamps"]:
+        return None
+    return simulate(settings, data, has_oi=has_oi)
 
 
 def _load_live_stats(db_path: str) -> dict | None:
@@ -670,14 +144,14 @@ def _print_trade_list(trades: list, title: str, max_show: int = 20) -> None:
     """Вывести список сделок."""
     print(f"\n  {title} (последние {min(len(trades), max_show)}):")
     for t in trades[-max_show:]:
-        emoji = "✅" if t.exit_reason == "tp" else (
-            "🛑" if t.exit_reason == "sl" else "⏰"
+        emoji = "✅" if t["exit_reason"] == "tp" else (
+            "🛑" if t["exit_reason"] == "sl" else "⏰"
         )
-        pnl_pct = (t.exit_price / t.entry_price - 1) * 100
+        pnl_pct = (t["exit_price"] / t["entry_price"] - 1) * 100
         print(
-            f"  {emoji} {t.symbol:25s} "
-            f"вход=${t.entry_price:.6f} выход=${t.exit_price:.6f} "
-            f"PnL=${t.pnl:+.2f} ({pnl_pct:+.1f}%)  [{t.exit_reason}]"
+            f"  {emoji} {t['symbol']:25s} "
+            f"вход=${t['entry_price']:.6f} выход=${t['exit_price']:.6f} "
+            f"PnL=${t['pnl']:+.2f} ({pnl_pct:+.1f}%)  [{t['exit_reason']}]"
         )
 
 
@@ -700,7 +174,7 @@ def main():
         print(f"Файл БД не найден: {args.db}")
         return
 
-    result = asyncio.run(run_backtest(args.config, args.db, args.has_oi))
+    result = run_backtest(args.config, args.db, args.has_oi)
 
     if not result:
         print("Нет данных")
@@ -733,9 +207,9 @@ def main():
             f"истекло {result['pending_expired']} ({fill_rate:.0f}% fill rate)"
         )
     if result["best"]:
-        print(f"  Лучшая:  {result['best'].symbol} ${result['best'].pnl:+.2f}")
+        print(f"  Лучшая:  {result['best']['symbol']} ${result['best']['pnl']:+.2f}")
     if result["worst"]:
-        print(f"  Худшая:  {result['worst'].symbol} ${result['worst'].pnl:+.2f}")
+        print(f"  Худшая:  {result['worst']['symbol']} ${result['worst']['pnl']:+.2f}")
     print("=" * 60)
 
     # Сравнение с реальной торговлей

@@ -37,10 +37,9 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from sweep_retracement import load_data, simulate, log  # noqa: E402
+from src.backtest.engine import load_data, log, simulate  # noqa: E402
 from src.config import Settings  # noqa: E402
 
 OUTCOME_LABELS = {
