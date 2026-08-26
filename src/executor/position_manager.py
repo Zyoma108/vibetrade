@@ -9,40 +9,32 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.analytics.base import Signal
-from src.config import AgentConfig, TradingConfig
+from src.config import TradingConfig
 from src.connectors.exchange import ExchangeConnector
 from src.storage.database import async_session
 from src.storage.models import BotState, Ticker, Trade
 
 logger = logging.getLogger(__name__)
 
+# Все сделки и состояние бота пишутся под этим source. Колонка осталась в схеме
+# от удалённого ИИ-режима (он был вторым пайплайном на отдельном аккаунте) и
+# продолжает скоупить запросы — чтобы исторические строки того режима не
+# попадали в алгоритмическую логику.
+SOURCE = "algo"
+
 
 class PositionManager:
-    """Управление позициями: вход, TP/SL, уведомления (только real).
-
-    Один экземпляр = один "пайплайн" (source='algo' или source='agent') на своём
-    аккаунте биржи (trading_connector). Оба пайплайна используют одну таблицу
-    trades, но все запросы/лимиты/кулдауны скоуплены по source — они не видят
-    и не блокируют друг друга.
-
-    Здесь — только общая механика (алго- и ИИ-режим). Решения, которые принимает
-    ИИ-агент по своей сделке (tighten_sl/raise_tp/partial_close/reprice/...), живут
-    в подклассе `AgentPositionManager` (src/executor/agent_position_manager.py) —
-    чтобы менять их, не трогая этот файл и не рискуя поведением алго-режима."""
+    """Управление позициями: вход, TP/SL, уведомления (только real)."""
 
     def __init__(
         self,
         config: TradingConfig,
         send_message: Callable[[str], Coroutine] | None = None,
         trading_connector: ExchangeConnector | None = None,
-        source: str = "algo",
-        agent_config: AgentConfig | None = None,
     ):
         self.config = config
         self._send_message = send_message
         self._connector = trading_connector
-        self.source = source  # 'algo' | 'agent'
-        self._agent_config = agent_config  # только для source='agent'
         self._banned_symbols: set[str] = set()  # монеты с ошибками торговли
         self.market_regime: str = "unknown"
         self.position_size_mult: float = 1.0
@@ -96,8 +88,8 @@ class PositionManager:
             return
         ex_symbols = {p["symbol"] for p in exchange_positions}
 
-        # Позиции в БД, открытые (только свой пайплайн — algo/agent на разных аккаунтах)
-        db_stmt = select(Trade).where(Trade.status == "open", Trade.source == self.source)
+        # Позиции в БД, открытые
+        db_stmt = select(Trade).where(Trade.status == "open", Trade.source == SOURCE)
         result = await session.execute(db_stmt)
         db_positions = result.scalars().all()
         db_symbols = {t.symbol for t in db_positions}
@@ -114,7 +106,7 @@ class PositionManager:
                     entry_time=ex_pos["timestamp"],
                     status="open",
                     tp_sl_set=True,  # на бирже уже есть TP/SL, не надо выставлять повторно
-                    source=self.source,
+                    source=SOURCE,
                     current_sl_price=None,
                 )
                 session.add(trade)
@@ -159,7 +151,7 @@ class PositionManager:
         рестарта процесса. Без этого вызова состояние всегда стартует "с чистого
         листа" (0 убытков подряд, пустой бан-лист) — вызывай один раз при старте,
         сразу после sync_positions (см. src/core/app.py)."""
-        state = await session.get(BotState, self.source)
+        state = await session.get(BotState, SOURCE)
         if state is None:
             return
         self._consecutive_losses = state.consecutive_losses
@@ -172,7 +164,7 @@ class PositionManager:
             for symbol, ts in json.loads(state.error_cooldown_until_json or "{}").items()
         }
         logger.info(
-            f"[{self.source}] Состояние восстановлено: "
+            f"Состояние восстановлено: "
             f"{self._consecutive_losses} убытков подряд, "
             f"{len(self._banned_symbols)} монет в чёрном списке, "
             f"{len(self._error_cooldown_until)} символов в кулдауне"
@@ -210,7 +202,7 @@ class PositionManager:
 
         Теперь принимает опциональный `session` — если он передан (все вызовы из
         `_close_position`, у которой он есть в стеке через `update_positions`/
-        `apply_agent_close`), пишем ПРЯМО В НЕГО (`flush`, без своего `commit` —
+        ), пишем ПРЯМО В НЕГО (`flush`, без своего `commit` —
         закоммитится вместе с остальным в конце вызывающей транзакции). Это та же
         самая транзакция, гонки за блокировкой физически нет.
 
@@ -221,23 +213,23 @@ class PositionManager:
         а не на каждом закрытии сделки."""
         if session is not None:
             try:
-                state = await session.get(BotState, self.source)
+                state = await session.get(BotState, SOURCE)
                 if state is None:
-                    state = BotState(source=self.source)
+                    state = BotState(source=SOURCE)
                     session.add(state)
                 self._apply_state_to_row(state)
                 await session.flush()
             except Exception:
-                logger.exception(f"[{self.source}] Не удалось сохранить состояние Circuit Breaker")
+                logger.exception("Не удалось сохранить состояние Circuit Breaker")
             return
 
         attempt = 0
         while True:
             try:
                 async with async_session() as own_session:
-                    state = await own_session.get(BotState, self.source)
+                    state = await own_session.get(BotState, SOURCE)
                     if state is None:
-                        state = BotState(source=self.source)
+                        state = BotState(source=SOURCE)
                         own_session.add(state)
                     self._apply_state_to_row(state)
                     await own_session.commit()
@@ -247,16 +239,16 @@ class PositionManager:
                     delay = self._SAVE_STATE_RETRY_DELAYS_SEC[attempt]
                     attempt += 1
                     logger.warning(
-                        f"[{self.source}] БД занята при сохранении состояния Circuit "
+                        f"БД занята при сохранении состояния Circuit "
                         f"Breaker, повтор через {delay}с (попытка {attempt}/"
                         f"{len(self._SAVE_STATE_RETRY_DELAYS_SEC)})"
                     )
                     await asyncio.sleep(delay)
                     continue
-                logger.exception(f"[{self.source}] Не удалось сохранить состояние Circuit Breaker")
+                logger.exception("Не удалось сохранить состояние Circuit Breaker")
                 return
             except Exception:
-                logger.exception(f"[{self.source}] Не удалось сохранить состояние Circuit Breaker")
+                logger.exception("Не удалось сохранить состояние Circuit Breaker")
                 return
 
     def _schedule_save_state(self) -> None:
@@ -337,8 +329,6 @@ class PositionManager:
         session: AsyncSession,
         signal: Signal,
         signal_id: int | None = None,
-        force_market: bool = False,
-        pullback_pct_override: float | None = None,
     ) -> tuple[Trade | None, str, str | None]:
         """Открыть позицию по сигналу (guard-проверки + диспетчер способа входа).
         Возвращает (trade, status, detail): status = 'opened' | 'pending' | 'limit' |
@@ -346,11 +336,7 @@ class PositionManager:
         'pending' — лимитник на вход выставлен на откате, ждёт исполнения
         (см. `pending_entry_pullback_pct`); TP/SL и partial-close выставляются
         позже, при активации в `check_pending_entries()`.
-        detail — описание ошибки (только если status не 'opened'/'pending').
-
-        `force_market`/`pullback_pct_override` — используются только AgentPositionManager
-        (entry-agent сам выбирает способ входа); алго-путь их никогда не передаёт, поэтому
-        поведение по умолчанию не меняется."""
+        detail — описание ошибки (только если status не 'opened'/'pending')."""
 
         # Проверка рыночного режима (risk_off или cautious+ST=red)
         if self.block_entries:
@@ -459,15 +445,9 @@ class PositionManager:
         except Exception as e:
             logger.warning(f"Не удалось выставить плечо для {signal.symbol}: {e}")
 
-        effective_pullback_pct = (
-            pullback_pct_override
-            if pullback_pct_override is not None
-            else self.config.pending_entry_pullback_pct
-        )
-        if not force_market and effective_pullback_pct > 0:
+        if self.config.pending_entry_pullback_pct > 0:
             return await self._place_pending_entry(
                 session, signal, signal_id, reference_price, risk_budget,
-                pullback_pct_override=pullback_pct_override,
             )
         return await self._place_market_entry(
             session, signal, signal_id, reference_price, risk_budget
@@ -631,7 +611,7 @@ class PositionManager:
             status="open",
             tp_sl_set=tp_sl_ok,
             fee=entry_fee,
-            source=self.source,
+            source=SOURCE,
             current_sl_price=sl_price if tp_sl_ok else None,
             signal_price=reference_price,
         )
@@ -665,17 +645,11 @@ class PositionManager:
         signal_id: int | None,
         reference_price: float,
         risk_budget: float,
-        pullback_pct_override: float | None = None,
     ) -> tuple[Trade | None, str, str | None]:
         """Вход лимитным ордером на откате от цены сигнала (решает проблему
         покупки на пике пампа). TP/SL и partial-close выставляются позже,
-        при исполнении лимитника — см. `check_pending_entries()`.
-        `pullback_pct_override` — свой откат вместо конфигового (см. AgentPositionManager)."""
-        pullback_pct = (
-            pullback_pct_override
-            if pullback_pct_override is not None
-            else self.config.pending_entry_pullback_pct
-        )
+        при исполнении лимитника — см. `check_pending_entries()`."""
+        pullback_pct = self.config.pending_entry_pullback_pct
         limit_price = reference_price * (1 - pullback_pct / 100)
         sl_distance = limit_price * (self.config.stop_loss_pct / 100)
         quantity = risk_budget / sl_distance
@@ -716,7 +690,7 @@ class PositionManager:
             entry_time=datetime.now(tz=timezone.utc),
             status="pending",
             pending_expires_at=expires_at,
-            source=self.source,
+            source=SOURCE,
             signal_price=reference_price,
         )
         session.add(trade)
@@ -741,7 +715,7 @@ class PositionManager:
         Возвращает список позиций, активированных в этом вызове (для логирования)."""
         stmt = (
             select(Trade)
-            .where(Trade.status == "pending", Trade.source == self.source)
+            .where(Trade.status == "pending", Trade.source == SOURCE)
             .order_by(Trade.entry_time)
         )
         result = await session.execute(stmt)
@@ -797,9 +771,8 @@ class PositionManager:
     ) -> tuple[float, float]:
         """Общая часть активации позиции после исполнения входа (лимитником или
         market-ордером): комиссия, TP/SL, лимитник частичной фиксации. Возвращает
-        (tp_price, sl_price). Используется `_activate_pending_entry` (механическое
-        исполнение лимитника, ОБА источника) и `AgentPositionManager.
-        apply_agent_convert_to_market` (агент перевёл pending в market)."""
+        (tp_price, sl_price). Используется `_activate_pending_entry` — механическое
+        исполнение лимитника входа."""
         pos.fee = (pos.fee or 0.0) + self._fee(pos.quantity * fill_price, taker=not is_maker)
 
         tp_price = self._tp_price(fill_price)
@@ -865,7 +838,7 @@ class PositionManager:
         """
         stmt = (
             select(Trade)
-            .where(Trade.status == "open", Trade.source == self.source)
+            .where(Trade.status == "open", Trade.source == SOURCE)
             .order_by(Trade.entry_time)
         )
         result = await session.execute(stmt)
@@ -1133,8 +1106,7 @@ class PositionManager:
         current_price: float | None,
         closed: list[Trade],
     ) -> bool:
-        """Закрыть позицию по истечении max_hold_hours (агент может только
-        ПРОДЛИТЬ этот дедлайн через llm_hold_until, никогда не сократить).
+        """Закрыть позицию по истечении max_hold_hours.
 
         Возвращает True, если стадия обработана (позиция закрыта, либо
         закрытие не удалось и будет повторено в следующем цикле).
@@ -1142,8 +1114,6 @@ class PositionManager:
         deadline = pos.entry_time.replace(tzinfo=timezone.utc) + timedelta(
             hours=self.config.max_hold_hours
         )
-        if pos.llm_hold_until:
-            deadline = max(deadline, pos.llm_hold_until.replace(tzinfo=timezone.utc))
         if now < deadline:
             return False
 
@@ -1179,12 +1149,11 @@ class PositionManager:
         return notional * (rate / 100)
 
     async def _count_open(self, session: AsyncSession) -> int:
-        """Открытые позиции + pending-заявки на вход своего пайплайна (обе занимают
-        "слот" max_positions). algo и agent считаются раздельно — разные аккаунты."""
+        """Открытые позиции + pending-заявки на вход (обе занимают "слот" max_positions)."""
         from sqlalchemy import func
         stmt = (
             select(func.count()).select_from(Trade)
-            .where(Trade.status.in_(["open", "pending"]), Trade.source == self.source)
+            .where(Trade.status.in_(["open", "pending"]), Trade.source == SOURCE)
         )
         result = await session.execute(stmt)
         return result.scalar() or 0
@@ -1200,7 +1169,7 @@ class PositionManager:
                 Trade.symbol == symbol,
                 Trade.status == "closed",
                 Trade.exit_time >= cutoff,
-                Trade.source == self.source,
+                Trade.source == SOURCE,
             )
             .limit(1)
         )
@@ -1211,7 +1180,7 @@ class PositionManager:
         """Есть ли уже открытая позиция или pending-заявка на вход по символу в своём пайплайне."""
         stmt = (
             select(Trade)
-            .where(Trade.symbol == symbol, Trade.status.in_(["open", "pending"]), Trade.source == self.source)
+            .where(Trade.symbol == symbol, Trade.status.in_(["open", "pending"]), Trade.source == SOURCE)
             .limit(1)
         )
         result = await session.execute(stmt)
@@ -1256,7 +1225,7 @@ class PositionManager:
         prior_fee = trade.fee or 0.0
         exit_notional = exit_price * trade.quantity
 
-        # Предварительно считаем комиссию как taker (верно для SL/time/llm_close/
+        # Предварительно считаем комиссию как taker (верно для SL/time/
         # аварийного закрытия — они всегда market) — этого достаточно, чтобы
         # определить знак PnL и, для tp_sl_exchange, отличить TP от SL ниже.
         trade.fee = prior_fee + self._fee(exit_notional, taker=True)
@@ -1308,7 +1277,6 @@ class PositionManager:
         labels = {
             "tp": ("✅", "Тейк-профит"),
             "sl": ("🛑", "Стоп-лосс"),
-            "llm_close": ("🤖", "Закрыто ИИ-агентом"),
         }
         emoji, label = labels.get(reason, ("⏰", "Выход по времени"))
 
@@ -1369,9 +1337,9 @@ class PositionManager:
         if any(marker in err_str for marker in self._EXCHANGE_ERROR_AUTH_HINTS):
             hint = "\n⚠️ Похоже на протухший/неверный API-ключ — проверь ключ на бирже."
 
-        logger.error(f"Ошибка связи с биржей ({self.source}, {context}): {error}")
+        logger.error(f"Ошибка связи с биржей ({context}): {error}")
         await self._notify(
-            f"🔴 <b>Ошибка связи с биржей ({self.source})</b>{down_for}\n"
+            f"🔴 <b>Ошибка связи с биржей</b>{down_for}\n"
             f"Контекст: {context}\n"
             f"{error}"
             f"{hint}"
@@ -1387,7 +1355,7 @@ class PositionManager:
         self._exchange_error_since = None
         self._exchange_error_last_alert_at = None
         await self._notify(
-            f"🟢 Связь с биржей ({self.source}) восстановлена (простой ~{minutes} мин)"
+            f"🟢 Связь с биржей восстановлена (простой ~{minutes} мин)"
         )
 
     # ------------------------------------------------------------------

@@ -22,13 +22,12 @@ def _set_journal_mode(dbapi_connection, connection_record):
     соединениями, а mmap/локи ненадёжны через osxfs/gRPC-FUSE. Временно
     переключали на DELETE (обычные файловые локи), но это сериализует запись
     целиком — основной цикл сборщика держит одну транзакцию на весь ~5-мин
-    скан, и конкурентные таски ИИ-режима (`_agent_watch_loop`/
-    `_agent_position_loop`) немедленно ловили "database is locked".
+    скан, и любой конкурентный писатель немедленно ловил "database is locked".
 
     Правильный фикс — `data/` теперь named Docker volume (`docker-compose.yml`,
     хранится в файловой системе Docker VM напрямую, не через host-bridge), на
     котором mmap работает штатно — поэтому WAL снова безопасен и восстановлен.
-    См. AGENTS.md, "База данных"/"ИИ-режим".
+    См. AGENTS.md, "База данных".
     """
     cursor = dbapi_connection.cursor()
     cursor.execute("PRAGMA journal_mode=WAL")
@@ -76,10 +75,7 @@ async def init_db() -> None:
             ("fee", "FLOAT DEFAULT 0.0"),
             ("pending_expires_at", "DATETIME"),
             ("source", "VARCHAR(16) DEFAULT 'algo'"),
-            ("llm_hold_until", "DATETIME"),
-            ("llm_hold_extension_total_hours", "FLOAT DEFAULT 0.0"),
             ("current_sl_price", "FLOAT"),
-            ("current_tp_price", "FLOAT"),
             ("signal_price", "FLOAT"),
         ]:
             try:

@@ -3,7 +3,6 @@ import logging
 import signal
 from datetime import datetime, timezone
 
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.analytics.base import BaseDetector
@@ -15,12 +14,11 @@ from src.analytics.price_surge_service import PriceSurgeSignalProcessor
 from src.collectors.market_data import MarketDataCollector
 from src.config import Settings
 from src.connectors.exchange import ExchangeConnector
-from src.executor.agent_position_manager import AgentPositionManager
 from src.executor.position_manager import PositionManager
 from src.notifier.telegram_bot import TelegramNotifier
 from src.storage.database import async_session, init_db
 from src.storage.stats import trade_stats
-from src.storage.models import MarketContextSnapshot, Signal as SignalModel, Ticker, Trade
+from src.storage.models import MarketContextSnapshot, Signal as SignalModel
 
 logger = logging.getLogger(__name__)
 
@@ -42,15 +40,6 @@ class Application:
         self._ps_processor: PriceSurgeSignalProcessor | None = None
         self._positions: PositionManager | None = None
         self._candle_cache = CandleCache()
-
-        # ИИ-режим (доп. режим, отдельный аккаунт биржи) — см. AGENTS.md.
-        # Решения принимает оркестратор (Claude Code /loop-скилл + сабагенты entry-agent/
-        # reeval-agent, см. .claude/skills/vibetrade-agent-loop) — Python здесь только
-        # держит механическую синхронизацию позиций, LLM сам не вызывает.
-        self._agent_connector: ExchangeConnector | None = None
-        self._agent_positions: AgentPositionManager | None = None
-        self._agent_watch_task: asyncio.Task | None = None
-        self._agent_position_task: asyncio.Task | None = None
 
     async def start(self) -> None:
         logger.info("Запуск приложения...")
@@ -109,11 +98,8 @@ class Application:
             )
             logger.info("MarketContext инициализирован")
 
-        # Уведомления (полностью отключены при agent.enabled=true — см. AGENTS.md, "ИИ-режим":
-        # видимость в этом режиме через беседу оркестратора, Telegram не участвует вообще)
-        if self.settings.agent.enabled:
-            logger.info("ИИ-режим включён — Telegram-уведомления и команды отключены полностью")
-        elif self.settings.telegram.bot_token and self.settings.telegram.chat_ids:
+        # Уведомления
+        if self.settings.telegram.bot_token and self.settings.telegram.chat_ids:
             self._notifier = TelegramNotifier(self.settings.telegram)
             await self._notifier.start()
 
@@ -169,10 +155,8 @@ class Application:
         else:
             logger.warning("Telegram не настроен, уведомления отключены")
 
-        # Второй Telegram-бот для strategy_price_surge (тоже отключён при agent.enabled=true)
-        if self.settings.agent.enabled:
-            pass  # уже залогировано выше — Telegram полностью отключён ИИ-режимом
-        elif self.settings.telegram_price_surge and self.settings.telegram_price_surge.bot_token and self.settings.telegram_price_surge.chat_ids:
+        # Второй Telegram-бот для strategy_price_surge
+        if self.settings.telegram_price_surge and self.settings.telegram_price_surge.bot_token and self.settings.telegram_price_surge.chat_ids:
             self._notifier_price_surge = TelegramNotifier(self.settings.telegram_price_surge)
             await self._notifier_price_surge.start()
             logger.info("Telegram-бот Price Surge запущен")
@@ -194,7 +178,6 @@ class Application:
                 config=self.settings.trading,
                 send_message=self._notifier.send_message if self._notifier else None,
                 trading_connector=self._trading_connector,
-                source="algo",
             )
             logger.info("Менеджер позиций запущен (real)")
 
@@ -209,43 +192,6 @@ class Application:
                     "Не удалось синхронизировать позиции. "
                     "Бот продолжит работу в режиме сбора данных"
                 )
-
-        # ИИ-режим: полностью отдельный аккаунт, отдельный PositionManager, без Telegram
-        # (send_message=None) — видимость только через БД (AgentDecision + Trade.source=
-        # 'agent'), см. AGENTS.md. Независим от trading.mode: на машине с алгоритмической
-        # торговлей на удалённом сервере локально держим trading.mode=signal (не дублировать
-        # real-исполнение на общем счёте), при этом ИИ-режим на отдельном счёте всё равно работает.
-        if self.settings.agent.enabled:
-            agent_cfg = self.settings.agent
-            if not agent_cfg.api_key or not agent_cfg.secret:
-                logger.error(
-                    "ИИ-режим включён, но не настроены api_key/secret отдельного "
-                    "аккаунта (agent.api_key/agent.secret в config.yaml)"
-                )
-            else:
-                self._agent_connector = ExchangeConnector(
-                    exchange_id=agent_cfg.exchange,
-                    api_key=agent_cfg.api_key,
-                    secret=agent_cfg.secret,
-                )
-                self._agent_positions = AgentPositionManager(
-                    config=self.settings.trading,
-                    send_message=None,
-                    trading_connector=self._agent_connector,
-                    source="agent",
-                    agent_config=agent_cfg,
-                )
-                logger.info(
-                    f"ИИ-режим включён (dry_run={agent_cfg.dry_run}, "
-                    f"аккаунт={agent_cfg.exchange})"
-                )
-                try:
-                    async with async_session() as session:
-                        await self._agent_positions.sync_positions(session)
-                        await self._agent_positions.load_state(session)
-                        await session.commit()
-                except Exception:
-                    logger.exception("Не удалось синхронизировать позиции ИИ-режима")
 
         # Первичное обновление рыночного контекста и отправка в Telegram
         if self._market_ctx and self.settings.market_context.enabled:
@@ -272,81 +218,12 @@ class Application:
 
         self._running = True
 
-        if self._agent_positions:
-            self._agent_watch_task = asyncio.create_task(self._agent_watch_loop())
-            self._agent_position_task = asyncio.create_task(self._agent_position_loop())
-
         await self._collector.start()
         logger.info("Приложение запущено")
-
-    async def _agent_watch_loop(self) -> None:
-        """Быстрый опрос цены монет под наблюдением ИИ-агента (его открытые/pending
-        сделки на отдельном аккаунте), независимо от общего цикла сканирования
-        всего рынка (который занимает несколько минут на полный проход)."""
-        interval = self.settings.agent.watch_interval_seconds
-        while self._running:
-            try:
-                async with async_session() as session:
-                    stmt = (
-                        select(Trade.symbol)
-                        .where(Trade.status.in_(["open", "pending"]), Trade.source == "agent")
-                        .distinct()
-                    )
-                    symbols = [row[0] for row in (await session.execute(stmt)).all()]
-                    for symbol in symbols:
-                        try:
-                            ticker = await self._agent_connector.fetch_ticker(symbol)  # type: ignore[union-attr]
-                            session.add(Ticker(**ticker))
-                        except Exception:
-                            logger.debug(f"Agent watch: не удалось обновить тикер {symbol}")
-                    if symbols:
-                        await session.commit()
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                logger.exception("Agent watch loop: ошибка цикла")
-            await asyncio.sleep(interval)
-
-    async def _agent_position_loop(self) -> None:
-        """Механическая синхронизация позиций ИИ-агента (TP/SL с биржей,
-        pending-входы) — НЕ привязана к циклу сканирования рынка (тот занимает
-        ~5 мин на полный проход). LLM-решения (вход/сопровождение) сюда не
-        входят — их принимает и применяет оркестратор (Claude Code /loop-скилл
-        + entry-agent/reeval-agent + scripts/agent_actions.py), см. AGENTS.md."""
-        while self._running:
-            try:
-                async with async_session() as session:
-                    agent_closed = await self._agent_positions.update_positions(session)  # type: ignore[union-attr]
-                    if agent_closed:
-                        logger.info(f"Agent: закрыто позиций: {len(agent_closed)}")
-                    await self._agent_positions.check_pending_entries(session)  # type: ignore[union-attr]
-                    await session.commit()
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                logger.exception("Agent position loop: ошибка цикла")
-            await asyncio.sleep(60)
 
     async def stop(self) -> None:
         logger.info("Остановка приложения...")
         self._running = False
-
-        if self._agent_watch_task and not self._agent_watch_task.done():
-            self._agent_watch_task.cancel()
-            try:
-                await self._agent_watch_task
-            except asyncio.CancelledError:
-                pass
-
-        if self._agent_position_task and not self._agent_position_task.done():
-            self._agent_position_task.cancel()
-            try:
-                await self._agent_position_task
-            except asyncio.CancelledError:
-                pass
-
-        if self._agent_connector:
-            await self._agent_connector.close()
 
         if self._collector:
             await self._collector.stop()
@@ -420,10 +297,6 @@ class Application:
             if activated:
                 logger.info(f"Активировано pending-входов за цикл: {len(activated)}")
 
-        # ИИ-режим полностью вынесен из этого цикла в независимый _agent_position_loop
-        # (см. start()) — сопровождение своих позиций не должно ждать завершения
-        # ~5-минутного скана всего рынка. Здесь остаётся только вход по сигналу (ниже).
-
         # 2. Аналитика — основная стратегия
         if self._detector:
             signals = await self._detector.analyze(session)
@@ -455,9 +328,6 @@ class Application:
                 # Сигнал в Telegram — всегда, с реальной причиной
                 if self._notifier:
                     await self._notifier.send_signal(sig, status=status)
-
-                # ИИ-режим по этому же сигналу решает независимо оркестратор
-                # (Claude Code /loop-скилл + entry-agent), не Python — см. AGENTS.md.
 
         # 3. Аналитика — price surge детектор (только сигналы)
         if self._ps_processor:

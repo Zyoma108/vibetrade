@@ -10,7 +10,6 @@
 - **SQLAlchemy 2.0 + aiosqlite** — SQLite в WAL-режиме, named Docker volume (см. "База данных")
 - **Pydantic 2.x** — валидация конфигурации (YAML + `${ENV_VAR}`)
 - **Alembic** — миграции схемы БД
-- **Claude Code** (подписка, не API-ключ) — ИИ-режим, опциональный оркестратор-скилл + сабагенты поверх алгоритма (см. ниже)
 - **Docker Compose** — деплой (один контейнер, `restart: unless-stopped`)
 
 ## Файловая структура
@@ -34,15 +33,12 @@ src/
 │   ├── price_surge.py         # PriceSurgeDetector — пампинг по чистой цене (только сигналы)
 │   └── price_surge_service.py # PriceSurgeSignalProcessor — обогащение и отправка сигналов пампа
 ├── executor/
-│   ├── position_manager.py    # PositionManager — открытие/закрытие/трекинг позиций (общая механика, algo+agent)
-│   └── agent_position_manager.py # AgentPositionManager(PositionManager) — apply_agent_* (решаемое агентом поведение)
-├── agent/                     # ИИ-режим (доп. режим, отдельный аккаунт) — см. раздел ниже
-│   └── tools.py                # AgentToolkit (данные) + build_strategy_briefing() — вызывается из scripts/agent_*.py, не из Python-цикла бота
+│   └── position_manager.py    # PositionManager — открытие/закрытие/трекинг позиций
 ├── notifier/
 │   └── telegram_bot.py        # TelegramNotifier — бот с командами и отправкой сигналов
 ├── storage/
 │   ├── database.py            # engine, async_session, init_db (с авто-ALTER TABLE)
-│   ├── models.py              # ORM: Candle, Ticker, OpenInterest, Signal, Trade, PriceSurgeSignal, MarketContextSnapshot, AgentDecision
+│   ├── models.py              # ORM: Candle, Ticker, OpenInterest, Signal, Trade, PriceSurgeSignal, MarketContextSnapshot, BotState
 │   └── stats.py               # trade_stats() — сбор статистики для команды /stats
 ├── backtest/
 │   └── runner.py              # Симуляция стратегии на исторических свечах
@@ -52,15 +48,11 @@ src/
 │   ├── sweep_partial_close_qty.py # Свип partial_close_qty_pct (доля объёма на партиале) на том же движке
 │   ├── sweep_rr.py              # Свип risk_reward_ratio (TP=SL×RR) на том же движке
 │   ├── analyze_tp_upside.py     # Для сделок, дошедших до полного TP — сколько доп. движения было упущено после хардового TP-выхода
-│   ├── analyze_missed_signals.py # Поиск пропущенных сетапов (сильные движения без сигналов)
-│   ├── agent_data.py            # ИИ-режим: CLI для сабагентов (только чтение, AgentToolkit)
-│   ├── agent_briefing.py        # ИИ-режим: печатает strategy briefing из живого конфига
-│   └── agent_actions.py         # ИИ-режим: CLI для оркестратора (открыть/подтянуть SL/продлить/закрыть)
+│   └── analyze_missed_signals.py # Поиск пропущенных сетапов (сильные движения без сигналов)
 tests/
 │   ├── test_data_provider.py     # Тесты DataProvider и CandleCache
 │   ├── test_detector.py          # Тесты SetupDetector (volume pattern, price trend)
-│   ├── test_position_manager.py  # Тесты PositionManager (Circuit Breaker, TP/SL, позиции)
-│   └── test_agent.py             # Тесты ИИ-режима (tighten SL, hold extension, source scoping, AgentToolkit, strategy briefing)
+│   └── test_position_manager.py  # Тесты PositionManager (Circuit Breaker, TP/SL, позиции)
 config/
 └── config.yaml                # Боевая конфигурация (единственная — YAML + `${ENV_VAR}` из `.env`)
 data/
@@ -282,28 +274,15 @@ OI продолжает собираться в БД — выключен тол
 - Если по символу появилась позиция на бирже → лимитник исполнился (как **maker**) → `_activate_pending_entry()`: перевод в `status="open"`, выставление TP/SL и лимитника частичной фиксации (то же самое, что раньше делалось сразу в `open_position`).
 - Если `now >= pending_expires_at` и позиции всё ещё нет → `_expire_pending_entry()`: отмена ордера, `status="expired"` (не считается ни открытой, ни закрытой сделкой).
 
-На agent-пайплайне (`source='agent'`) пока лимитник ждёт исполнения, `reeval-agent` может его
-подвинуть, перевести в market или отменить по собственному решению (`status="cancelled"` —
-отдельно от механического `expired`) — см. раздел "ИИ-режим" → "Сопровождение".
-
-`Trade.signal_price` — референсная цена в момент сигнала (для pending-входа), записывается один
-раз при создании и НЕ перезаписывается при repricing (в отличие от `entry_price`, который каждый
-reprice обновляет на новую цену лимита) — неизменный якорь для проверки дрейфа ниже.
-
-**Жёсткий рельс (фикс аудита 27.07.2026):** `AgentPositionManager.apply_agent_reprice_pending`
-отклоняет repricing, если текущая цена уже ушла от `signal_price` больше чем на
-`agent.reprice_max_drift_from_signal_pct` (по умолчанию 12%) — независимо от того, что
-попросила модель. Без этого рельса repricing от текущей (уже смещённой) цены превращал
-"лимитник на откате от сигнала" в "покупку почти на пике уже состоявшегося блоу-оффа"
-(кейс LPT — крупнейший убыток недели в аудите). `reeval-agent` видит `distance_from_signal_pct`
-в `get_open_position` и должен сам предпочесть `cancel_pending` вместо reprice, если дрейф уже
-большой — но рельс в коде страхует и от ошибки модели.
+`Trade.signal_price` — референсная цена в момент сигнала, записывается один раз при создании и
+НЕ перезаписывается фактической ценой заполнения (в отличие от `entry_price`) — неизменный якорь
+для замера реального проскальзывания входа (см. `backtest_slippage_pct`).
 
 Бэктест (`runner.py`) симулирует то же самое: `PendingEntry` создаётся вместо `SimPosition` при сигнале, на каждом баре проверяется `low <= limit_price` (заполнение) или истечение таймаута — независимо от `CYCLE_DELAY_BARS`, как и проверка TP/SL уже открытых позиций.
 
 **Свип по `pending_entry_pullback_pct` (июль 2026, 3 БД, см. память `pending-entry-pullback-sweep-july-2026`)**: немонотонная зависимость — мелкий откат (0.3-0.8%) хуже baseline на всех базах, глубокий (≥1.2%) лучше на 2 из 3 (кроме 22.06-30.06, где лучшие движения не дают отката вообще). Выбрано `1.5%` как лучшее по сумме PnL и PnL/сделку в свипе, но подтверждено не на всех периодах.
 
-**Аудит на живой торговле, algo vs ИИ (27.07.2026, см. память `algo-vs-ai-audit-july2026`)**: на алго-пути (`pending_entry_pullback_pct` из общего конфига, без гибкости reeval) механизм показал обратную селекцию — из 17 сигналов 10 протухли, не откатившись к цели (контрфакт: минимум 2 явных TP + 3 вероятных безубытка вместо нуля), а из 7 исполненных 6 — убыточные, потому что лимитник по конструкции исполняется именно тогда, когда цена уже развернулась внутри sustain-окна. Поэтому `pending_entry_pullback_pct` в проде **возвращён в 0** (market сразу) для алго-пути. Механизм (`_place_pending_entry`/`check_pending_entries`) не удалён — он остаётся единственным способом входа на ИИ-пайплайне, где `pullback_pct` каждый раз выбирает entry-agent индивидуально под сетап (`pullback_pct_override`, диапазон `entry_pullback_min_pct`/`max_pct`), а не фиксированный конфиг — там гибкость reeval (reprice/market/cancel по ходу) компенсирует то, что на алго-пути ломает результат.
+**Аудит на живой торговле, algo vs ИИ (27.07.2026, см. память `algo-vs-ai-audit-july2026`)**: на алго-пути (`pending_entry_pullback_pct` из общего конфига, без гибкости reeval) механизм показал обратную селекцию — из 17 сигналов 10 протухли, не откатившись к цели (контрфакт: минимум 2 явных TP + 3 вероятных безубытка вместо нуля), а из 7 исполненных 6 — убыточные, потому что лимитник по конструкции исполняется именно тогда, когда цена уже развернулась внутри sustain-окна. Поэтому `pending_entry_pullback_pct` в проде **возвращён в 0** (market сразу). Механизм (`_place_pending_entry`/`check_pending_entries`) не удалён — остаётся в коде на случай пересвипа порога.
 
 ### Мониторинг (каждый цикл)
 1. Сверка позиций с биржей (закрытые по TP/SL → запись реальной цены выхода)
@@ -338,11 +317,11 @@ reprice обновляет на новую цену лимита) — неизм
 | `maker_fee_pct` | 0.02 | Комиссия мейкера (лимитный reduce-only ордер), % от notional |
 | `backtest_slippage_pct` | 0.05 | Допущение на проскальзывание входа в бэктесте, % (0 = выкл). 0.3 было неизмеренным допущением и стоило ~0.08R мат. ожидания на сделку в отчётах. Точно измерить можно будет по `trades.signal_price` — его начали писать на market-входах 25.08.2026 |
 | `pending_entry_pullback_pct` | 0 (выкл для алго, см. ниже) | Вход лимитником на откате от цены сигнала, % (0 = выкл — market сразу) |
-| `pending_entry_timeout_minutes` | 9.0 | Актуально только для ИИ-режима — там свой откат выбирает entry-agent |
+| `pending_entry_timeout_minutes` | 9.0 | Актуально только при `pending_entry_pullback_pct > 0` |
 
 **Partial close qty — статус эксперимента (12.08.2026):** до этой даты доля объёма, закрываемая
 по партиал-триггеру, была захардкожена как `quantity / 2` (50%) в 4 местах кода (открытие
-позиции, активация pending-лимитника, market-фолбэк, ИИ-режим) — не было параметром конфига.
+позиции, активация pending-лимитника, market-фолбэк) — не было параметром конфига.
 Вынесено в `partial_close_qty_pct`. Свип на `data/trading_bot.db` (24.07–09.08, n=39 сделок,
 `partial_close_pct`=35% не менялся) дал почти точную линейную зависимость total PnL от доли —
 $30.50 при 5% до $23.48 при 80%, монотонно убывает. Механизм: перевод SL в безубыток при
@@ -399,9 +378,8 @@ giveback к дедлайну 2-61% в зависимости от монеты, 
 полного цикла сборщика, после чего запись всё равно провалилась.
 
 *v2 (текущий):* `_save_state(session=None)` получила опциональный параметр `session`. Вызовы из
-`_close_position()` (у которой `session` есть в стеке через `update_positions`/
-`apply_agent_close` — протянут явным параметром через `_resync_missing_tpsl`/
-`_close_from_exchange`/`_check_time_exit`) пишут ПРЯМО В НЕГО (`session.flush()`, без своего
+`_close_position()` (у которой `session` есть в стеке через `update_positions` — протянут явным
+параметром через `_resync_missing_tpsl`/`_close_from_exchange`/`_check_time_exit`) пишут ПРЯМО В НЕГО (`session.flush()`, без своего
 `commit()` — закоммитится вместе с остальным в конце внешней транзакции). Это та же самая
 транзакция — гонки за блокировкой физически нет. Независимая сессия с ретраем (v1) осталась
 fallback только для вызовов БЕЗ session в стеке (`_track_error`/`_reset_errors` — синхронный код
@@ -418,219 +396,15 @@ Circuit Breaker больше не имеет значения, раз запис
   - Риск в долларах фиксирован относительно депозита
   - Множитель рыночного режима применяется к `risk_budget` (CAUTIOUS = ×0.5)
 
-## ИИ-режим (оркестратор-скилл + сабагенты, отдельный аккаунт)
-
-**Доп. режим, не заменяет алгоритм** (`agent.enabled: false` по умолчанию — при выключенном
-режиме код бота работает байт-в-байт как раньше). Мотивация — гипотеза, что часть входов
-алгоритма систематически запоздалые (см. `pending_entry_pullback_pct` выше); ИИ-режим — способ
-проверить, добавляет ли LLM-контекст (funding, стакан, история монеты, старшие таймфреймы),
-которого алгоритм не видит, ценность поверх чисто механических фильтров.
-
-**Архитектура — параллельный пайплайн, не вето поверх алгоритма.** Оба пайплайна получают одни
-и те же сигналы от `SetupDetector`, но исполняются НЕЗАВИСИМО:
-- **algo** — `self._positions`, текущий `_trading_connector` (основной аккаунт), не изменился.
-- **agent** — `self._agent_positions`, ОТДЕЛЬНЫЙ аккаунт биржи (`agent.exchange`/`api_key`/`secret`
-  в конфиге, отдельные переменные окружения — не путать с `trading.*`). Изоляция риска — сам факт
-  отдельного аккаунта, а не только `dry_run`.
-
-`PositionManager` получил параметр `source` (`"algo"` / `"agent"`) — все запросы/лимиты/кулдауны
-(`_count_open`, `_has_position`, `_in_cooldown`, `update_positions`, `check_pending_entries`)
-скоуплены по `source`, поэтому два пайплайна не видят и не блокируют друг друга, даже сидя в одной
-таблице `trades`.
-
-**Python не вызывает LLM сам вообще** (изменено после того, как выяснилось: pay-per-token
-Anthropic API недоступен, есть только подписка Claude, которая работает через Claude Code, а не
-через прямой API-ключ). Решения принимает **оркестратор** — автономная `/loop`-сессия Claude
-Code по скиллу `.claude/skills/vibetrade-agent-loop`, которую пользователь запускает вручную и
-держит открытой (для начала — приемлемо, обсуждалось явно). Она сама следит за новыми сигналами
-и открытыми сделками агент-пайплайна, спавнит сабагентов `entry-agent`/`reeval-agent` (тот же
-`Agent`-тул, которым Claude Code вызывает любых сабагентов), применяет их вердикт и **рассказывает
-текстом**, что сделала за цикл — это и есть единственный канал видимости (pull, без
-пуш-уведомлений — по решению пользователя).
-
-**`agent.enabled=true` полностью отключает Telegram во всём приложении**, не только для
-ИИ-пайплайна. `Application.start()` не поднимает ни основной `TelegramNotifier`, ни
-`telegram_price_surge` — значит, ни команды (`/status`, `/pause`, `/positions`, ...), ни
-уведомления algo-пайплайна (открытие/закрытие сделок, Circuit Breaker, смена рыночного режима),
-ни сигналы `PriceSurgeDetector` никуда не отправляются, пока ИИ-режим включён. Единственный канал
-видимости в этом состоянии — беседа оркестратора (см. выше) и прямые запросы к
-`data/trading_bot.db`. Чтобы вернуть Telegram — выключить `agent.enabled` и перезапустить бота.
-
-### Три уровня разделения обязанностей
-1. **Python-бот** (`src/core/app.py`, `src/executor/position_manager.py`) — генерирует сигналы
-   (не меняется), механически синхронизирует agent-пайплайн с биржей (`_agent_position_loop`:
-   TP/SL-синк, pending-входы) и держит быстрый опрос цены наблюдаемых монет
-   (`_agent_watch_loop`). LLM не вызывает.
-2. **Сабагенты** `.claude/agents/entry-agent.md` / `reeval-agent.md` — только читают данные
-   (`tools: Bash`, разрешён исключительно `python scripts/agent_data.py <tool> '<json>'`) и
-   выносят вердикт текстом/JSON. Не имеют доступа к исполнению — не могут сами открыть/закрыть
-   сделку.
-3. **Оркестратор** (скилл `vibetrade-agent-loop`) — единственное место, где вердикт сабагента
-   реально применяется: вызывает `scripts/agent_actions.py <action> <decision.json>`, который
-   дёргает `apply_agent_*`/`open_position` в `AgentPositionManager`
-   (`src/executor/agent_position_manager.py` — наследник `PositionManager`, куда вынесено ВСЁ
-   решаемое агентом поведение, чтобы не трогать код алго-режима при его расширении) и пишет
-   строку в `agent_decisions`.
-
-### Strategy briefing: полная картина стратегии, не только общие рекомендации
-`build_strategy_briefing()` (`src/agent/tools.py`, обёрнута в `scripts/agent_briefing.py`)
-собирает динамический блок из ЖИВОГО конфига (`StrategyConfig`/`TradingConfig`, а не хардкод
-текстом в `.claude/agents/*.md` — иначе разойдётся при правке `config.yaml`): реальные пороги
-детектора (`volume_surge_mult`, `sustain_bars`, `oi_slope_min_pct`, диапазон роста цены,
-антиспайк/exhaustion), реальные риск-параметры этого аккаунта (`stop_loss_pct`,
-`risk_reward_ratio`, `leverage`, `partial_close_pct`, `partial_close_qty_pct`, `max_hold_hours`,
-`pending_entry_pullback_pct`), пороги Circuit Breaker и явное упоминание известной проблемы
-позднего входа (см. `pending-entry-pullback-sweep-july-2026`). Оркестратор вызывает скрипт раз
-за цикл и вставляет вывод текстом в промпт сабагенту.
-
-### Вход
-Оркестратор находит сигналы без записи `kind='entry'` в `agent_decisions` не старше ~15 минут
-(детали — в самом скилле), спавнит `entry-agent` с briefing + деталями сигнала. Сабагент сам
-решает, какие инструменты вызвать (funding rate, сводка стакана, тренд OI, история пампов
-монеты, рыночный контекст, старшие таймфреймы, активность сигналов по другим монетам — прокси
-секторальной ротации), отвечает `{"approve": bool, "entry_mode": "limit"|"market",
-"pullback_pct": float, "reasoning": str}` — `entry_mode`/`pullback_pct` опциональны (по
-умолчанию лимитник на конфиговом откате, как у алго-режима); если `entry_mode="limit"`, сам
-откат агент может выбрать по глубине стакана, код клэмпит его в
-`agent.entry_pullback_min_pct`..`max_pct`. Оркестратор передаёт это в `scripts/agent_actions.py
-open_entry` — скрипт сам учитывает `agent.dry_run` (при `true` решение пишется в
-`agent_decisions`, сделка не открывается даже на изолированном аккаунте) и `entry_gate_enabled`.
-
-### Ручной запрос пользователя
-Пользователь может в любой момент попросить оркестратора (прямо в беседе, не по расписанию)
-проверить конкретную монету, которую заметил сам, а детектор сигнал ещё не дал/отфильтровал.
-Оркестратор сам (без сабагента, бесплатно) делает первичную проверку через `agent_data.py`
-(`get_symbol_snapshot`/`get_oi_trend` — есть ли объективный рост цены/объёма) и только если
-похоже на реальный сетап — вызывает `scripts/agent_actions.py create_manual_signal`, который
-вставляет строку в `signals` в обход детектора (`setup_type="manual"`, `direction="long"`
-всегда — система long-only). Дальше сигнал идёт по тому же пути, что обычный: briefing →
-`entry-agent` → `open_entry` с полученным `signal_id`, без каких-либо изменений в остальном
-пайплайне. `create_manual_signal` сам добавляет в `message` пометку
-`[РУЧНОЙ ЗАПРОС — детектор объём/OI/цену не проверял]` — `entry-agent.md` учит распознавать эту
-пометку и в этом случае сначала проверять сам факт движения (объём/OI), а не только контекст
-как обычно, поскольку обычное допущение "детектор уже подтвердил объём/OI/цену" здесь не
-выполняется. Подробности процесса — `.claude/skills/vibetrade-agent-loop/SKILL.md`, "Ручной
-запрос пользователя".
-
-### Сопровождение
-Оркестратор находит сделки agent-пайплайна (`status IN ('open','pending')`) без свежей
-`reeval`-записи за `agent.reeval_interval_minutes`, спавнит `reeval-agent` с briefing +
-`trade_id`. Сабагент вызывает `get_open_position` первым делом — оно возвращает `status`,
-определяющий, какая ветка действий уместна:
-
-**`status="open"`** — текущий стоп/тейк/PnL, ответ `hold`/`tighten_sl`/`raise_tp`/
-`partial_close`/`extend_hold`/`close`:
-- **`tighten_sl`** → `apply_agent_tighten_sl` — переиспользует `set_tpsl()` (тот же механизм, что
-  и перевод в безубыток). Жёсткий рельс **в коде**, не только в промпте: сравнивает с
-  `Trade.current_sl_price` (последний известный эффективный стоп) и отклоняет любую попытку
-  ослабить SL.
-- **`raise_tp`** → `apply_agent_raise_tp` — симметрично `tighten_sl`: сравнивает с
-  `Trade.current_tp_price` (или формульным TP, если ещё не переставлялся) и отклоняет попытку
-  понизить тейк.
-- **`partial_close`** → `apply_agent_partial_close` — фиксирует ту же долю объёма, что и у
-  автоматического триггера (`partial_close_qty_pct`, сейчас 30%), но по рынку немедленно, не
-  дожидаясь ценового порога (`partial_close_pct`) — агент решает открыть эту фиксацию раньше по
-  своему усмотрению. Не трогает SL — это отдельное независимое решение (`tighten_sl`). Не
-  сработает повторно, если `Trade.partial_closed` уже `true`.
-- **`extend_hold`** → `apply_agent_hold_extension` — двигает `Trade.llm_hold_until`, который
-  `_check_time_exit` учитывает как `max(механический_дедлайн, llm_hold_until)` — агент может
-  ТОЛЬКО продлить удержание, никогда не сократить. Капается конфигом и за раз
-  (`max_hold_extension_hours`), и суммарно на сделку (`max_hold_extension_total_hours`, счётчик —
-  `Trade.llm_hold_extension_total_hours`).
-- **`close`** → `apply_agent_close` — снимает висящий лимитник частичной фиксации
-  (`cancel_all_orders`) и закрывает по рынку, `reason="llm_close"`.
-
-**`status="pending"`** (лимитник ещё не исполнился) — вместо PnL/TP/SL отдаётся
-`limit_price`/`distance_to_fill_pct`/`minutes_until_expiry`, ответ
-`keep_pending`/`reprice`/`enter_market`/`cancel_pending`:
-- **`reprice`** → `apply_agent_reprice_pending` — снимает старый лимитник, ставит новый на
-  свежей цене с новым откатом, сбрасывает таймаут заново.
-- **`enter_market`** → `apply_agent_convert_to_market` — снимает лимитник, входит по рынку тем
-  же объёмом, дальше стандартная настройка TP/SL и лимитника частичной фиксации (общий с
-  механическим путём `_setup_tp_sl_and_partial`).
-- **`cancel_pending`** → `apply_agent_cancel_pending` — снимает лимитник, `status="cancelled"`
-  (отдельно от механического `expired` — видно, где агент сам отказался от сетапа).
-
-Все действия (кроме `open_entry`) перед изменением перепроверяют состояние НА БИРЖЕ — не только
-`Trade.status` в БД, — потому что механический `_agent_position_loop` опрашивает биржу
-независимо и может исполнить/снять/закрыть сделку, пока идёт LLM round-trip
-(`agent_actions.py._verify_open`/`_verify_pending`; см. `AgentPositionManager.
-_exchange_has_open_position`). При расхождении действие просто не применяется (`applied: false`
-в ответе `agent_actions.py`) — это ожидаемо, не ошибка.
-
-Штатные биржевые TP/SL остаются главной защитой независимо от исхода работы агента — если
-оркестратор упал/сессия закрыта/сабагент ошибся, позиция всё равно защищена резидентным
-стоп-лоссом на бирже.
-
-### Механические таски бота (`app.py`) — не зависят от цикла сканирования рынка
-Полный цикл сканирования всего рынка занимает несколько минут — слишком редко для сопровождения
-конкретных открытых сделок. Два независимых `asyncio`-таска, оба стартуют в `Application.start()`
-и останавливаются в `stop()`:
-- `_agent_watch_loop` (`agent.watch_interval_seconds`, по умолчанию 30с) — опрашивает **только**
-  монеты под наблюдением агента (его открытые/pending сделки) напрямую через `fetch_ticker`.
-- `_agent_position_loop` (60с) — TP/SL-синхронизация с биржей и pending-входы для agent-пайплайна
-  (`update_positions`/`check_pending_entries`). LLM здесь не участвует — это делает оркестратор.
-
-Оба работают только при `agent.enabled=true` — при выключенном режиме не создают лишней нагрузки.
-
-### Данные, которых раньше не было
-`fetch_funding_rate`/`fetch_order_book_summary` — новые методы `ExchangeConnector`
-(агрегаты — spread%, глубина в USD на ±0.5/1% от mid, **не сырые уровни стакана**, чтобы не
-раздувать контекст LLM шумом). Старшие таймфреймы для уровней поддержки/сопротивления —
-`get_higher_timeframe_history` дёргает биржу напрямую по требованию (не хранится в БД).
-`AgentToolkit._tool_get_market_context` читает последний снимок `MarketContextSnapshot` из БД
-(пишется ботом каждый цикл) — не требует живого подключения к TradingView.
-
-### Конфигурация (`config.yaml → agent`)
-
-| Параметр | По умолчанию | Смысл |
-|----------|-------------|-------|
-| `enabled` | `false` | Включить ИИ-режим |
-| `dry_run` | `true` | Логировать решения, не открывать реальные сделки даже на своём аккаунте |
-| `exchange` / `api_key` / `secret` | — | Отдельный аккаунт биржи (не `trading.*`) |
-| `model` | `sonnet` | Модель Claude для сабагентов entry-agent/reeval-agent |
-| `reeval_interval_minutes` | 20.0 | Раз во сколько минут переоценивать одну ОТКРЫТУЮ позицию (сверяет оркестратор) |
-| `pending_reeval_interval_minutes` | 2.0 | То же для ещё НЕ исполненного лимитника (`status=pending`) — короче, т.к. живёт всего `pending_entry_timeout_minutes` (фикс аудита 27.07.2026: раньше общий 20-минутный каданс не успевал среагировать до истечения 9-минутного таймаута) |
-| `watch_interval_seconds` | 30 | Раз во сколько секунд обновлять цену наблюдаемых монет |
-| `max_hold_extension_hours` / `_total_hours` | 12.0 / 24.0 | Кап продления удержания, за раз / суммарно |
-| `allow_sl_tighten` / `allow_early_close` | `true` | Разрешить соответствующее действие (ослабление SL запрещено всегда) |
-| `allow_raise_tp` | `true` | Разрешить поднимать тейк (опустить нельзя никогда) |
-| `allow_partial_close` | `true` | Разрешить фиксировать часть позиции по рынку до авто-триггера |
-| `allow_pending_management` | `true` | Разрешить двигать/переводить в market/отменять свой неисполненный лимитник входа |
-| `entry_pullback_min_pct` / `max_pct` | 0.5 / 4.0 | Диапазон отката для лимитника входа, который может выбрать агент (клэмп в коде) |
-| `reprice_max_drift_from_signal_pct` | 12.0 | Жёсткий рельс: repricing отклоняется, если цена ушла от `signal_price` больше чем на этот % |
-| `daily_call_budget` | 200 | Максимум запусков сабагентов в сутки (оркестратор сверяет с числом строк `agent_decisions` за сегодня) |
+## База данных
 
 ### ⚠️ Доступ к БД только через `docker exec`, никогда напрямую с хоста
 Бот работает в Docker-контейнере (`docker-compose.yml`, `container_name: trading-bot`), `data/`
 внутри контейнера — **named Docker volume** (`vibetrade_data`), не bind-mount с хоста — то есть
-хостовый `sqlite3 data/trading_bot.db`/`python scripts/agent_*.py` в принципе не видит файл бота
-(это специально: старый bind-mount дважды приводил к порче БД, см. "База данных" ниже). **Все
-обращения к БД — только `docker exec trading-bot <команда>`** (Dockerfile копирует `scripts/` в
-образ специально для этого). Скилл и оба сабагента уже написаны с этим требованием — не убирать
-обёртку при правке.
-
-### Файлы
-- `src/agent/tools.py` — `AgentToolkit` (данные) + `build_strategy_briefing()` + `AGENT_VERSION`
-- `src/executor/agent_position_manager.py` — `AgentPositionManager(PositionManager)`, все
-  `apply_agent_*` (решаемое агентом поведение, изолировано от кода алго-режима)
-- `scripts/agent_data.py` — CLI для сабагентов (только чтение, `AgentToolkit.dispatch`)
-- `scripts/agent_briefing.py` — печатает strategy briefing
-- `scripts/agent_actions.py` — CLI для оркестратора (единственное место, где решение
-  применяется: `open_entry`/`tighten_sl`/`raise_tp`/`partial_close`/`extend_hold`/`close`/
-  `reprice_pending`/`enter_market`/`cancel_pending`, пишет `agent_decisions`)
-- `.claude/agents/entry-agent.md`, `.claude/agents/reeval-agent.md` — сабагенты-судьи
-- `.claude/skills/vibetrade-agent-loop/SKILL.md` — оркестратор (автономный `/loop`)
-
-### Статус на момент внедрения (июль 2026)
-Включено с `enabled=false`, `dry_run=true` по умолчанию — режим ещё не запускался "в бою".
-Валидировать на исторических БД нельзя: funding rate и стакан не сохранены в прошлых данных —
-качество решений можно оценить только вперёд, по новым логам `agent_decisions`. Версия инструкций
-сабагентов/скилла логируется в `agent_decisions.agent_version` (`AGENT_VERSION` в
-`src/agent/tools.py`) — при значимой правке `.claude/agents/*.md` или скилла следует её
-увеличивать, чтобы позже можно было сопоставить качество решений с конкретной редакцией.
-
-## База данных
+хостовый `sqlite3 data/trading_bot.db` в принципе не видит файл бота (это специально: старый
+bind-mount дважды приводил к порче БД, см. ниже). **Все обращения к БД — только
+`docker exec trading-bot <команда>`** (Dockerfile копирует `scripts/` в образ специально для
+этого).
 
 SQLite в **WAL-режиме** (`data/trading_bot.db` внутри контейнера, на named Docker volume
 `vibetrade_data` — не bind-mount с хоста). Миграции: Alembic + ручной `ALTER TABLE` в `init_db()`
@@ -642,11 +416,11 @@ bind-mount (`./data:/app/data`) — WAL полагается на shared-memory 
 Desktop for Mac, независимо от того, кто пишет: хост или несколько соединений внутри одного
 контейнера. Это дважды привело к порче БД (`market_context_snapshots`, затем индекс
 `ix_candles_symbol`) — второй раз, судя по всему, из-за возросшего числа конкурентных SQLite-
-соединений внутри контейнера после включения `agent.enabled` (`_agent_watch_loop`/
-`_agent_position_loop` — отдельные сессии поверх основного цикла сборщика). Временный фикс —
-переключение на `DELETE`-режим (обычные файловые локи вместо mmap) — устранил порчу, но ценой
-полной сериализации записи: основной цикл сборщика держит одну транзакцию на весь ~5-мин скан,
-и конкурентные таски ИИ-режима немедленно ловили `database is locked`. **Финальный фикс**:
+соединений внутри контейнера (в тот период поверх основного цикла сборщика работали
+дополнительные фоновые таски со своими сессиями). Временный фикс — переключение на
+`DELETE`-режим (обычные файловые локи вместо mmap) — устранил порчу, но ценой полной
+сериализации записи: основной цикл сборщика держит одну транзакцию на весь ~5-мин скан, и
+конкурентные писатели немедленно ловили `database is locked`. **Финальный фикс**:
 `data/` переведена в named Docker volume (`docker-compose.yml`) — хранится в файловой системе
 Docker VM напрямую, не через host-bridge, поэтому `mmap` работает штатно и WAL восстановлен.
 Хостовый `data/` теперь содержит только исторические БД для бэктестов
@@ -663,8 +437,8 @@ Docker VM напрямую, не через host-bridge, поэтому `mmap` �
 | `signals` | Сигналы основной стратегии, включает `missed_reason` (причина пропуска) |
 | `price_surge_signals` | Сигналы PriceSurgeDetector |
 | `filtered_signals` | Сетапы, отсеянные `SetupDetector` до появления в `signals` (см. ниже) |
-| `trades` | Торговые позиции (вход/выход, PnL, partial close, TP/SL статус), `source` — 'algo'/'agent' |
-| `agent_decisions` | Решения ИИ-агента (вход/сопровождение) — verdict, reasoning, полный трейс вызовов инструментов |
+| `trades` | Торговые позиции (вход/выход, PnL, partial close, TP/SL статус) |
+| `bot_state` | Персистентное состояние Circuit Breaker / бан-листа / error-cooldown |
 | `market_context_snapshots` | Снимки рыночного контекста (regime, trend, Supertrend, BTC/OTHERS) |
 
 ### Аудит отфильтрованных сетапов (`filtered_signals`)
@@ -695,8 +469,6 @@ WHERE date(timestamp) = date('now') ORDER BY timestamp DESC;
 ## Telegram-боты
 
 Два независимых бота (основной + price surge), каждый со своим токеном. **Важно:** токены должны быть разными, иначе `TelegramConflictError`.
-
-**Оба полностью отключаются при `agent.enabled: true`** — см. раздел "ИИ-режим" выше.
 
 ### Команды основного бота
 
@@ -799,7 +571,6 @@ WHERE date(timestamp) = date('now') ORDER BY timestamp DESC;
 - **Секреты**: `.env` (не коммитится), содержит токены API и Telegram
 - **Две стратегии**: `strategy` (основная, с торговлей) и `strategy_price_surge` (только сигналы)
 - **Два Telegram-бота**: `telegram` и `telegram_price_surge` (независимые токены)
-- **ИИ-режим** (если `agent.enabled: true`): API-ключ Anthropic НЕ нужен — LLM вызывается через Claude Code (подписка), см. раздел "ИИ-режим". Нужны только `AGENT_BYBIT_API_KEY`/`AGENT_BYBIT_SECRET` — ключи ОТДЕЛЬНОГО аккаунта биржи (не путать с `trading.*`). Плюс запущенная и держащаяся открытой `/loop`-сессия по скиллу `vibetrade-agent-loop` — это не переменная окружения, а отдельный процесс, который пользователь стартует сам
 
 ## Запуск
 
@@ -873,4 +644,3 @@ make test
 - **Новый сервис-обработчик** — по аналогии с `PriceSurgeSignalProcessor`: инкапсулирует обогащение сигналов, persistence и нотификации.
 - **Новая биржа** — добавить `ExchangeConfig` в `config.yaml`, ccxt поддерживает её из коробки
 - **Нотификации в другой канал** — реализовать аналог `TelegramNotifier` с тем же интерфейсом
-- **Новый инструмент для ИИ-агента** — добавить метод `_tool_*` в `AgentToolkit` (`src/agent/tools.py`) и упомянуть его в `.claude/agents/entry-agent.md`/`reeval-agent.md` (список доступных `<tool_name>` для `scripts/agent_data.py`). Инструмент должен отдавать агрегированные метрики, не сырые API-дампы (экономия контекста LLM)

@@ -131,37 +131,21 @@ docker cp trading-bot:/app/data/trading_bot.db data/trading_bot.live-snapshot.db
 | quantity | FLOAT | Размер позиции |
 | entry_time, exit_time | DATETIME | Время входа/выхода |
 | pnl | FLOAT | Прибыль/убыток в USDT, **уже net-of-fee** |
-| status | VARCHAR(16) | pending / open / closed / expired / cancelled — pending и expired/cancelled актуальны в основном для ИИ-режима (pending-вход на откате); expired = не исполнился по таймауту, cancelled = агент сам отменил |
+| status | VARCHAR(16) | pending / open / closed / expired — pending/expired актуальны только при `pending_entry_pullback_pct > 0` (вход лимитником на откате); expired = лимитник не исполнился по таймауту |
 | tp_sl_set, partial_closed | BOOLEAN | Флаги управления |
 | partial_pnl | FLOAT | PnL от частичных закрытий |
 | fee | FLOAT | Суммарная комиссия по всем «ногам» сделки (уже учтена в pnl) — полезно при сверке с бэктестом (модель комиссии — известный источник parity-расхождений) |
 | pending_expires_at | DATETIME | Когда снять неисполненный лимитник входа |
-| **source** | VARCHAR(16) | **`algo` / `agent`** — какой пайплайн открыл сделку (разные аккаунты биржи). **Всегда фильтруй по нему**, если в БД могут быть обе — см. «Область аудита» |
-| llm_hold_until, llm_hold_extension_total_hours | DATETIME, FLOAT | Продление удержания ИИ-агентом (agent-only) |
-| current_sl_price, current_tp_price | FLOAT | Последний эффективный SL/TP (агент может их двигать; NULL TP = формульный) |
-| signal_price | FLOAT | Референсная цена на момент сигнала (agent pending-вход) — неизменный якорь для проверки дрейфа при repricing |
-
-**agent_decisions** — Решения ИИ-агента (entry-agent/reeval-agent), только для `source='agent'`.
-Полный трейс для аудита качества LLM-решений.
-| Колонка | Тип | Описание |
-|---|---|---|
-| timestamp | DATETIME | Время решения |
-| kind | VARCHAR(16) | entry / reeval |
-| signal_id, trade_id | INTEGER | FK → signals.id / trades.id |
-| symbol | VARCHAR(32) | Торговая пара |
-| verdict | VARCHAR(32) | approve/reject (entry); hold/tighten_sl/extend_hold/close/... (reeval) |
-| reasoning | TEXT | Обоснование LLM — читай его, это не просто лог |
-| tool_calls_json | TEXT | JSON-трейс вызовов инструментов |
-| applied | BOOLEAN | false в dry_run или если решение не удалось применить технически |
-| model, agent_version | VARCHAR | Модель и версия системного промпта (для сопоставления качества решений с редакцией промпта) |
-| latency_ms | INTEGER | Время ответа LLM |
+| source | VARCHAR(16) | Всегда `algo`. В старых БД встречается `agent` — строки удалённого ИИ-режима, торговавшего на отдельном аккаунте; **исключай их из аудита** (`WHERE source = 'algo'`), иначе испортишь статистику чужой стратегией |
+| current_sl_price | FLOAT | Последний эффективный SL (перевод в безубыток после частичной фиксации) |
+| signal_price | FLOAT | Референсная цена на момент сигнала — неизменный якорь для замера фактического проскальзывания входа |
 
 **bot_state** — Персистентное состояние Circuit Breaker / бан-листа / error-cooldown, одна строка
-на `source` (algo/agent — пайплайны не делят состояние). Смотри сюда, если подозреваешь, что
-Circuit Breaker не сработал или не пережил рестарт — это был реальный P0-баг в прошлом.
+на `source`. Смотри сюда, если подозреваешь, что Circuit Breaker не сработал или не пережил
+рестарт — это был реальный P0-баг в прошлом.
 | Колонка | Тип | Описание |
 |---|---|---|
-| source | VARCHAR(16) PK | algo / agent |
+| source | VARCHAR(16) PK | Всегда `algo` (см. `trades.source`) |
 | consecutive_losses | INTEGER | Текущая серия убытков |
 | circuit_breaker_until | DATETIME | До какого момента полная остановка |
 | banned_symbols_json | TEXT | Чёрный список монет |
@@ -180,20 +164,13 @@ Circuit Breaker не сработал или не пережил рестарт 
 
 ---
 
-## Область аудита: algo / agent / both
+## Область аудита
 
-`algo` (основная автоматическая стратегия) и `agent` (ИИ-режим, отдельный аккаунт биржи,
-`.claude/skills/vibetrade-agent-loop`) торгуют **в одной БД**, различаясь только `trades.source`
-(и `agent_decisions`, которой у algo нет вообще). Это разные стратегии сопровождения позиции —
-агент может двигать SL/TP, продлевать удержание, входить лимитником на откате. Их нельзя валить
-в одну агрегированную статистику.
-
-**В начале аудита всегда уточни:** «Только алгоритмическую торговлю, только ИИ-режим, или обе?»
-Если пользователь не уточнил и `agent.enabled=true` в конфиге — спроси явно, не выбирай сам.
-
-- Для **algo** — используй Фазу 2 (по-сделочный разбор) как есть, всегда с `WHERE t.source='algo'`.
-- Для **agent** — используй Фазу 2 + Фазу 2b (аудит решений агента) ниже, `WHERE t.source='agent'`.
-- Для **both** — прогоняй Фазу 1-3 дважды (или с `GROUP BY t.source`), никогда не смешивая PnL/win rate в одну цифру. `signals`/`filtered_signals` — общие, их не делишь по source.
+В БД торгует один пайплайн — алгоритмическая стратегия, `trades.source = 'algo'`. В базах,
+собранных до августа 2026, могут дополнительно лежать строки `source = 'agent'`: это удалённый
+ИИ-режим, который торговал те же сигналы на отдельном аккаунте биржи по другой логике
+сопровождения позиции. Их нельзя валить в одну статистику с алго-сделками — **всегда фильтруй
+`WHERE t.source = 'algo'`**. `signals`/`filtered_signals` общие, их по source не делят.
 
 ---
 
@@ -222,13 +199,13 @@ SELECT missed_reason, missed_detail, COUNT(*) as cnt
 FROM signals WHERE missed_reason = 'error'
 GROUP BY missed_reason, missed_detail ORDER BY cnt DESC;
 
--- Конверсия отправленных сигналов в сделки (замени <SOURCE> на 'algo'/'agent', или убери фильтр для both — тогда считай отдельно по source)
+-- Конверсия отправленных сигналов в сделки
 SELECT
   COUNT(DISTINCT s.id) as sent_signals,
   COUNT(DISTINCT t.id) as trades_from_signals,
   ROUND(100.0 * COUNT(DISTINCT t.id) / NULLIF(COUNT(DISTINCT s.id), 0), 1) as conversion_pct
 FROM signals s
-LEFT JOIN trades t ON t.signal_id = s.id AND t.source = '<SOURCE>'
+LEFT JOIN trades t ON t.signal_id = s.id AND t.source = 'algo'
 WHERE s.missed_reason IS NULL;
 ```
 
@@ -243,29 +220,30 @@ WHERE s.missed_reason IS NULL;
 
 ### Фаза 2: По-сделочный разбор (САМЫЙ ВАЖНЫЙ ЭТАП)
 
-Для **каждой** закрытой сделки нужного `source` выполни autopsy. Минимум — для всех убыточных.
-Идеально — для всех. Не забудь также посмотреть `status IN ('expired', 'cancelled')` отдельно —
-это неисполненные pending-входы (в основном agent), они не «сделки», но диагностируют качество
-входа на откате (слишком узкий откат = вечный timeout, слишком широкий = упускаем движение).
+Для **каждой** закрытой сделки выполни autopsy. Минимум — для всех убыточных. Идеально — для
+всех. Если в периоде включён вход лимитником на откате (`pending_entry_pullback_pct > 0`),
+посмотри также `status = 'expired'` отдельно — это неисполненные pending-входы; они не «сделки»,
+но диагностируют качество отката (слишком узкий = вечный timeout, слишком широкий = упускаем
+движение).
 
 ```sql
--- Все закрытые сделки нужного source с их сигналами
+-- Все закрытые сделки с их сигналами
 SELECT t.id, t.symbol, t.direction, t.entry_price, t.exit_price,
-       t.entry_time, t.exit_time, t.pnl, t.fee, t.status, t.source,
+       t.entry_time, t.exit_time, t.pnl, t.fee, t.status,
        t.tp_sl_set, t.partial_closed, t.partial_pnl,
-       t.current_sl_price, t.current_tp_price, t.signal_price,
+       t.current_sl_price, t.signal_price,
        s.id as signal_id, s.timestamp as signal_time,
        s.confidence, s.setup_type, s.message, s.missed_reason
 FROM trades t
 LEFT JOIN signals s ON s.id = t.signal_id
-WHERE t.status = 'closed' AND t.source = '<SOURCE>'
+WHERE t.status = 'closed' AND t.source = 'algo'
 ORDER BY t.exit_time DESC;
 
--- Неисполненные / отменённые pending-входы (в основном agent)
+-- Неисполненные pending-входы (только если pending_entry_pullback_pct > 0)
 SELECT id, symbol, direction, entry_price, signal_price, entry_time,
-       pending_expires_at, status, source
+       pending_expires_at, status
 FROM trades
-WHERE status IN ('expired', 'cancelled') AND source = '<SOURCE>'
+WHERE status = 'expired' AND source = 'algo'
 ORDER BY entry_time DESC;
 ```
 
@@ -350,7 +328,7 @@ ORDER BY timestamp;
 **Оцени:**
 - Достигала ли цена TP до закрытия? Если да — `tp_sl_set` было выставлено? Почему не сработало?
 - Был ли SL слишком узким? (выбило на шуме перед ростом)
-- Если выход по времени (algo: `max_hold_hours`; agent: может быть продлён через `llm_hold_until`) — был ли шанс выйти раньше с профитом?
+- Если выход по времени (`max_hold_hours`) — был ли шанс выйти раньше с профитом?
 - `partial_closed=0` на убыточной сделке — частичное закрытие не сработало?
   - Частичная фиксация — reduce-only лимитный ордер, выставляется при открытии на
     `partial_close_qty_pct`% позиции по цене `entry + (tp - entry) × partial_close_pct%`
@@ -358,8 +336,6 @@ ORDER BY timestamp;
     триггер; `partial_close_qty_pct` — % объёма позиции, закрываемого по этому триггеру).
     Если `partial_closed=0`, проверь: достигал ли `MAX(high)` порога `partial_close_pct`?
     Если да — лимитник должен был исполниться. Почему не исполнился? (возможно `tp_sl_set=0`)
-  - В agent-режиме частичное закрытие может быть и по рынку, инициировано агентом
-    (`allow_partial_close`) — смотри `agent_decisions` (Фаза 2b) на предмет verdict `partial_close`.
 
 #### Проверка 4: Сравнение с идеальным бэктестом
 
@@ -390,7 +366,6 @@ WHERE symbol = '<SYMBOL>'
 - Сигнал был хороший, но фильтр рынка должен был заблокировать (добавить фильтр)
 - Сигнал был хороший, но исполнение подвело (tp_sl_set не сработал, частичное закрытие не случилось)
 - Сигнал был хороший, но SL слишком узкий / TP слишком далёкий (тюнить параметры)
-- (agent) Сигнал был хороший, но агент принял плохое решение на входе или сопровождении — см. Фазу 2b
 
 #### Проверка 5: Что было после выхода?
 ```sql
@@ -405,64 +380,22 @@ LIMIT 20;
 
 Если цена пошла в сторону сигнала СРАЗУ после закрытия — SL/time exit сработал преждевременно. Это ключевой индикатор плохой настройки выхода.
 
-### Фаза 2b: Аудит решений ИИ-агента (только если scope включает `agent`)
-
-В дополнение к Фазе 2 (которая разбирает сам исход сделки), для `source='agent'` разбери
-**качество решений**, а не только их результат — хорошее решение может дать плохой исход
-(рынок пошёл против), и это нормально; отличить одно от другого можно только читая `reasoning`.
-
-```sql
--- Все решения по конкретной сделке в хронологии
-SELECT id, timestamp, kind, verdict, applied, latency_ms, agent_version, reasoning
-FROM agent_decisions
-WHERE trade_id = <TRADE_ID>
-ORDER BY timestamp;
-
--- Распределение вердиктов и applied-rate
-SELECT kind, verdict, applied, COUNT(*) as cnt
-FROM agent_decisions
-GROUP BY kind, verdict, applied
-ORDER BY kind, cnt DESC;
-
--- Латентность и версии промпта — для сопоставления качества с редакцией
-SELECT agent_version, kind, COUNT(*) as cnt,
-       ROUND(AVG(latency_ms), 0) as avg_latency_ms
-FROM agent_decisions
-GROUP BY agent_version, kind
-ORDER BY agent_version;
-```
-
-**Для каждого reject на entry** — сопоставь с тем, что было бы, если бы `algo`-путь взял тот же
-сигнал (та же БД, тот же сигнал, ищи по `signal_id` в `trades WHERE source='algo'` или прогони
-Проверку 4 вручную). Согласился бы алгоритм? Если entry-agent систематически отклоняет сетапы,
-которые потом идут в плюс — это либо слишком консервативный промпт, либо он видит то, что
-детектор не видит (стоит понять, что именно, прежде чем менять промпт).
-
-**Для каждого reeval с `verdict=close` до штатного TP/SL/timeout** — прочитай `reasoning` и
-сверь с ценовым движением после (Проверка 5). Закрыл вовремя или испугался шума?
-
-**`applied=false`** — технический сбой применения решения (не dry_run). Считай отдельно от
-`dry_run`-строк (`config.yaml agent.dry_run`) — это разные вещи: одно значит «агент решил, но
-не смог исполнить», другое — «агент никогда и не пытался исполнять».
-
 ### Фаза 3: Системные паттерны
 
-После разбора всех сделок, сгруппируй проблемы **отдельно по source**, если scope = both:
+После разбора всех сделок, сгруппируй проблемы:
 
-1. **Проблемы детектора** — сколько сделок открыто по ложным сигналам? Какие фильтры нужно добавить/ужесточить? (общее для algo/agent — сигнал один)
+1. **Проблемы детектора** — сколько сделок открыто по ложным сигналам? Какие фильтры нужно добавить/ужесточить?
 2. **Проблемы фильтра рынка** — сколько сделок нужно было отфильтровать по regime/тренду?
 3. **Проблемы исполнения** — сколько сделок потеряли деньги из-за отсутствия TP/SL/частичного закрытия?
 4. **Проблемы параметров** — сколько сделок имели неправильный SL/TP/размер?
-5. **(agent) Проблемы качества решений** — сколько reject/close оказались задним числом ошибочными по Фазе 2b?
-6. **Неизбежные потери** — сколько сделок были просто вероятностным исходом (хороший сигнал, рынок пошёл против)?
+5. **Неизбежные потери** — сколько сделок были просто вероятностным исходом (хороший сигнал, рынок пошёл против)?
 
 Выдай это в виде таблицы с конкретными ID сделок.
 
 ### Фаза 4: Конкретные рекомендации
 
 **Прежде чем предлагать что-либо — прочитай инлайн-комментарии `config.yaml` (секции
-`strategy`/`trading`/`agent`) и раздел «Логика стратегий» / «Управление позициями» /
-«ИИ-режим» в `AGENTS.md`.** Это живой, поддерживаемый журнал экспериментов (даты, цифры,
+`strategy`/`trading`) и разделы «Логика стратегий» / «Управление позициями» в `AGENTS.md`.** Это живой, поддерживаемый журнал экспериментов (даты, цифры,
 ссылки на память) — гораздо надёжнее, чем полагаться на статический список ниже в этом файле,
 который неизбежно устаревает быстрее конфига. Если параметр уже свипался и был отвергнут/
 принят — не предлагай его заново без нового аргумента, почему сейчас иначе.
@@ -522,7 +455,7 @@ ORDER BY agent_version;
 - **Partial close**: при открытии выставляется reduce-only лимитный ордер на `partial_close_qty_pct`% позиции по цене `entry + (tp-entry) × partial_close_pct%`. После исполнения SL переводится в безубыток. Fallback-проверка по тикеру в `update_positions()`, если лимитник не выставился.
 - **Circuit Breaker**: N убытков (`circuit_breaker_loss_streak_reduce`, дефолт 2) → размер ×`circuit_breaker_reduce_mult_pct`; M убытков (`circuit_breaker_loss_streak_stop`, дефолт 3) → стоп на `circuit_breaker_stop_minutes`. **Персистится в `bot_state`** (до фикса P0 в августе 2026 жило только в памяти процесса и обнулялось при рестарте — если подозреваешь регрессию, проверь `bot_state` напрямую).
 - **Error cascade protection**: 3 ошибки подряд по символу → кулдаун 4 часа.
-- **Pending-вход на откате** (`pending_entry_pullback_pct`): выключен на algo-пути (0 — обратная селекция без гибкости реагирования, см. аудит июля 2026), используется только в ИИ-режиме, где entry-agent сам подбирает откат в диапазоне `entry_pullback_min_pct`/`max_pct`.
+- **Pending-вход на откате** (`pending_entry_pullback_pct`): выключен (0 — обратная селекция: лимитник исполняется именно там, где памп уже развернулся, см. аудит июля 2026). Механизм остаётся в коде на случай пересвипа порога.
 
 ### Отвергнутые/завершённые идеи — краткий указатель (актуальный источник: `config.yaml` + `AGENTS.md`)
 
@@ -545,13 +478,11 @@ ORDER BY agent_version;
 
 | Файл | Что внутри |
 |---|---|
-| `src/analytics/detector.py` | SetupDetector — вся логика стратегии (общая для algo/agent) |
+| `src/analytics/detector.py` | SetupDetector — вся логика стратегии |
 | `src/analytics/market_context.py` | MarketContext — рыночные режимы |
-| `src/executor/position_manager.py` | PositionManager — открытие/закрытие позиций (algo) |
-| `src/executor/agent_position_manager.py` | AgentPositionManager(PositionManager) — вся логика, решаемая ИИ-агентом (`apply_agent_*`), изолирована от algo |
-| `src/agent/tools.py` | `AgentToolkit` (данные для сабагентов) + `build_strategy_briefing()` + `AGENT_VERSION` |
-| `src/backtest/runner.py` | Бэктест + сравнение с реальностью (только algo-логика детектора; не фильтрует `trades` по `source` — учитывай при both) |
-| `config/config.yaml` | Параметры стратегии, торговли, ИИ-режима — актуальный журнал экспериментов в комментариях |
+| `src/executor/position_manager.py` | PositionManager — открытие/закрытие позиций |
+| `src/backtest/runner.py` | Бэктест + сравнение с реальностью (не фильтрует `trades` по `source` — учитывай на старых БД, где есть строки удалённого ИИ-режима) |
+| `config/config.yaml` | Параметры стратегии и торговли — актуальный журнал экспериментов в комментариях |
 | `AGENTS.md` | Полная документация проекта, включая раздел «⚠️ Доступ к БД только через docker exec» |
 
 ---
@@ -665,10 +596,10 @@ db.close()
 Когда пользователь просит анализ или аудит:
 
 1. **Обнови снапшот БД** (`docker cp`, см. «Перед началом») — не анализируй потенциально устаревший `data/trading_bot.db` молча.
-2. **Спроси охват:** «Все сделки или за конкретный период? Только убыточные или все? Алгоритмическая торговля, ИИ-режим, или обе?» (последнее — обязательно, если `agent.enabled=true`)
+2. **Спроси охват:** «Все сделки или за конкретный период? Только убыточные или все?»
 3. **Фаза 1 (конвейер)** — сразу смотри `missed_detail` для error-сигналов. Это покажет корень проблемы.
-4. **Фаза 2 (по-сделочный разбор)**, **+ Фаза 2b если scope включает agent** — основное. Не пропускай ни одной убыточной сделки.
-5. **Фаза 3 (паттерны)** — группируй и систематизируй, раздельно по source при both.
+4. **Фаза 2 (по-сделочный разбор)** — основное. Не пропускай ни одной убыточной сделки.
+5. **Фаза 3 (паттерны)** — группируй и систематизируй.
 6. **Фаза 4 (рекомендации)** — конкретные изменения с именами файлов и параметров, после сверки с `config.yaml`/`AGENTS.md`.
 
 **Если пользователь просит сравнить бэктест с реальностью:**
