@@ -123,9 +123,14 @@ def load_data(db_path: str, limit_days: float | None = None, limit_symbols: list
     where_sql = ("WHERE " + " AND ".join(where)) if where else ""
 
     t0 = time.time()
+    # volume > 0: боевой DataProvider.load_candles отбрасывает бары с нулевым объёмом
+    # (незакрытые/пустые), и окно детектора у него на таком баре схлопывается. Пока
+    # этого фильтра здесь не было, окна расходились с проливом уже на входных данных —
+    # на БД за 10.08-25.08 это 60 395 лишних баров.
+    where_sql = (where_sql + " AND volume > 0") if where_sql else "WHERE volume > 0"
     rows = db.execute(
-        f"SELECT symbol, timestamp, open, high, low, close, volume FROM candles {where_sql} "
-        f"ORDER BY symbol, timestamp",
+        f"SELECT symbol, timestamp, open, high, low, close, volume, exchange FROM candles "
+        f"{where_sql} ORDER BY symbol, exchange, timestamp",
         params,
     ).fetchall()
     log(f"candles fetched: {len(rows)} rows in {time.time()-t0:.1f}s")
@@ -133,9 +138,19 @@ def load_data(db_path: str, limit_days: float | None = None, limit_symbols: list
     distinct_ts = sorted(set(r[1] for r in rows))
     ts_cache = _parse_ts_cache(distinct_ts)
 
+    # Ключ группировки — ПАРА (биржа, символ), как в DataProvider.get_active_symbols.
+    # При группировке по одному символу ряды свечей монеты, торгующейся и на binance,
+    # и на bybit, склеивались в один с дублирующимися timestamp'ами, и окно детектора
+    # получалось из перемешанных бирж. Коллектор пишет свечи только с ОДНОЙ биржи на
+    # монету (binance, если монета там есть, иначе bybit), поэтому оставляем ряд с
+    # большей историей.
+    by_pair: dict[tuple[str, str], list] = {}
+    for sym, ts, o, h, l, c, v, ex in rows:
+        by_pair.setdefault((ex, sym), []).append((ts_cache[ts], o, h, l, c, v))
     symbols: dict[str, list] = {}
-    for sym, ts, o, h, l, c, v in rows:
-        symbols.setdefault(sym, []).append((ts_cache[ts], o, h, l, c, v))
+    for (_ex, sym), bars in by_pair.items():
+        if len(bars) > len(symbols.get(sym, ())):
+            symbols[sym] = bars
 
     # per-symbol index structures for O(1) lookup
     sym_ts_to_row: dict[str, dict] = {}

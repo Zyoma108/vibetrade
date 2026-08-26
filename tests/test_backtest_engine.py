@@ -169,6 +169,48 @@ def test_load_data_shapes(golden_db):
     assert ("bybit", SYMBOL) in data["oi_cache"]
 
 
+def test_loader_drops_zero_volume_bars(tmp_path):
+    """Бары с нулевым объёмом не должны попадать в окно детектора.
+
+    Боевой `DataProvider.load_candles` их отбрасывает (незакрытые/пустые), и окно
+    у него схлопывается на таком баре. Пока фильтра не было в движке, окна
+    расходились с проливом уже на входных данных — на архивной БД за 10.08-25.08
+    это 60 395 лишних баров.
+    """
+    path = tmp_path / "zero_vol.db"
+    candles = _build_candles(20, 4, 10)
+    # каждый третий бар — «пустой»
+    candles = [
+        (c[0], c[1], c[2], c[3], c[4], c[5], c[6], 0.0) if i % 3 == 0 else c
+        for i, c in enumerate(candles)
+    ]
+    _write_db(path, candles, _build_oi(34))
+
+    data = load_data(str(path))
+    volumes = [bar[5] for bar in data["symbols"][SYMBOL]]
+    assert volumes, "что-то должно остаться"
+    assert all(v > 0 for v in volumes), "нулевые бары обязаны быть отфильтрованы"
+
+
+def test_loader_does_not_merge_exchanges(tmp_path):
+    """Монета на двух биржах — берётся ОДИН ряд, а не склейка двух.
+
+    Коллектор пишет свечи только с одной биржи на монету, но на старых БД пары
+    встречаются. При группировке по одному символу ряды склеивались в один с
+    дублирующимися timestamp'ами, и окно детектора собиралось из перемешанных бирж.
+    """
+    path = tmp_path / "two_exchanges.db"
+    bybit = _build_candles(20, 4, 5)                     # 29 баров
+    binance = [("binance",) + c[1:] for c in _build_candles(20, 4, 40)]  # 64 бара
+    _write_db(path, bybit + binance, _build_oi(64))
+
+    data = load_data(str(path))
+    bars = data["symbols"][SYMBOL]
+    timestamps = [b[0] for b in bars]
+    assert len(timestamps) == len(set(timestamps)), "дублирующихся timestamp быть не должно"
+    assert len(bars) == 64, "должен остаться ряд с большей историей (binance)"
+
+
 def test_golden_run_is_stable(golden_db):
     """Эталон: на этой фикстуре движок обязан дать ровно такой результат.
 
