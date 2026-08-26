@@ -1,4 +1,4 @@
-.PHONY: run run-signal test migrate-create migrate-up backtest-run backtest-run-live docker-build docker-up docker-down docker-logs docker-rebuild clean
+.PHONY: run run-signal test backtest-run backtest-run-live docker-build docker-up docker-down docker-logs docker-rebuild clean
 
 APP := .venv/bin/python -m src.main
 
@@ -10,12 +10,6 @@ run-signal:
 
 test:
 	.venv/bin/pytest -v
-
-migrate-create:
-	.venv/bin/alembic revision --autogenerate -m "$(name)"
-
-migrate-up:
-	.venv/bin/alembic upgrade head
 
 backtest-run:
 	.venv/bin/python -m src.backtest.runner $(ARGS)

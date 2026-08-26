@@ -4,7 +4,11 @@
 
 ## Стек
 
-- **Python 3.12**, `asyncio`
+- **Python 3.12** в проде (`Dockerfile`, `pyproject.toml`), `asyncio`
+  - ⚠️ **Локальный `.venv` собран на 3.14** — тесты и бэктесты гоняются на одной минорной,
+    а прод работает на другой. Пока не проявлялось, но это разные рантаймы. Свести к одной:
+    либо `python3.12 -m venv --clear .venv && .venv/bin/pip install -e ".[dev]"`, либо
+    поднять `FROM python:3.14-slim` в `Dockerfile` (второе — изменение прод-рантайма)
 - **ccxt** — унифицированный доступ к биржам (синхронный, wrapped в `asyncio.to_thread`)
 - **aiogram 3.x** — Telegram Bot API (long polling)
 - **SQLAlchemy 2.0 + aiosqlite** — SQLite в WAL-режиме, named Docker volume (см. "База данных")
@@ -31,33 +35,36 @@ src/
 │   ├── detector.py            # SetupDetector — основная стратегия (объём + OI + цена)
 │   ├── market_context.py      # MarketContext — рыночный контекст (OTHERS Supertrend + BTC)
 │   ├── price_surge.py         # PriceSurgeDetector — пампинг по чистой цене (только сигналы)
-│   └── price_surge_service.py # PriceSurgeSignalProcessor — обогащение и отправка сигналов пампа
+│   └── price_surge_service.py # PriceSurgeSignalProcessor — обогащение сигналов пампа (тексты; отправка — в app.py, вне транзакции)
 ├── executor/
-│   └── position_manager.py    # PositionManager — открытие/закрытие/трекинг позиций
+│   ├── position_manager.py    # PositionManager — открытие/закрытие/трекинг позиций
+│   └── guards.py              # TradingGuards — Circuit Breaker, бан-лист, кулдаун ошибок + их персист
 ├── notifier/
 │   └── telegram_bot.py        # TelegramNotifier — бот с командами и отправкой сигналов
 ├── storage/
-│   ├── database.py            # engine, async_session, init_db (с авто-ALTER TABLE)
+│   ├── database.py            # engine, async_session, init_db (авто-ALTER TABLE + чистка устаревших индексов)
 │   ├── models.py              # ORM: Candle, Ticker, OpenInterest, Signal, Trade, PriceSurgeSignal, MarketContextSnapshot, BotState
 │   └── stats.py               # trade_stats() — сбор статистики для команды /stats
 ├── backtest/
-│   └── runner.py              # Симуляция стратегии на исторических свечах
+│   ├── engine.py              # ЕДИНСТВЕННАЯ реализация цикла симуляции (свипы и runner — поверх неё)
+│   └── runner.py              # Отчёт: прогон + сравнение с реальными сделками из той же БД
 ├── scripts/
-│   ├── sweep_retracement.py     # Быстрый O(1)-движок бэктеста (свечи по timestamp), 1:1 повторяет runner.py (комиссии+слиппедж учтены); свип max_window_retracement_pct, база для скриптов ниже
-│   ├── sweep_partial_close.py   # Свип partial_close_pct (ценовой порог партиала) на движке sweep_retracement.py
-│   ├── sweep_partial_close_qty.py # Свип partial_close_qty_pct (доля объёма на партиале) на том же движке
-│   ├── sweep_rr.py              # Свип risk_reward_ratio (TP=SL×RR) на том же движке
+│   ├── sweep_retracement.py     # Свип max_window_retracement_pct (движок — src/backtest/engine.py)
+│   ├── sweep_partial_close.py   # Свип partial_close_pct (ценовой порог партиала)
+│   ├── sweep_partial_close_qty.py # Свип partial_close_qty_pct (доля объёма на партиале)
+│   ├── sweep_rr.py              # Свип risk_reward_ratio (TP=SL×RR)
 │   ├── analyze_tp_upside.py     # Для сделок, дошедших до полного TP — сколько доп. движения было упущено после хардового TP-выхода
 │   └── analyze_missed_signals.py # Поиск пропущенных сетапов (сильные движения без сигналов)
 tests/
 │   ├── test_data_provider.py     # Тесты DataProvider и CandleCache
-│   ├── test_detector.py          # Тесты SetupDetector (volume pattern, price trend)
-│   └── test_position_manager.py  # Тесты PositionManager (Circuit Breaker, TP/SL, позиции)
+│   ├── test_detector.py          # Тесты SetupDetector (volume pattern, price trend, вынесенные пороги)
+│   ├── test_market_context.py    # Тесты MarketContext (режим, тренд, Supertrend, удержание BTC при сбое)
+│   ├── test_backtest_engine.py   # Золотой тест движка + parity runner↔engine
+│   └── test_position_manager.py  # Тесты PositionManager (Circuit Breaker, TP/SL, fallback партиала, цена входа)
 config/
 └── config.yaml                # Боевая конфигурация (единственная — YAML + `${ENV_VAR}` из `.env`)
 data/
 └── trading_bot.db             # База SQLite (создаётся при первом запуске)
-migrations/                    # Alembic-миграции
 ```
 
 ## Режимы работы
@@ -407,8 +414,17 @@ bind-mount дважды приводил к порче БД, см. ниже). **
 этого).
 
 SQLite в **WAL-режиме** (`data/trading_bot.db` внутри контейнера, на named Docker volume
-`vibetrade_data` — не bind-mount с хоста). Миграции: Alembic + ручной `ALTER TABLE` в `init_db()`
-для обратной совместимости.
+`vibetrade_data` — не bind-mount с хоста).
+
+**Схема живёт в `src/storage/models.py` и применяется `init_db()`** — `create_all()` плюс
+ручной список `ALTER TABLE`/`DROP INDEX` для баз, созданных раньше. Alembic удалён 26.08.2026:
+он существовал параллельно и отстал — покрывал 7 таблиц из 9 (не было `bot_state` и
+`price_surge_signals`), а его миграция `trades` не знала ни одной из колонок, добавленных
+позже через `ALTER`. То есть `alembic upgrade head` на чистой БД давал схему без таблицы
+состояния Circuit Breaker, и спасало только то, что `create_all()` отрабатывал следом.
+Второй, неработающий механизм, который при этом выглядел как источник правды, — хуже, чем
+его отсутствие. Если понадобятся настоящие миграции на живой БД, Alembic заводится заново
+(`alembic init`), но с честным baseline от текущих моделей.
 
 **История (21-22.07.2026, для контекста будущих инцидентов)**: изначально `data/` была
 bind-mount (`./data:/app/data`) — WAL полагается на shared-memory индекс (`-shm`) через `mmap`
@@ -646,10 +662,6 @@ make backtest-run-live                # Бэктест на живой БД + с
 
 # Поиск оптимальных параметров (подбор конфигурации) — см. scripts/sweep_retracement.py и
 # производные (sweep_rr.py, sweep_partial_close.py, sweep_partial_close_qty.py)
-
-# Миграции
-make migrate-create name=add_column
-make migrate-up
 
 # Тесты
 make test
