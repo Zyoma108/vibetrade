@@ -853,3 +853,95 @@ class TestConfigDefaults:
         """cautious_volume_surge_mult_increase_pct is within valid range."""
         cfg = StrategyConfig()
         assert 0.0 <= cfg.cautious_volume_surge_mult_increase_pct <= 200.0
+
+
+# ---------------------------------------------------------------------------
+# Пороги, вынесенные из кода в конфиг (26.08.2026)
+# ---------------------------------------------------------------------------
+
+
+class TestDeHardcodedThresholds:
+    """Пороги volume_fading / volume_declining / oi_declining / pre_surge / confidence
+    до 26.08.2026 были зашиты в детекторе, и свипнуть их было нечем.
+
+    Дефолты обязаны в точности повторять прежние зашитые значения — иначе вынос
+    молча изменил бы стратегию. Каждый тест проверяет и это, и что ручка работает.
+    """
+
+    BASELINE_BARS = 5
+    BASELINE_VOL = 100.0
+
+    @classmethod
+    def _sustain_volumes(cls, vols: list[float]) -> list[dict]:
+        """baseline с ровным объёмом + sustain-окно с заданными объёмами."""
+        volumes = [cls.BASELINE_VOL] * cls.BASELINE_BARS + vols
+        return _candles(len(volumes), volume=volumes)
+
+    @classmethod
+    def _det(cls, **overrides) -> SetupDetector:
+        return _detector(
+            baseline_bars=cls.BASELINE_BARS, sustain_bars=4,
+            volume_surge_mult=3.0, **overrides,
+        )
+
+    def test_defaults_match_previous_hardcoded_values(self):
+        """Значения по умолчанию = то, что было зашито в коде."""
+        cfg = StrategyConfig()
+        assert cfg.volume_fading_ratio == 0.7
+        assert cfg.volume_declining_enabled is True
+        assert cfg.oi_declining_enabled is True
+        assert cfg.pre_surge_bars == 10
+        assert cfg.confidence_surge_mult == 5.0
+
+    def test_volume_fading_rejects_at_default_ratio(self):
+        """Объём последней свечи ниже 70% от среднего предыдущих — отказ."""
+        det = self._det()
+        # среднее предыдущих 1000, последняя 500 → 0.5 < 0.7
+        candles = self._sustain_volumes([1_000.0, 1_000.0, 1_000.0, 500.0])
+        ctx: dict = {}
+        assert det.check_volume_pattern(candles, ctx) is False
+        assert ctx["stage"] == "volume_fading"
+
+    def test_volume_fading_can_be_relaxed(self):
+        """Опущенный порог пропускает ту же свечу — ручка действительно работает."""
+        det = self._det(volume_fading_ratio=0.3)
+        candles = self._sustain_volumes([1_000.0, 1_000.0, 1_000.0, 500.0])
+        ctx: dict = {}
+        det.check_volume_pattern(candles, ctx)
+        assert ctx.get("stage") != "volume_fading"
+
+    def test_volume_fading_disabled_by_zero(self):
+        """0 выключает фильтр целиком."""
+        det = self._det(volume_fading_ratio=0.0)
+        candles = self._sustain_volumes([1_000.0, 1_000.0, 1_000.0, 500.0])
+        ctx: dict = {}
+        det.check_volume_pattern(candles, ctx)
+        assert ctx.get("stage") != "volume_fading"
+
+    def test_volume_declining_toggle(self):
+        """Флаг снимает требование «последняя свеча не ниже первой»."""
+        # объём падает от первой к последней, но не настолько, чтобы сработал fading
+        vols = [1_000.0, 950.0, 900.0, 850.0]
+        ctx_on: dict = {}
+        self._det().check_volume_pattern(self._sustain_volumes(vols), ctx_on)
+        assert ctx_on["stage"] == "volume_declining"
+
+        ctx_off: dict = {}
+        self._det(volume_declining_enabled=False).check_volume_pattern(
+            self._sustain_volumes(vols), ctx_off
+        )
+        assert ctx_off.get("stage") != "volume_declining"
+
+    def test_confidence_scale_is_configurable(self):
+        """Множитель confidence берётся из конфига, а не зашит пятёркой."""
+        assert min(round(4.0 * StrategyConfig().confidence_surge_mult), 100) == 20
+        assert min(round(4.0 * StrategyConfig(confidence_surge_mult=10.0).confidence_surge_mult), 100) == 40
+
+    def test_confidence_saturates_at_default_scale(self):
+        """Насыщение шкалы: при множителе 5 всё, что выше surge x20, неотличимо.
+
+        Это и есть причина, по которой в живых данных у 52% сигналов confidence=100.
+        """
+        mult = StrategyConfig().confidence_surge_mult
+        assert min(round(20.0 * mult), 100) == 100
+        assert min(round(60.0 * mult), 100) == 100

@@ -473,8 +473,13 @@ def simulate(settings, data, has_oi: bool = True, collect_retracement: bool = Tr
                     # oi_declining (см. SetupDetector._check_oi_trend): последняя точка OI
                     # ниже предпоследней → приток уже иссякает, блок независимо от порога
                     # наклона. Раньше отсутствовало здесь — искусственно завышало число
-                    # сигналов относительно боевой логики.
-                    if len(oi_vals) >= 2 and oi_vals[-1] < oi_vals[-2]:
+                    # сигналов относительно боевой логики. Флаг читается из того же
+                    # конфига, что и в детекторе, чтобы порог можно было свипать.
+                    if (
+                        detector.config.oi_declining_enabled
+                        and len(oi_vals) >= 2
+                        and oi_vals[-1] < oi_vals[-2]
+                    ):
                         continue
                     slope_pct = calculate_oi_slope_pct(oi_vals)
                     if slope_pct is not None and slope_pct >= detector.config.oi_slope_min_pct:

@@ -114,6 +114,42 @@ class StrategyConfig(BaseModel):
     smooth_max_ratio: float = Field(
         default=5.0, description="Макс. отношение макс/медиана объёма в окне (отсекает спайки, уменьшить для более жёсткого фильтра)"
     )
+    # Ниже — пороги, до 26.08.2026 захардкоженные в SetupDetector. Дефолты равны
+    # прежним зашитым значениям, поэтому поведение не изменилось; смысл выноса в
+    # том, что теперь их можно свипать. В проекте это уже дважды окупалось:
+    # exhaustion_extreme перестал быть `ex_gain * 6`, а partial_close_qty_pct —
+    # пятьюдесятью процентами (сейчас 30). Аудит фильтров августа 2026 показал,
+    # что volume_fading и volume_declining отсекают >50% near-miss без видимого
+    # эффекта — проверить это было нечем, пока пороги жили в коде.
+    volume_fading_ratio: float = Field(
+        default=0.7, ge=0.0, le=1.0,
+        description="Мин. отношение объёма последней свечи sustain-окна к среднему предыдущих "
+        "(ниже — памп иссякает, сигнал не даём; 0 = выкл). Кандидат на свип: по аудиту "
+        "августа 2026 фильтр отсекает много near-miss без подтверждённого эффекта"
+    )
+    volume_declining_enabled: bool = Field(
+        default=True,
+        description="Требовать, чтобы объём последней свечи sustain-окна был не ниже первой. "
+        "Кандидат на свип вместе с volume_fading_ratio — фильтры меряют близкое и могут дублировать друг друга"
+    )
+    oi_declining_enabled: bool = Field(
+        default=True,
+        description="Отбрасывать сигнал, если последняя точка OI ниже предпоследней (приток иссякает). "
+        "Действует только при oi_filter_enabled=true. ВАЖНО: именно эта проверка отсутствовала "
+        "в свип-скриптах и завысила прошлые свипы по RR/partial-close/retracement"
+    )
+    pre_surge_bars: int = Field(
+        default=10, ge=1, le=100,
+        description="Длина окна ПЕРЕД sustain-окном, на котором меряется pre_surge_max_pct, в свечах "
+        "(10 свечей = 30 мин на 3m). Раньше было захардкожено"
+    )
+    confidence_surge_mult: float = Field(
+        default=5.0, gt=0.0,
+        description="Множитель в формуле confidence = min(surge × N, 100). При volume_surge_mult=5 "
+        "и N=5 шкала упирается в потолок уже на surge x20: в БД за 10.08-25.08 у 52% сигналов "
+        "confidence=100, то есть для половины популяции метрика не несёт информации "
+        "(и наблюдавшийся «худший win rate у confidence=100» — артефакт насыщения)"
+    )
     # Параметры для PriceSurgeDetector (strategy_price_surge)
     price_surge_pct: float = Field(
         default=0.0, description="Рост цены для сигнала пампа, % (0 = детектор выключен)"

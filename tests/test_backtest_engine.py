@@ -208,17 +208,30 @@ def test_oi_declining_blocks_signal(golden_db, tmp_path):
     n_baseline, n_sustain, n_after = 20, 4, 60
     total = n_baseline + n_sustain + n_after
     path = tmp_path / "declining_oi.db"
-    # OI растёт, но последняя точка ниже предпоследней
-    oi = _build_oi(total)
-    oi[-1] = (oi[-1][0], oi[-1][1], oi[-1][2], oi[-2][3] * 0.9)
-    # обрезаем свечи так, чтобы сигнальная свеча оказалась последней
-    _write_db(path, _build_candles(n_baseline, n_sustain, 0), oi[:n_baseline + n_sustain])
+    # OI плавно снижается на каждом баре. Порог наклона в этом тесте опущен ниже
+    # фактического, поэтому единственное, что может зарезать сигнал, — сама
+    # проверка oi_declining, а не oi_slope_min_pct.
+    oi = [
+        ("bybit", SYMBOL, _ts(i), 1_000_000.0 * (1 - 0.001 * i))
+        for i in range(total)
+    ]
+    _write_db(path, _build_candles(n_baseline, n_sustain, n_after), oi)
 
     baseline = simulate(_settings(), load_data(golden_db), has_oi=True)
     assert baseline["signals"] == 1  # контроль: на исходной фикстуре сигнал есть
 
-    declining = simulate(_settings(), load_data(str(path)), has_oi=True)
+    lenient_slope = {"oi_slope_min_pct": -50.0}
+    declining = simulate(
+        _settings(**lenient_slope), load_data(str(path)), has_oi=True
+    )
     assert declining["signals"] == 0
+
+    # Флаг выключает проверку — иначе порог было бы нечем свипнуть
+    off = simulate(
+        _settings(oi_declining_enabled=False, **lenient_slope),
+        load_data(str(path)), has_oi=True,
+    )
+    assert off["signals"] == 1
 
 
 def test_risk_off_blocks_entries(golden_db, tmp_path):
