@@ -88,12 +88,29 @@ async def init_db() -> None:
             except Exception:
                 pass  # колонка уже существует
 
-        # Индексы tickers: create_all() создаёт только недостающие, но не убирает
-        # устаревшие — старые БД тащат за собой ix_tickers_exchange, из-за которого
-        # планировщик выбирал заведомо худший план для `_get_current_price`
-        # (см. Ticker.__doc__). Дропаем их явно.
-        for idx in ("ix_tickers_exchange", "ix_tickers_symbol"):
+        # Индексы tickers: create_all() создаёт недостающие, но никогда не убирает
+        # лишние — старые БД тащат за собой одиночные индексы, из-за одного из
+        # которых (ix_tickers_exchange) планировщик выбирал заведомо худший план
+        # для `_get_current_price`. См. Ticker.__doc__.
+        for idx in ("ix_tickers_exchange", "ix_tickers_symbol", "ix_tickers_timestamp"):
             try:
                 await conn.exec_driver_sql(f"DROP INDEX IF EXISTS {idx}")
             except Exception:
                 logger.warning(f"Не удалось удалить устаревший индекс {idx}")
+
+        # tickers перестала быть журналом и стала снимком (одна строка на монету).
+        # На БД, накопленной до этой смены, уникального ключа нет, и upsert упал бы
+        # в рантайме с невнятным "ON CONFLICT clause does not match any ... UNIQUE
+        # constraint". Проверяем на старте и говорим прямо, что делать.
+        has_uq = await conn.exec_driver_sql(
+            "SELECT 1 FROM sqlite_master WHERE type='index' AND tbl_name='tickers'"
+            " AND name='uq_ticker'"
+        )
+        if not has_uq.first():
+            raise RuntimeError(
+                f"В {DB_PATH} таблица tickers из старой схемы (без уникального ключа "
+                f"exchange+symbol). Начиная с 26.08.2026 это снимок, а не журнал — "
+                f"история тикеров больше не хранится и не читается.\n"
+                f"Удали файл БД и перезапусти бота:\n"
+                f"  rm {DB_PATH.resolve()}"
+            )

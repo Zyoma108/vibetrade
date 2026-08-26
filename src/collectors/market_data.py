@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from typing import Callable, Coroutine
 
 from sqlalchemy import desc, func, select
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.connectors.exchange import ExchangeConnector
@@ -127,12 +128,14 @@ class MarketDataCollector:
             # Заодно собираем OI, который уже приехал в тикере (см. ExchangeConnector.fetch_tickers) —
             # чтобы не делать по нему отдельный запрос на биржу ниже.
             oi_by_symbol: dict[str, float] = {}
+            bybit_to_save: list[dict] = []
             for t in bybit_raw:
                 if self._passes_basic_filter(t):
                     oi_val = t.pop("open_interest", None)
                     if oi_val is not None:
                         oi_by_symbol[t["symbol"]] = oi_val
-                    session.add(Ticker(**t))
+                    bybit_to_save.append(t)
+            await self._upsert_tickers(session, bybit_to_save)
             await session.commit()
 
             # 4. Собираем данные
@@ -143,6 +146,7 @@ class MarketDataCollector:
                     elif connector.exchange_id == "bybit":
                         await self._collect_for_exchange(
                             connector, session, selected_bybit, oi_by_symbol=oi_by_symbol,
+                            tickers_already_saved=True,
                         )
                     else:
                         filtered = self._filter_tickers(all_tickers.get(connector.exchange_id, []))
@@ -158,6 +162,7 @@ class MarketDataCollector:
     async def _collect_for_exchange(
         self, connector: ExchangeConnector, session: AsyncSession,
         selected: list[dict], oi_by_symbol: dict[str, float] | None = None,
+        tickers_already_saved: bool = False,
     ) -> None:
         """Собрать тикеры/свечи/OI для одной биржи.
 
@@ -177,11 +182,13 @@ class MarketDataCollector:
             f"{connector.exchange_id}: сбор для {len(selected)} монет"
         )
 
-        # 3. Сохраняем отфильтрованные тикеры
-        for t in selected:
-            t.pop("open_interest", None)
-            session.add(Ticker(**t))
-        await session.commit()
+        # 3. Сохраняем отфильтрованные тикеры. Для ByBit это уже сделано в
+        # `_collect_cycle` (шаг 3.5 пишет ВСЕ его тикеры, `selected` — их подмножество),
+        # поэтому здесь запись пропускается: раньше эти монеты писались дважды за цикл
+        # и давали ~2.6% дублирующих строк.
+        if not tickers_already_saved:
+            await self._upsert_tickers(session, selected)
+            await session.commit()
 
         # 4. Свечи: сначала параллельный фетч с биржи, потом быстрая последовательная запись
         logger.info(f"{connector.exchange_id}: сбор свечей для {len(selected)} монет...")
@@ -204,6 +211,26 @@ class MarketDataCollector:
             for symbol, oi in oi_batches:
                 if oi is not None:
                     await self._write_oi(session, oi["exchange"], oi["symbol"], oi["value"])
+
+    async def _upsert_tickers(self, session: AsyncSession, tickers: list[dict]) -> None:
+        """Записать текущие тикеры — одна строка на (exchange, symbol), см. `Ticker`.
+
+        Один statement на весь батч: при ~700 монетах за цикл поштучные SELECT+UPDATE
+        стоили бы столько же round-trip-ов к SQLite, сколько весь остальной цикл.
+        """
+        if not tickers:
+            return
+        rows = [{k: v for k, v in t.items() if k != "open_interest"} for t in tickers]
+        stmt = sqlite_insert(Ticker).values(rows)
+        await session.execute(
+            stmt.on_conflict_do_update(
+                index_elements=["exchange", "symbol"],
+                set_={
+                    c: getattr(stmt.excluded, c)
+                    for c in ("timestamp", "bid", "ask", "last", "volume", "change_pct")
+                },
+            )
+        )
 
     async def _fetch_candles_concurrently(
         self, connector: ExchangeConnector, selected: list[dict],

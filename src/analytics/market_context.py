@@ -17,12 +17,10 @@ from datetime import datetime, timedelta, timezone
 
 import numpy as np
 import pandas as pd
-from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.config import MarketContextConfig
 from src.connectors.exchange import ExchangeConnector
-from src.storage.models import Ticker
 
 logger = logging.getLogger(__name__)
 
@@ -266,8 +264,7 @@ class MarketContext:
             self._compute_supertrend()
 
             # 3. BTC 1h and 4h changes from exchange
-            self._btc_change_1h, self._btc_change_4h = \
-                await self._calc_btc_changes(session)
+            self._btc_change_1h, self._btc_change_4h = await self._calc_btc_changes()
 
             # 4. Determine regime (entry gating)
             new_regime = self._determine_regime()
@@ -471,67 +468,44 @@ class MarketContext:
     # BTC
     # ------------------------------------------------------------------
 
-    async def _calc_btc_changes(self, session: AsyncSession) -> tuple[float, float]:
-        """Calculate BTC/USDT change over 1h and 4h.
+    async def _calc_btc_changes(self) -> tuple[float, float]:
+        """Изменение BTC/USDT за 1ч и 4ч по часовым свечам с биржи.
 
-        Uses exchange OHLCV (5 bars of 1h) or ticker data as fallback.
-        Returns (change_1h, change_4h).
+        При сбое возвращает ПРЕДЫДУЩИЕ известные значения, а не нули. Раньше здесь
+        стоял фолбэк на историю тикеров из БД, но он был мёртвым по построению:
+        BTC входит в `exclude_coins`, а сборщик пропускает такие монеты в
+        `_passes_basic_filter` — строк BTC в `tickers` нет и никогда не было.
+        Фолбэк тихо возвращал (0.0, 0.0), а `_determine_regime` читает
+        `btc_change_1h < -btc_drop_threshold_pct` — то есть при любом сбое сети
+        режим считался так, будто BTC стоит на месте, и risk_off не наступал.
+        Удержание последнего known-good значения плюс явный warning честнее.
         """
-        change_1h = 0.0
-        change_4h = 0.0
-
-        # Try 1h candles from exchange (fetch 5 to cover 4h)
         try:
-            btc_candles = await self._connector.fetch_ohlcv(
-                "BTC/USDT", "1h", limit=5
+            btc_candles = await self._connector.fetch_ohlcv("BTC/USDT", "1h", limit=5)
+        except Exception as e:
+            logger.warning(
+                f"BTC: не удалось получить часовые свечи ({e}) — режим считается "
+                f"по предыдущим значениям (1ч={self._btc_change_1h:+.2f}%, "
+                f"4ч={self._btc_change_4h:+.2f}%)"
             )
-            if btc_candles and len(btc_candles) >= 2:
-                current = btc_candles[-1]["close"]
-                # 1h change
-                prev_1h = btc_candles[-2]["close"]
-                if prev_1h > 0:
-                    change_1h = (current / prev_1h - 1) * 100
-                # 4h change
-                if len(btc_candles) >= 5:
-                    prev_4h = btc_candles[-5]["close"]
-                    if prev_4h > 0:
-                        change_4h = (current / prev_4h - 1) * 100
-                return change_1h, change_4h
-        except Exception:
-            pass
+            return self._btc_change_1h, self._btc_change_4h
 
-        # Fallback: use ticker prices from DB (1h only; 4h from tickers is unreliable)
-        ticker_rows = (
-            await session.execute(
-                select(Ticker.last, Ticker.timestamp)
-                .where(Ticker.symbol.in_(["BTC/USDT", "BTC/USDT:USDT"]))
-                .order_by(desc(Ticker.timestamp))
-                .limit(200)
+        if not btc_candles or len(btc_candles) < 2:
+            logger.warning(
+                f"BTC: биржа вернула {len(btc_candles or [])} свечей вместо 5 — "
+                f"режим считается по предыдущим значениям"
             )
-        ).all()
-        if len(ticker_rows) >= 2:
-            current = ticker_rows[0][0]
-            now = datetime.now(tz=timezone.utc)
+            return self._btc_change_1h, self._btc_change_4h
 
-            # 1h change from tickers
-            cutoff_1h = now - timedelta(hours=1)
-            for price, ts in ticker_rows:
-                if ts and ts <= cutoff_1h and ts > now - timedelta(hours=2):
-                    if price > 0 and current > 0:
-                        change_1h = (current / price - 1) * 100
-                        break
-            if change_1h == 0.0 and len(ticker_rows) > 10:
-                best = ticker_rows[-1][0]
-                if best > 0 and current > 0:
-                    change_1h = (current / best - 1) * 100
+        current = btc_candles[-1]["close"]
+        prev_1h = btc_candles[-2]["close"]
+        change_1h = (current / prev_1h - 1) * 100 if prev_1h > 0 else self._btc_change_1h
 
-            # 4h change from tickers
-            cutoff_4h = now - timedelta(hours=4)
-            for price, ts in ticker_rows:
-                if ts and ts <= cutoff_4h and ts > now - timedelta(hours=5):
-                    if price > 0 and current > 0:
-                        change_4h = (current / price - 1) * 100
-                        break
+        change_4h = self._btc_change_4h
+        if len(btc_candles) >= 5:
+            prev_4h = btc_candles[-5]["close"]
+            if prev_4h > 0:
+                change_4h = (current / prev_4h - 1) * 100
 
         return change_1h, change_4h
 

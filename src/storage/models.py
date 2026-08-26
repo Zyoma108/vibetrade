@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import Boolean, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, Float, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -27,29 +27,28 @@ class Candle(Base):
 
 
 class Ticker(Base):
-    """Снимок последнего тикера. Пишется каждый цикл сбора, читается почти всегда
-    как "последняя строка по (symbol, exchange)" — отсюда составной индекс ниже.
+    """Текущий снимок тикера — ровно одна строка на (exchange, symbol), обновляется
+    upsert-ом каждый цикл сбора.
 
-    Одиночных индексов по symbol/exchange здесь намеренно НЕТ. `ix_tickers_exchange`
-    (две различные величины на миллионы строк) не просто бесполезен по кардинальности —
-    планировщик SQLite выбирал именно его для запроса `_get_current_price`, отбирал по
-    нему половину таблицы и сортировал её через TEMP B-TREE: 5.2с против 0.011с на
-    базе за 10.08-25.08.2026. `ix_tickers_symbol` полностью покрыт составным индексом
-    (symbol — ведущая колонка). Индекс по timestamp оставлен: по нему идёт
-    периодическая обрезка истории (`prune_tickers`)."""
+    До 26.08.2026 таблица была append-only и накопила 8 млн строк (1.4 ГБ, половина
+    базы) при том, что все три читателя спрашивают только последнее значение.
+    Заодно это чинило и патологию планировщика: на миллионах строк SQLite выбирал
+    для `_get_current_price` индекс по `exchange` (две различные величины!), отбирал
+    по нему половину таблицы и сортировал через TEMP B-TREE — 5.2с на запрос,
+    стоящий в пути открытия позиции. Одиночные индексы по exchange/symbol/timestamp
+    убраны и возвращать их не нужно: уникальный ключ ниже и есть путь доступа.
+    """
 
     __tablename__ = "tickers"
 
     __table_args__ = (
-        # Порядок колонок = порядок использования: равенство по symbol и exchange,
-        # затем уже упорядоченный timestamp, поэтому LIMIT 1 берётся без сортировки.
-        Index("ix_tickers_symbol_exchange_ts", "symbol", "exchange", "timestamp"),
+        UniqueConstraint("exchange", "symbol", name="uq_ticker"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     exchange: Mapped[str] = mapped_column(String(32))
     symbol: Mapped[str] = mapped_column(String(32))
-    timestamp: Mapped[datetime] = mapped_column(index=True)
+    timestamp: Mapped[datetime] = mapped_column()  # момент снимка: биржевой, при отсутствии — локальный
     bid: Mapped[float | None] = mapped_column(Float, nullable=True)
     ask: Mapped[float | None] = mapped_column(Float, nullable=True)
     last: Mapped[float] = mapped_column(Float)

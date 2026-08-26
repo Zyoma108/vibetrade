@@ -19,7 +19,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from src.collectors.market_data import MarketDataCollector
-from src.storage.models import Base, Candle
+from src.storage.models import Base, Candle, Ticker
 
 # Naive datetimes: SQLite drops tzinfo on round-trip, so tz-aware timestamps
 # written in would come back naive and no longer match dict keys built here.
@@ -165,3 +165,80 @@ async def test_tz_aware_candles_from_real_connector_do_not_crash(session_factory
         rows = (await session.execute(select(Candle))).scalars().all()
 
     assert len(rows) == 2
+
+
+# ---------------------------------------------------------------------------
+# tickers как снимок, а не журнал (26.08.2026)
+# ---------------------------------------------------------------------------
+
+
+def _ticker(symbol: str, exchange: str, last: float, ts: datetime = BASE_TS) -> dict:
+    return {
+        "exchange": exchange,
+        "symbol": symbol,
+        "timestamp": ts,
+        "bid": last - 0.5,
+        "ask": last + 0.5,
+        "last": last,
+        "volume": 1_000.0,
+        "change_pct": 2.5,
+        "open_interest": 777.0,  # приезжает в тикере ByBit, в модель попасть не должен
+    }
+
+
+async def test_upsert_tickers_keeps_one_row_per_coin(session_factory):
+    """Каждый цикл переписывает ту же строку, а не добавляет новую.
+
+    До этой смены таблица была append-only и набрала 8 млн строк (половина БД)
+    при том, что читается только последнее значение.
+    """
+    collector = _make_collector()
+    async with session_factory() as session:
+        for i in range(5):
+            await collector._upsert_tickers(session, [
+                _ticker("AAA/USDT:USDT", "bybit", 100.0 + i),
+                _ticker("BBB/USDT:USDT", "binance", 200.0 + i),
+            ])
+            await session.commit()
+
+        rows = (await session.execute(select(Ticker).order_by(Ticker.symbol))).scalars().all()
+
+    assert len(rows) == 2, "пять циклов по двум монетам должны дать две строки"
+    assert rows[0].last == 104.0, "должно остаться последнее значение"
+    assert rows[1].last == 204.0
+
+
+async def test_upsert_tickers_separates_exchanges(session_factory):
+    """Одна монета на двух биржах — две независимые строки, а не перезапись."""
+    collector = _make_collector()
+    async with session_factory() as session:
+        await collector._upsert_tickers(session, [
+            _ticker("AAA/USDT:USDT", "bybit", 100.0),
+            _ticker("AAA/USDT:USDT", "binance", 101.0),
+        ])
+        await session.commit()
+        rows = (await session.execute(select(Ticker).order_by(Ticker.exchange))).scalars().all()
+
+    assert len(rows) == 2
+    assert {r.exchange: r.last for r in rows} == {"binance": 101.0, "bybit": 100.0}
+
+
+async def test_upsert_tickers_drops_open_interest_key(session_factory):
+    """`open_interest` едет в тикере ByBit, но колонки под него нет — не должен ломать вставку."""
+    collector = _make_collector()
+    async with session_factory() as session:
+        await collector._upsert_tickers(session, [_ticker("AAA/USDT:USDT", "bybit", 100.0)])
+        await session.commit()
+        row = (await session.execute(select(Ticker))).scalar_one()
+
+    assert row.last == 100.0
+    assert not hasattr(row, "open_interest")
+
+
+async def test_upsert_tickers_empty_batch_is_noop(session_factory):
+    """Пустой список — не падать на INSERT без VALUES."""
+    collector = _make_collector()
+    async with session_factory() as session:
+        await collector._upsert_tickers(session, [])
+        await session.commit()
+        assert (await session.execute(select(Ticker))).scalars().all() == []
