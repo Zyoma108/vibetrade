@@ -12,14 +12,14 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from src.analytics.base import Signal
 from src.config import TradingConfig
-from src.executor import position_manager as position_manager_module
+from src.executor import guards as guards_module
 from src.executor.position_manager import PositionManager
 from src.storage.models import Base, Trade
 
 
 @pytest.fixture(autouse=True)
 async def _isolated_bot_state_db(monkeypatch):
-    """_save_state() (Circuit Breaker persistence, см. db-audit-august-2026)
+    """TradingGuards.save() (Circuit Breaker persistence, см. db-audit-august-2026)
     открывает свою собственную сессию через src.storage.database.async_session
     — без этой фикстуры тесты тихо стучались бы в реальный data/trading_bot.db
     (таблицы bot_state там нет, запись просто проглатывается и логируется как
@@ -28,7 +28,7 @@ async def _isolated_bot_state_db(monkeypatch):
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     test_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-    monkeypatch.setattr(position_manager_module, "async_session", test_session)
+    monkeypatch.setattr(guards_module, "async_session", test_session)
     yield
     await engine.dispose()
 
@@ -82,8 +82,23 @@ def _trade(pnl: float = 0.0, status: str = "open", direction: str = "long",
     )
 
 
-def _pm(**config_overrides) -> PositionManager:
-    return PositionManager(config=_config(**config_overrides))
+def _fake_connector(**attrs) -> MagicMock:
+    """Заглушка коннектора. `trading_connector` обязателен с 26.08.2026 — раньше он
+    был Optional только ради тестов, и платил за это боевой код 26 подавлениями
+    type: ignore."""
+    connector = MagicMock()
+    connector.exchange_id = "bybit"
+    connector.has_credentials = attrs.pop("has_credentials", True)
+    for name, value in attrs.items():
+        setattr(connector, name, value)
+    return connector
+
+
+def _pm(connector: MagicMock | None = None, **config_overrides) -> PositionManager:
+    return PositionManager(
+        config=_config(**config_overrides),
+        trading_connector=connector or _fake_connector(),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -97,75 +112,75 @@ class TestCircuitBreakerCheck:
     def test_disabled_returns_none(self):
         """When disabled, always returns None (allow trading)."""
         pm = _pm(circuit_breaker_enabled=False)
-        pm._consecutive_losses = 10
-        assert pm._check_circuit_breaker() is None
+        pm.guards.consecutive_losses = 10
+        assert pm.guards.check_circuit_breaker() is None
 
     def test_no_losses_returns_none(self):
         """Fresh start — no restrictions."""
         pm = _pm()
-        assert pm._check_circuit_breaker() is None
+        assert pm.guards.check_circuit_breaker() is None
 
     def test_below_reduce_threshold_returns_none(self):
         """2 losses — still below reduce threshold (3)."""
         pm = _pm()
-        pm._consecutive_losses = 2
-        assert pm._check_circuit_breaker() is None
+        pm.guards.consecutive_losses = 2
+        assert pm.guards.check_circuit_breaker() is None
 
     def test_at_reduce_threshold_returns_reduce(self):
         """Exactly at reduce threshold → return 'circuit_breaker_reduce'."""
         pm = _pm()
-        pm._consecutive_losses = 3
-        assert pm._check_circuit_breaker() == "circuit_breaker_reduce"
+        pm.guards.consecutive_losses = 3
+        assert pm.guards.check_circuit_breaker() == "circuit_breaker_reduce"
 
     def test_between_reduce_and_stop_returns_reduce(self):
         """4 losses — between reduce (3) and stop (5)."""
         pm = _pm()
-        pm._consecutive_losses = 4
-        assert pm._check_circuit_breaker() == "circuit_breaker_reduce"
+        pm.guards.consecutive_losses = 4
+        assert pm.guards.check_circuit_breaker() == "circuit_breaker_reduce"
 
     def test_at_stop_threshold_sets_timer_and_returns_stop(self):
         """5 losses → full stop: sets _circuit_breaker_until, returns stop."""
         pm = _pm()
-        pm._consecutive_losses = 5
-        result = pm._check_circuit_breaker()
+        pm.guards.consecutive_losses = 5
+        result = pm.guards.check_circuit_breaker()
         assert result == "circuit_breaker_stop"
-        assert pm._circuit_breaker_until is not None
+        assert pm.guards.circuit_breaker_until is not None
         expected_until = datetime.now(tz=timezone.utc) + timedelta(minutes=60)
-        diff = abs((pm._circuit_breaker_until - expected_until).total_seconds())
+        diff = abs((pm.guards.circuit_breaker_until - expected_until).total_seconds())
         assert diff < 5  # within 5 seconds
 
     def test_during_stop_returns_stop(self):
         """While _circuit_breaker_until hasn't passed — keep returning stop."""
         pm = _pm()
-        pm._circuit_breaker_until = datetime.now(tz=timezone.utc) + timedelta(minutes=30)
-        assert pm._check_circuit_breaker() == "circuit_breaker_stop"
+        pm.guards.circuit_breaker_until = datetime.now(tz=timezone.utc) + timedelta(minutes=30)
+        assert pm.guards.check_circuit_breaker() == "circuit_breaker_stop"
 
     def test_after_stop_expires_keeps_streak_and_returns_reduce(self):
         """When stop timer expires — do NOT reset the loss streak (only a win does that);
         resume trading in reduced-size mode instead of silently forgetting the streak."""
         pm = _pm()
-        pm._consecutive_losses = 5
-        pm._circuit_breaker_stop_consumed_at = 5
-        pm._circuit_breaker_until = datetime.now(tz=timezone.utc) - timedelta(minutes=1)
-        result = pm._check_circuit_breaker()
+        pm.guards.consecutive_losses = 5
+        pm.guards.circuit_breaker_stop_consumed_at = 5
+        pm.guards.circuit_breaker_until = datetime.now(tz=timezone.utc) - timedelta(minutes=1)
+        result = pm.guards.check_circuit_breaker()
         assert result == "circuit_breaker_reduce"
-        assert pm._consecutive_losses == 5
-        assert pm._circuit_breaker_until is None
+        assert pm.guards.consecutive_losses == 5
+        assert pm.guards.circuit_breaker_until is None
 
     def test_new_loss_after_expiry_retriggers_full_stop(self):
         """A loss streak that grows PAST the already-served stop threshold re-triggers
         a fresh full stop, even though the timer previously expired."""
         pm = _pm()
-        pm._consecutive_losses = 5
-        pm._circuit_breaker_stop_consumed_at = 5
-        pm._circuit_breaker_until = datetime.now(tz=timezone.utc) - timedelta(minutes=1)
-        assert pm._check_circuit_breaker() == "circuit_breaker_reduce"
+        pm.guards.consecutive_losses = 5
+        pm.guards.circuit_breaker_stop_consumed_at = 5
+        pm.guards.circuit_breaker_until = datetime.now(tz=timezone.utc) - timedelta(minutes=1)
+        assert pm.guards.check_circuit_breaker() == "circuit_breaker_reduce"
 
-        pm._consecutive_losses = 6  # one more loss arrives while in reduce-mode
-        result = pm._check_circuit_breaker()
+        pm.guards.consecutive_losses = 6  # one more loss arrives while in reduce-mode
+        result = pm.guards.check_circuit_breaker()
         assert result == "circuit_breaker_stop"
-        assert pm._circuit_breaker_until is not None
-        assert pm._circuit_breaker_stop_consumed_at == 6
+        assert pm.guards.circuit_breaker_until is not None
+        assert pm.guards.circuit_breaker_stop_consumed_at == 6
 
 
 # ---------------------------------------------------------------------------
@@ -178,22 +193,22 @@ class TestCircuitBreakerMultiplier:
 
     def test_no_losses_returns_full(self):
         pm = _pm()
-        assert pm._get_circuit_breaker_position_mult() == 1.0
+        assert pm.guards.position_size_mult() == 1.0
 
     def test_at_reduce_returns_half(self):
         pm = _pm()
-        pm._consecutive_losses = 3
-        assert pm._get_circuit_breaker_position_mult() == 0.5
+        pm.guards.consecutive_losses = 3
+        assert pm.guards.position_size_mult() == 0.5
 
     def test_disabled_returns_full(self):
         pm = _pm(circuit_breaker_enabled=False)
-        pm._consecutive_losses = 10
-        assert pm._get_circuit_breaker_position_mult() == 1.0
+        pm.guards.consecutive_losses = 10
+        assert pm.guards.position_size_mult() == 1.0
 
     def test_custom_reduce_pct(self):
         pm = _pm(circuit_breaker_reduce_mult_pct=25.0)
-        pm._consecutive_losses = 3
-        assert pm._get_circuit_breaker_position_mult() == 0.25
+        pm.guards.consecutive_losses = 3
+        assert pm.guards.position_size_mult() == 0.25
 
 
 # ---------------------------------------------------------------------------
@@ -210,30 +225,30 @@ class TestClosePositionCounter:
         pm._send_message = AsyncMock()
         trade = _trade(pnl=-10.0)
         await pm._close_position(trade, exit_price=0.95, reason="sl")
-        assert pm._consecutive_losses == 1
+        assert pm.guards.consecutive_losses == 1
 
     @pytest.mark.asyncio
     async def test_win_resets_counter(self):
         pm = _pm()
-        pm._consecutive_losses = 4
+        pm.guards.consecutive_losses = 4
         pm._send_message = AsyncMock()
         trade = _trade(pnl=15.0)
         await pm._close_position(trade, exit_price=1.15, reason="tp")
-        assert pm._consecutive_losses == 0
-        assert pm._circuit_breaker_until is None
+        assert pm.guards.consecutive_losses == 0
+        assert pm.guards.circuit_breaker_until is None
 
     @pytest.mark.asyncio
     async def test_win_clears_stop_timer(self):
         pm = _pm()
-        pm._consecutive_losses = 5
-        pm._circuit_breaker_stop_consumed_at = 5
-        pm._circuit_breaker_until = datetime.now(tz=timezone.utc) + timedelta(minutes=30)
+        pm.guards.consecutive_losses = 5
+        pm.guards.circuit_breaker_stop_consumed_at = 5
+        pm.guards.circuit_breaker_until = datetime.now(tz=timezone.utc) + timedelta(minutes=30)
         pm._send_message = AsyncMock()
         trade = _trade(pnl=10.0)
         await pm._close_position(trade, exit_price=1.10, reason="tp")
-        assert pm._consecutive_losses == 0
-        assert pm._circuit_breaker_until is None
-        assert pm._circuit_breaker_stop_consumed_at == 0
+        assert pm.guards.consecutive_losses == 0
+        assert pm.guards.circuit_breaker_until is None
+        assert pm.guards.circuit_breaker_stop_consumed_at == 0
 
     @pytest.mark.asyncio
     async def test_break_even_counts_as_loss(self):
@@ -242,7 +257,7 @@ class TestClosePositionCounter:
         pm._send_message = AsyncMock()
         trade = _trade(pnl=0.0)
         await pm._close_position(trade, exit_price=1.0, reason="time")
-        assert pm._consecutive_losses == 1
+        assert pm.guards.consecutive_losses == 1
 
     @pytest.mark.asyncio
     async def test_disabled_does_not_track(self):
@@ -250,7 +265,7 @@ class TestClosePositionCounter:
         pm._send_message = AsyncMock()
         trade = _trade(pnl=-10.0)
         await pm._close_position(trade, exit_price=0.95, reason="sl")
-        assert pm._consecutive_losses == 0  # never changed
+        assert pm.guards.consecutive_losses == 0  # never changed
 
     @pytest.mark.asyncio
     async def test_counter_accumulates_on_consecutive_losses(self):
@@ -259,17 +274,17 @@ class TestClosePositionCounter:
         for _ in range(4):
             trade = _trade(pnl=-5.0)
             await pm._close_position(trade, exit_price=0.95, reason="sl")
-        assert pm._consecutive_losses == 4
+        assert pm.guards.consecutive_losses == 4
 
     @pytest.mark.asyncio
     async def test_reason_tp_sl_exchange_win_resets_counter(self):
         """tp_sl_exchange with positive PnL → treated as tp → resets."""
         pm = _pm()
-        pm._consecutive_losses = 3
+        pm.guards.consecutive_losses = 3
         pm._send_message = AsyncMock()
         trade = _trade(pnl=20.0)
         await pm._close_position(trade, exit_price=1.20, reason="tp_sl_exchange")
-        assert pm._consecutive_losses == 0
+        assert pm.guards.consecutive_losses == 0
 
     @pytest.mark.asyncio
     async def test_reason_tp_sl_exchange_loss_increments_counter(self):
@@ -278,7 +293,7 @@ class TestClosePositionCounter:
         pm._send_message = AsyncMock()
         trade = _trade(pnl=-10.0)
         await pm._close_position(trade, exit_price=0.95, reason="tp_sl_exchange")
-        assert pm._consecutive_losses == 1
+        assert pm.guards.consecutive_losses == 1
 
 
 # ---------------------------------------------------------------------------
@@ -294,7 +309,7 @@ class TestPositionSizing:
         """Risk = balance × risk_pct × regime_mult × cb_mult."""
         pm = _pm(risk_per_trade_pct=1.0)
         pm.position_size_mult = 1.0
-        cb = pm._get_circuit_breaker_position_mult()
+        cb = pm.guards.position_size_mult()
         balance = 1000.0
         risk = balance * (pm.config.risk_per_trade_pct / 100) * pm.position_size_mult * cb
         assert risk == pytest.approx(10.0)
@@ -303,8 +318,8 @@ class TestPositionSizing:
     async def test_cb_reduce_halves_risk(self):
         """When CB is at reduce level, risk budget is halved."""
         pm = _pm()
-        pm._consecutive_losses = 3
-        cb = pm._get_circuit_breaker_position_mult()
+        pm.guards.consecutive_losses = 3
+        cb = pm.guards.position_size_mult()
         assert cb == 0.5
         balance = 1000.0
         risk = balance * (pm.config.risk_per_trade_pct / 100) * pm.position_size_mult * cb
@@ -316,7 +331,7 @@ class TestPositionSizing:
         pm = _pm()
         pm.market_regime = "cautious"
         pm.position_size_mult = 0.5
-        cb = pm._get_circuit_breaker_position_mult()
+        cb = pm.guards.position_size_mult()
         balance = 1000.0
         risk = balance * (pm.config.risk_per_trade_pct / 100) * pm.position_size_mult * cb
         assert risk == pytest.approx(5.0)
@@ -325,10 +340,10 @@ class TestPositionSizing:
     async def test_regime_cautious_plus_cb_reduce_stacks(self):
         """cautious (×0.5) + cb_reduce (×0.5) = risk ×0.25."""
         pm = _pm()
-        pm._consecutive_losses = 3
+        pm.guards.consecutive_losses = 3
         pm.market_regime = "cautious"
         pm.position_size_mult = 0.5
-        cb = pm._get_circuit_breaker_position_mult()
+        cb = pm.guards.position_size_mult()
         assert cb == 0.5
         balance = 1000.0
         risk = balance * (pm.config.risk_per_trade_pct / 100) * pm.position_size_mult * cb
@@ -487,8 +502,8 @@ class TestOpenPositionRejections:
     @pytest.mark.asyncio
     async def test_circuit_breaker_stop_rejection(self):
         pm = _pm()
-        pm._consecutive_losses = 5
-        pm._circuit_breaker_until = datetime.now(tz=timezone.utc) + timedelta(hours=1)
+        pm.guards.consecutive_losses = 5
+        pm.guards.circuit_breaker_until = datetime.now(tz=timezone.utc) + timedelta(hours=1)
         trade, status, detail = await pm.open_position(AsyncMock(), _signal())
         assert trade is None
         assert status == "circuit_breaker_stop"
@@ -522,7 +537,7 @@ class TestOpenPositionRejections:
     @pytest.mark.asyncio
     async def test_banned_symbol_rejection(self):
         pm = _pm()
-        pm._banned_symbols.add("TEST/USDT:USDT")
+        pm.guards.banned_symbols.add("TEST/USDT:USDT")
         async def mock_count_open(_session):
             return 0
         pm._count_open = mock_count_open  # type: ignore[method-assign]
@@ -549,18 +564,18 @@ class TestErrorCascade:
     def test_first_error_no_cooldown(self):
         """Одна ошибка — ещё нет кулдауна."""
         pm = _pm()
-        pm._track_error("TEST/USDT:USDT")
-        assert pm._error_counts["TEST/USDT:USDT"] == 1
-        assert "TEST/USDT:USDT" not in pm._error_cooldown_until
+        pm.guards.track_error("TEST/USDT:USDT")
+        assert pm.guards.error_counts["TEST/USDT:USDT"] == 1
+        assert "TEST/USDT:USDT" not in pm.guards.error_cooldown_until
 
     def test_third_error_triggers_cooldown(self):
         """Три ошибки подряд → кулдаун 4 часа."""
         pm = _pm()
         for _ in range(3):
-            pm._track_error("TEST/USDT:USDT")
-        assert pm._error_counts["TEST/USDT:USDT"] == 3
-        assert "TEST/USDT:USDT" in pm._error_cooldown_until
-        until = pm._error_cooldown_until["TEST/USDT:USDT"]
+            pm.guards.track_error("TEST/USDT:USDT")
+        assert pm.guards.error_counts["TEST/USDT:USDT"] == 3
+        assert "TEST/USDT:USDT" in pm.guards.error_cooldown_until
+        until = pm.guards.error_cooldown_until["TEST/USDT:USDT"]
         expected = datetime.now(tz=timezone.utc) + timedelta(hours=4)
         assert abs((until - expected).total_seconds()) < 5
 
@@ -568,36 +583,36 @@ class TestErrorCascade:
         """Четвёртая ошибка — счётчик растёт, кулдаун остаётся."""
         pm = _pm()
         for _ in range(4):
-            pm._track_error("TEST/USDT:USDT")
-        assert pm._error_counts["TEST/USDT:USDT"] == 4
-        assert "TEST/USDT:USDT" in pm._error_cooldown_until
+            pm.guards.track_error("TEST/USDT:USDT")
+        assert pm.guards.error_counts["TEST/USDT:USDT"] == 4
+        assert "TEST/USDT:USDT" in pm.guards.error_cooldown_until
 
     def test_reset_clears_counter_and_cooldown(self):
         """Успешная сделка сбрасывает счётчик ошибок."""
         pm = _pm()
         for _ in range(5):
-            pm._track_error("TEST/USDT:USDT")
-        pm._reset_errors("TEST/USDT:USDT")
-        assert "TEST/USDT:USDT" not in pm._error_counts
-        assert "TEST/USDT:USDT" not in pm._error_cooldown_until
+            pm.guards.track_error("TEST/USDT:USDT")
+        pm.guards.reset_errors("TEST/USDT:USDT")
+        assert "TEST/USDT:USDT" not in pm.guards.error_counts
+        assert "TEST/USDT:USDT" not in pm.guards.error_cooldown_until
 
     def test_different_symbols_independent(self):
         """Ошибки по разным символам считаются независимо."""
         pm = _pm()
-        pm._track_error("A/USDT:USDT")
-        pm._track_error("A/USDT:USDT")
-        pm._track_error("B/USDT:USDT")
-        assert pm._error_counts["A/USDT:USDT"] == 2
-        assert pm._error_counts["B/USDT:USDT"] == 1
-        assert "A/USDT:USDT" not in pm._error_cooldown_until  # < 3
+        pm.guards.track_error("A/USDT:USDT")
+        pm.guards.track_error("A/USDT:USDT")
+        pm.guards.track_error("B/USDT:USDT")
+        assert pm.guards.error_counts["A/USDT:USDT"] == 2
+        assert pm.guards.error_counts["B/USDT:USDT"] == 1
+        assert "A/USDT:USDT" not in pm.guards.error_cooldown_until  # < 3
 
     @pytest.mark.asyncio
     async def test_cooldown_blocks_signal(self):
         """Сигнал в кулдауне возвращает error с detail."""
         pm = _pm()
         # Имитируем 3 ошибки и кулдаун
-        pm._error_counts["TEST/USDT:USDT"] = 3
-        pm._error_cooldown_until["TEST/USDT:USDT"] = (
+        pm.guards.error_counts["TEST/USDT:USDT"] = 3
+        pm.guards.error_cooldown_until["TEST/USDT:USDT"] = (
             datetime.now(tz=timezone.utc) + timedelta(hours=2)
         )
 
@@ -622,7 +637,9 @@ class TestErrorCascade:
 class TestExchangeErrorAlert:
     def _pm_with_notifier(self) -> tuple[PositionManager, AsyncMock]:
         send_message = AsyncMock()
-        pm = PositionManager(config=_config(), send_message=send_message)
+        pm = PositionManager(
+            config=_config(), trading_connector=_fake_connector(), send_message=send_message,
+        )
         return pm, send_message
 
     @pytest.mark.asyncio
@@ -682,7 +699,9 @@ class TestExchangeErrorAlert:
 
     @pytest.mark.asyncio
     async def test_no_notifier_configured_does_not_raise(self):
-        pm = PositionManager(config=_config())  # send_message=None
+        pm = PositionManager(
+            config=_config(), trading_connector=_fake_connector(),
+        )  # send_message=None
         await pm._alert_exchange_error("fetch_balance", Exception("boom"))
         await pm._clear_exchange_error()
 
@@ -692,12 +711,12 @@ class TestInitialState:
 
     def test_defaults(self):
         pm = _pm()
-        assert pm._consecutive_losses == 0
-        assert pm._circuit_breaker_until is None
-        assert pm._circuit_breaker_stop_consumed_at == 0
+        assert pm.guards.consecutive_losses == 0
+        assert pm.guards.circuit_breaker_until is None
+        assert pm.guards.circuit_breaker_stop_consumed_at == 0
         assert pm.market_regime == "unknown"
         assert pm.position_size_mult == 1.0
-        assert len(pm._banned_symbols) == 0
+        assert len(pm.guards.banned_symbols) == 0
 
 
 
@@ -908,16 +927,16 @@ class TestPartialCloseFallback:
 
     @staticmethod
     def _pm_with_connector(open_orders_result, **overrides) -> tuple[PositionManager, MagicMock]:
-        pm = _pm(partial_close_pct=40.0, partial_close_qty_pct=30.0, **overrides)
-        connector = MagicMock()
+        connector = _fake_connector(
+            create_market_reduce_order=AsyncMock(return_value={}),
+            fetch_positions=AsyncMock(return_value=[]),
+            set_tpsl=AsyncMock(),
+        )
         if isinstance(open_orders_result, Exception):
             connector.fetch_open_orders = AsyncMock(side_effect=open_orders_result)
         else:
             connector.fetch_open_orders = AsyncMock(return_value=open_orders_result)
-        connector.create_market_reduce_order = AsyncMock(return_value={})
-        connector.fetch_positions = AsyncMock(return_value=[])
-        connector.set_tpsl = AsyncMock()
-        pm._connector = connector
+        pm = _pm(connector, partial_close_pct=40.0, partial_close_qty_pct=30.0, **overrides)
         return pm, connector
 
     @staticmethod

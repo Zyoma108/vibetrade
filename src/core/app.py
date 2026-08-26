@@ -174,10 +174,11 @@ class Application:
 
         # Торговля
         if mode == "real":
+            assert self._trading_connector is not None  # создан выше в этой же ветке mode == "real"
             self._positions = PositionManager(
                 config=self.settings.trading,
-                send_message=self._notifier.send_message if self._notifier else None,
                 trading_connector=self._trading_connector,
+                send_message=self._notifier.send_message if self._notifier else None,
             )
             logger.info("Менеджер позиций запущен (real)")
 
@@ -185,7 +186,7 @@ class Application:
             try:
                 async with async_session() as session:
                     await self._positions.sync_positions(session)
-                    await self._positions.load_state(session)
+                    await self._positions.guards.load(session)
                     await session.commit()
             except Exception:
                 logger.exception(

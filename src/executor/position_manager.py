@@ -1,26 +1,19 @@
 import asyncio
-import json
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Coroutine
 
 from sqlalchemy import desc, select
-from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.analytics.base import Signal
 from src.config import TradingConfig
 from src.connectors.exchange import ExchangeConnector
-from src.storage.database import async_session
-from src.storage.models import BotState, Ticker, Trade
+from src.executor.guards import SOURCE, TradingGuards
+from src.storage.models import Ticker, Trade
 
 logger = logging.getLogger(__name__)
 
-# Все сделки и состояние бота пишутся под этим source. Колонка осталась в схеме
-# от удалённого ИИ-режима (он был вторым пайплайном на отдельном аккаунте) и
-# продолжает скоупить запросы — чтобы исторические строки того режима не
-# попадали в алгоритмическую логику.
-SOURCE = "algo"
 
 
 class PositionManager:
@@ -29,28 +22,23 @@ class PositionManager:
     def __init__(
         self,
         config: TradingConfig,
+        trading_connector: ExchangeConnector,
         send_message: Callable[[str], Coroutine] | None = None,
-        trading_connector: ExchangeConnector | None = None,
     ):
+        """`trading_connector` обязателен. Он был `| None` только ради удобства
+        тестов, и цена этого — 26 подавлений `type: ignore[union-attr]` в боевом
+        коде: в проде менеджер создаётся исключительно внутри `if mode == "real"`,
+        где отсутствие ключей уже привело бы к RuntimeError выше по стеку. Тесты
+        передают фейковый коннектор."""
         self.config = config
         self._send_message = send_message
         self._connector = trading_connector
-        self._banned_symbols: set[str] = set()  # монеты с ошибками торговли
+        self.guards = TradingGuards(config)  # Circuit Breaker, бан-лист, кулдаун ошибок
         self.market_regime: str = "unknown"
         self.position_size_mult: float = 1.0
         self.block_entries: bool = False  # should_block_entries() из market_context
 
-        # Circuit Breaker: защита от серий убытков
-        self._consecutive_losses: int = 0
-        self._circuit_breaker_until: datetime | None = None  # полная остановка до этого времени
-        # На каком значении _consecutive_losses уже была выдана полная остановка — чтобы после
-        # истечения таймера не остановить торговлю повторно на ТОЙ ЖЕ серии убытков (см.
-        # _check_circuit_breaker: сброс серии должен происходить только по факту победы).
-        self._circuit_breaker_stop_consumed_at: int = 0
 
-        # Защита от каскада ошибок по символу
-        self._error_counts: dict[str, int] = {}  # symbol → кол-во ошибок подряд
-        self._error_cooldown_until: dict[str, datetime] = {}  # symbol → не пытаться до
 
         # Алерт в Telegram при ошибках связи с биржей (истёкший/невалидный API-ключ и т.п.)
         self._exchange_error_since: datetime | None = None  # None = сейчас всё ок
@@ -58,7 +46,8 @@ class PositionManager:
 
     @property
     def _has_connector(self) -> bool:
-        return self._connector is not None and self._connector.has_credentials
+        """Коннектор есть всегда, но без ключей торговать нечем (режим signal)."""
+        return self._connector.has_credentials
 
     # ==================================================================
     # SYNC (только real) — восстановление после перезапуска
@@ -70,7 +59,7 @@ class PositionManager:
             return
 
         try:
-            exchange_positions = await self._connector.fetch_positions()  # type: ignore[union-attr]
+            exchange_positions = await self._connector.fetch_positions()
             await self._clear_exchange_error()
         except Exception as e:
             logger.error(f"Не удалось получить позиции с биржи: {e}")
@@ -146,183 +135,16 @@ class PositionManager:
             f"{len(db_positions)} в БД"
         )
 
-    async def load_state(self, session: AsyncSession) -> None:
-        """Восстановить Circuit Breaker / бан-лист / error-cooldown из БД после
-        рестарта процесса. Без этого вызова состояние всегда стартует "с чистого
-        листа" (0 убытков подряд, пустой бан-лист) — вызывай один раз при старте,
-        сразу после sync_positions (см. src/core/app.py)."""
-        state = await session.get(BotState, SOURCE)
-        if state is None:
-            return
-        self._consecutive_losses = state.consecutive_losses
-        self._circuit_breaker_until = state.circuit_breaker_until
-        self._circuit_breaker_stop_consumed_at = state.circuit_breaker_stop_consumed_at
-        self._banned_symbols = set(json.loads(state.banned_symbols_json or "[]"))
-        self._error_counts = json.loads(state.error_counts_json or "{}")
-        self._error_cooldown_until = {
-            symbol: datetime.fromisoformat(ts)
-            for symbol, ts in json.loads(state.error_cooldown_until_json or "{}").items()
-        }
-        logger.info(
-            f"Состояние восстановлено: "
-            f"{self._consecutive_losses} убытков подряд, "
-            f"{len(self._banned_symbols)} монет в чёрном списке, "
-            f"{len(self._error_cooldown_until)} символов в кулдауне"
-        )
 
-    # Задержки перед повторной попыткой при "database is locked" — только для пути
-    # БЕЗ переданного session (см. docstring _save_state ниже).
-    _SAVE_STATE_RETRY_DELAYS_SEC = (10, 20, 40, 80)
 
-    def _apply_state_to_row(self, state: BotState) -> None:
-        """Перенести текущее in-memory состояние CB/бан-листа/error-cooldown в ORM-строку."""
-        state.consecutive_losses = self._consecutive_losses
-        state.circuit_breaker_until = self._circuit_breaker_until
-        state.circuit_breaker_stop_consumed_at = self._circuit_breaker_stop_consumed_at
-        state.banned_symbols_json = json.dumps(sorted(self._banned_symbols))
-        state.error_counts_json = json.dumps(self._error_counts)
-        state.error_cooldown_until_json = json.dumps(
-            {symbol: dt.isoformat() for symbol, dt in self._error_cooldown_until.items()}
-        )
-        state.updated_at = datetime.now(tz=timezone.utc)
 
-    async def _save_state(self, session: AsyncSession | None = None) -> None:
-        """Сохранить Circuit Breaker / бан-лист / error-cooldown в БД.
 
-        Фикс 12.08.2026 (v2): изначально всегда открывала свою НЕЗАВИСИМУЮ сессию —
-        но при вызове из `_close_position` (единственный "горячий" путь, срабатывает
-        почти на КАЖДОМ закрытии сделки при включённом Circuit Breaker) это означало
-        гонку с сессией `Application._on_collect_cycle_done`, которая держит одну
-        транзакцию на весь ~5-минутный скан рынка и коммитит её только в конце —
-        причём сама `_close_position` вызывается ИЗНУТРИ этой же транзакции. Retry с
-        бэкоффом (150с бюджета, см. v1 этого фикса) не спасал: ждать было нечего —
-        транзакция физически не могла закоммититься раньше, чем этот же await
-        вернёт управление наверх по стеку, так что ожидание было эквивалентно
-        затягиванию собственного дедлока до истечения бюджета ретраев.
-
-        Теперь принимает опциональный `session` — если он передан (все вызовы из
-        `_close_position`, у которой он есть в стеке через `update_positions`/
-        ), пишем ПРЯМО В НЕГО (`flush`, без своего `commit` —
-        закоммитится вместе с остальным в конце вызывающей транзакции). Это та же
-        самая транзакция, гонки за блокировкой физически нет.
-
-        Независимая сессия с ретраем остаётся fallback для вызовов БЕЗ session
-        под рукой (`_track_error`/`_reset_errors` — синхронный код без session в
-        стеке, см. `_schedule_save_state`) — там гонка с циклом сборщика всё ещё
-        возможна, но эти пути срабатывают на порядок реже (только error-cascade),
-        а не на каждом закрытии сделки."""
-        if session is not None:
-            try:
-                state = await session.get(BotState, SOURCE)
-                if state is None:
-                    state = BotState(source=SOURCE)
-                    session.add(state)
-                self._apply_state_to_row(state)
-                await session.flush()
-            except Exception:
-                logger.exception("Не удалось сохранить состояние Circuit Breaker")
-            return
-
-        attempt = 0
-        while True:
-            try:
-                async with async_session() as own_session:
-                    state = await own_session.get(BotState, SOURCE)
-                    if state is None:
-                        state = BotState(source=SOURCE)
-                        own_session.add(state)
-                    self._apply_state_to_row(state)
-                    await own_session.commit()
-                return
-            except OperationalError as e:
-                if "database is locked" in str(e).lower() and attempt < len(self._SAVE_STATE_RETRY_DELAYS_SEC):
-                    delay = self._SAVE_STATE_RETRY_DELAYS_SEC[attempt]
-                    attempt += 1
-                    logger.warning(
-                        f"БД занята при сохранении состояния Circuit "
-                        f"Breaker, повтор через {delay}с (попытка {attempt}/"
-                        f"{len(self._SAVE_STATE_RETRY_DELAYS_SEC)})"
-                    )
-                    await asyncio.sleep(delay)
-                    continue
-                logger.exception("Не удалось сохранить состояние Circuit Breaker")
-                return
-            except Exception:
-                logger.exception("Не удалось сохранить состояние Circuit Breaker")
-                return
-
-    def _schedule_save_state(self) -> None:
-        """Запланировать фоновое сохранение состояния из синхронного кода.
-        Безопасно вызывать и без работающего event loop (например, из
-        синхронных unit-тестов) — тогда просто пропускаем персист."""
-        try:
-            asyncio.get_running_loop()
-        except RuntimeError:
-            return
-        asyncio.create_task(self._save_state())
 
     # ==================================================================
     # OPENING
     # ==================================================================
 
-    def _check_circuit_breaker(self) -> str | None:
-        """Проверить, не заблокирована ли торговля Circuit Breaker'ом.
 
-        Returns:
-            None — можно торговать
-            'circuit_breaker_stop' — полная остановка
-            'circuit_breaker_reduce' — размер позиции уменьшен (торгуем дальше)
-        """
-        if not self.config.circuit_breaker_enabled:
-            return None
-
-        now = datetime.now(tz=timezone.utc)
-
-        # Полная остановка?
-        if self._circuit_breaker_until is not None:
-            if now < self._circuit_breaker_until:
-                return "circuit_breaker_stop"
-            # Таймер истёк — снимаем полную блокировку, но серию убытков НЕ сбрасываем
-            # (сброс — только по факту выигрыша, см. update_positions). Дальше проваливаемся
-            # в проверку ниже: та же серия убытков переводит торговлю в reduce-режим
-            # (уменьшенный размер), а не снова в stop — иначе это была бы бесконечная
-            # остановка без единой сделки, способной её прервать победой.
-            self._circuit_breaker_until = None
-            logger.info(
-                "Circuit Breaker: таймер остановки истёк, торговля возобновлена "
-                f"уменьшенным размером ({self._consecutive_losses} убытков подряд не сброшены)"
-            )
-
-        # Новый убыток сверх уже "отработанной" остановки → полная остановка
-        if (
-            self._consecutive_losses >= self.config.circuit_breaker_loss_streak_stop
-            and self._consecutive_losses > self._circuit_breaker_stop_consumed_at
-        ):
-            self._circuit_breaker_until = now + timedelta(
-                minutes=self.config.circuit_breaker_stop_minutes
-            )
-            self._circuit_breaker_stop_consumed_at = self._consecutive_losses
-            logger.warning(
-                f"Circuit Breaker: {self._consecutive_losses} убытков подряд → "
-                f"ПОЛНАЯ ОСТАНОВКА на {self.config.circuit_breaker_stop_minutes} мин "
-                f"(до {self._circuit_breaker_until.strftime('%H:%M:%S')})"
-            )
-            # Метод синхронный (вызывается из горячего пути open_position) — сохраняем
-            # состояние фоновой задачей, не блокируя проверку сигнала на запись в БД.
-            self._schedule_save_state()
-            return "circuit_breaker_stop"
-
-        if self._consecutive_losses >= self.config.circuit_breaker_loss_streak_reduce:
-            return "circuit_breaker_reduce"
-
-        return None
-
-    def _get_circuit_breaker_position_mult(self) -> float:
-        """Множитель размера позиции от Circuit Breaker."""
-        cb_status = self._check_circuit_breaker()
-        if cb_status == "circuit_breaker_reduce":
-            return self.config.circuit_breaker_reduce_mult_pct / 100.0
-        return 1.0
 
     async def open_position(
         self,
@@ -347,12 +169,12 @@ class PositionManager:
             return None, "market_block", self.market_regime
 
         # Circuit Breaker
-        cb_status = self._check_circuit_breaker()
+        cb_status = self.guards.check_circuit_breaker()
         if cb_status == "circuit_breaker_stop":
             logger.info(
                 f"Сигнал {signal.symbol} пропущен: "
                 f"Circuit Breaker — полная остановка "
-                f"({self._consecutive_losses} убытков подряд)"
+                f"({self.guards.consecutive_losses} убытков подряд)"
             )
             return None, "circuit_breaker_stop", None
 
@@ -366,17 +188,18 @@ class PositionManager:
             return None, "limit", f"max_positions={self.config.max_positions}"
 
         # Проверка — кулдаун после серии ошибок по символу (защита от каскада)
-        cooldown_until = self._error_cooldown_until.get(signal.symbol)
-        if cooldown_until is not None and datetime.now(tz=timezone.utc) < cooldown_until:
+        cooldown_until = self.guards.error_cooldown_left(signal.symbol)
+        if cooldown_until is not None:
+            errors = self.guards.error_count(signal.symbol)
             logger.info(
                 f"Сигнал {signal.symbol} пропущен: "
-                f"кулдаун после {self._error_counts.get(signal.symbol, 0)} ошибок "
+                f"кулдаун после {errors} ошибок "
                 f"(до {cooldown_until.strftime('%H:%M')})"
             )
-            return None, "error", f"error_cooldown:{self._error_counts.get(signal.symbol, 0)}"
+            return None, "error", f"error_cooldown:{errors}"
 
         # Проверка — монета в чёрном списке (ошибки торговли)
-        if signal.symbol in self._banned_symbols:
+        if self.guards.is_banned(signal.symbol):
             logger.info(f"Сигнал {signal.symbol} пропущен: монета в чёрном списке")
             return None, "error", "banned_symbol"
 
@@ -398,7 +221,7 @@ class PositionManager:
 
         # Бюджет риска: % от депозита с биржи
         try:
-            balance = await self._connector.fetch_balance()  # type: ignore[union-attr]
+            balance = await self._connector.fetch_balance()
             await self._clear_exchange_error()
             total = float(balance.get("total", balance.get("free", 0)))
             if total <= 0:
@@ -410,12 +233,12 @@ class PositionManager:
             return None, "error", f"balance_fetch: {e}"
 
         # Применяем множители рыночного режима и Circuit Breaker к бюджету риска
-        cb_mult = self._get_circuit_breaker_position_mult()
+        cb_mult = self.guards.position_size_mult()
         risk_budget = total * (self.config.risk_per_trade_pct / 100) * self.position_size_mult * cb_mult
         if cb_mult < 1.0:
             logger.info(
                 f"Circuit Breaker: размер позиции {signal.symbol} уменьшен "
-                f"до {cb_mult*100:.0f}% ({self._consecutive_losses} убытков подряд)"
+                f"до {cb_mult*100:.0f}% ({self.guards.consecutive_losses} убытков подряд)"
             )
 
         # Проверка минимального лота ДО отправки ордера — иначе биржа/ccxt отклоняет
@@ -425,7 +248,7 @@ class PositionManager:
         # (_track_error) и уводила рабочий символ в кулдаун/бан на пустом месте.
         sl_distance_est = reference_price * (self.config.stop_loss_pct / 100)
         est_quantity = risk_budget / sl_distance_est if sl_distance_est > 0 else 0
-        min_amount = await self._connector.min_order_amount(signal.symbol)  # type: ignore[union-attr]
+        min_amount = await self._connector.min_order_amount(signal.symbol)
         if min_amount and est_quantity < min_amount:
             logger.info(
                 f"Сигнал {signal.symbol} пропущен: расчётный размер {est_quantity:.6f} "
@@ -441,7 +264,7 @@ class PositionManager:
         try:
             lev = int(self.config.leverage)
             if lev > 1:
-                await self._connector.set_leverage(signal.symbol, lev)  # type: ignore[union-attr]
+                await self._connector.set_leverage(signal.symbol, lev)
         except Exception as e:
             logger.warning(f"Не удалось выставить плечо для {signal.symbol}: {e}")
 
@@ -491,7 +314,7 @@ class PositionManager:
         # Ордер на бирже
         try:
             # 1. Открываем позицию рыночным ордером
-            await self._connector.create_market_order(  # type: ignore[union-attr]
+            await self._connector.create_market_order(
                 symbol=signal.symbol,
                 side="buy",
                 amount=quantity,
@@ -500,7 +323,7 @@ class PositionManager:
             # 2. Ждём исполнения и получаем фактическую цену с биржи
             await asyncio.sleep(2)
             try:
-                ex_positions = await self._connector.fetch_positions(  # type: ignore[union-attr]
+                ex_positions = await self._connector.fetch_positions(
                     signal.symbol
                 )
                 if ex_positions and ex_positions[0].get("entry_price"):
@@ -523,7 +346,7 @@ class PositionManager:
 
             # 3. Выставляем TP/SL от фактической цены
             try:
-                await self._connector.set_tpsl(  # type: ignore[union-attr]
+                await self._connector.set_tpsl(
                     symbol=signal.symbol,
                     side="buy",
                     amount=quantity,
@@ -541,7 +364,7 @@ class PositionManager:
                         f"аварийно закрываю позицию: {e}"
                     )
                     try:
-                        await self._connector.close_position(  # type: ignore[union-attr]
+                        await self._connector.close_position(
                             signal.symbol
                         )
                     except Exception:
@@ -564,7 +387,7 @@ class PositionManager:
                 try:
                     partial_trigger = self._partial_trigger_price(entry_price, tp_price)
                     partial_qty = quantity * (self.config.partial_close_qty_pct / 100)
-                    await self._connector.place_reduce_only_limit(  # type: ignore[union-attr]
+                    await self._connector.place_reduce_only_limit(
                         symbol=signal.symbol,
                         side="buy",
                         amount=partial_qty,
@@ -587,14 +410,14 @@ class PositionManager:
             err = str(e)
             # ByBit требует подписать соглашение — пропускаем без шума
             if "sign the required agreement" in err or "110126" in err:
-                self._banned_symbols.add(signal.symbol)
-                self._track_error(signal.symbol)
+                self.guards.ban_symbol(signal.symbol)
+                self.guards.track_error(signal.symbol)
                 logger.info(
                     f"ByBit не даёт торговать {signal.symbol}: "
                     f"нужно подписать соглашение на сайте (добавлен в чёрный список)"
                 )
                 return None, "error", f"bybit_agreement: {err[:120]}"
-            self._track_error(signal.symbol)
+            self.guards.track_error(signal.symbol)
             logger.exception(f"Не удалось создать ордер для {signal.symbol}")
             return None, "error", f"order: {err[:120]}"
 
@@ -635,7 +458,7 @@ class PositionManager:
             f"Позиция открыта: {signal.symbol} @ {entry_price:.6f} "
             f"qty={quantity:.2f}"
         )
-        self._reset_errors(signal.symbol)
+        self.guards.reset_errors(signal.symbol)
         return trade, "opened", None
 
     async def _place_pending_entry(
@@ -661,20 +484,20 @@ class PositionManager:
         )
 
         try:
-            await self._connector.create_limit_order(  # type: ignore[union-attr]
+            await self._connector.create_limit_order(
                 symbol=signal.symbol, side="buy", amount=quantity, price=limit_price,
             )
         except Exception as e:
             err = str(e)
             if "sign the required agreement" in err or "110126" in err:
-                self._banned_symbols.add(signal.symbol)
-                self._track_error(signal.symbol)
+                self.guards.ban_symbol(signal.symbol)
+                self.guards.track_error(signal.symbol)
                 logger.info(
                     f"ByBit не даёт торговать {signal.symbol}: "
                     f"нужно подписать соглашение на сайте (добавлен в чёрный список)"
                 )
                 return None, "error", f"bybit_agreement: {err[:120]}"
-            self._track_error(signal.symbol)
+            self.guards.track_error(signal.symbol)
             logger.exception(f"Не удалось выставить лимитник входа для {signal.symbol}")
             return None, "error", f"pending_order: {err[:120]}"
 
@@ -703,7 +526,7 @@ class PositionManager:
             f"Истекает через {self.config.pending_entry_timeout_minutes:.0f} мин"
         )
         logger.info(f"Pending-вход выставлен: {signal.symbol} @ {limit_price:.6f}")
-        self._reset_errors(signal.symbol)
+        self.guards.reset_errors(signal.symbol)
         return trade, "pending", None
 
     # ==================================================================
@@ -727,7 +550,7 @@ class PositionManager:
         activated = []
         for pos in pending:
             try:
-                ex_positions = await self._connector.fetch_positions(pos.symbol)  # type: ignore[union-attr]
+                ex_positions = await self._connector.fetch_positions(pos.symbol)
             except Exception:
                 logger.warning(f"Ошибка проверки pending-входа для {pos.symbol}")
                 continue
@@ -764,7 +587,7 @@ class PositionManager:
             f"TP: ${tp_price:.6f} (+{tp_pct:.1f}%) | SL: ${sl_price:.6f} (-{sl_pct:.1f}%)"
         )
         logger.info(f"Pending-вход исполнен: {pos.symbol} @ {fill_price:.6f}")
-        self._reset_errors(pos.symbol)
+        self.guards.reset_errors(pos.symbol)
 
     async def _setup_tp_sl_and_partial(
         self, pos: Trade, fill_price: float, is_maker: bool
@@ -779,7 +602,7 @@ class PositionManager:
         sl_price = self._sl_price(fill_price)
         tp_sl_ok = False
         try:
-            await self._connector.set_tpsl(  # type: ignore[union-attr]
+            await self._connector.set_tpsl(
                 symbol=pos.symbol,
                 side="buy",
                 amount=pos.quantity,
@@ -796,7 +619,7 @@ class PositionManager:
         if tp_sl_ok:
             try:
                 partial_trigger = self._partial_trigger_price(fill_price, tp_price)
-                await self._connector.place_reduce_only_limit(  # type: ignore[union-attr]
+                await self._connector.place_reduce_only_limit(
                     symbol=pos.symbol,
                     side="buy",
                     amount=pos.quantity * (self.config.partial_close_qty_pct / 100),
@@ -812,7 +635,7 @@ class PositionManager:
     async def _expire_pending_entry(self, pos: Trade) -> None:
         """Лимитник на вход не исполнился за отведённое время — снять."""
         try:
-            await self._connector.cancel_all_orders(pos.symbol)  # type: ignore[union-attr]
+            await self._connector.cancel_all_orders(pos.symbol)
         except Exception:
             logger.warning(f"Не удалось отменить лимитник входа для {pos.symbol}")
         pos.status = "expired"
@@ -851,7 +674,7 @@ class PositionManager:
 
         # Сверить с биржей
         try:
-            ex_positions = await self._connector.fetch_positions()  # type: ignore[union-attr]
+            ex_positions = await self._connector.fetch_positions()
             await self._clear_exchange_error()
             ex_symbols = {p["symbol"] for p in ex_positions}
         except Exception as e:
@@ -898,7 +721,7 @@ class PositionManager:
             await asyncio.sleep(1)
             tp = self._tp_price(pos.entry_price)
             sl = self._sl_price(pos.entry_price)
-            await self._connector.set_tpsl(  # type: ignore[union-attr]
+            await self._connector.set_tpsl(
                 symbol=pos.symbol,
                 side="buy",
                 amount=pos.quantity,
@@ -921,7 +744,7 @@ class PositionManager:
                 f"Цена ушла за SL для {pos.symbol}, аварийно закрываю позицию: {e}"
             )
             try:
-                await self._connector.close_position(pos.symbol)  # type: ignore[union-attr]
+                await self._connector.close_position(pos.symbol)
             except Exception:
                 logger.exception(f"Не удалось аварийно закрыть {pos.symbol}")
             current_price = await self._get_current_price(session, pos.symbol)
@@ -939,7 +762,7 @@ class PositionManager:
         # считался по приблизительной цене, и в отчётах это было неотличимо от
         # точного учёта (fee/PnL расходились с биржей без всякого следа).
         try:
-            last_trade = await self._connector.fetch_last_trade(  # type: ignore[union-attr]
+            last_trade = await self._connector.fetch_last_trade(
                 pos.symbol, pos.entry_time
             )
             if last_trade:
@@ -969,7 +792,7 @@ class PositionManager:
         Возвращает True, если лимитник исполнился и позиция обработана.
         """
         try:
-            ex_positions = await self._connector.fetch_positions(  # type: ignore[union-attr]
+            ex_positions = await self._connector.fetch_positions(
                 pos.symbol
             )
         except Exception:
@@ -999,7 +822,7 @@ class PositionManager:
 
         # Переводим стоп в безубыток для остатка
         try:
-            await self._connector.set_tpsl(  # type: ignore[union-attr]
+            await self._connector.set_tpsl(
                 symbol=pos.symbol,
                 side="buy" if pos.direction == "long" else "sell",
                 amount=actual_contracts,
@@ -1046,7 +869,7 @@ class PositionManager:
         # вдвое больше запланированного, без единой строчки в логе. Любая
         # неопределённость = пропустить цикл, повторим на следующем.
         try:
-            open_orders = await self._connector.fetch_open_orders(  # type: ignore[union-attr]
+            open_orders = await self._connector.fetch_open_orders(
                 pos.symbol
             )
         except Exception as e:
@@ -1065,19 +888,19 @@ class PositionManager:
             return True
 
         try:
-            await self._connector.create_market_reduce_order(  # type: ignore[union-attr]
+            await self._connector.create_market_reduce_order(
                 pos.symbol,
                 "sell" if pos.direction == "long" else "buy",
                 close_qty,
             )
             # Получаем фактический остаток и переводим стоп в б/у
-            ex_positions = await self._connector.fetch_positions(  # type: ignore[union-attr]
+            ex_positions = await self._connector.fetch_positions(
                 pos.symbol
             )
             remaining = pos.quantity - close_qty
             if ex_positions:
                 remaining = abs(ex_positions[0]["contracts"])
-            await self._connector.set_tpsl(  # type: ignore[union-attr]
+            await self._connector.set_tpsl(
                 symbol=pos.symbol,
                 side="buy" if pos.direction == "long" else "sell",
                 amount=remaining,
@@ -1134,7 +957,7 @@ class PositionManager:
             return False
 
         try:
-            await self._connector.close_position(pos.symbol)  # type: ignore[union-attr]
+            await self._connector.close_position(pos.symbol)
         except Exception:
             logger.exception(f"Ошибка закрытия {pos.symbol} по времени")
             return True
@@ -1226,7 +1049,7 @@ class PositionManager:
         self, trade: Trade, exit_price: float, reason: str,
         session: AsyncSession | None = None,
     ) -> None:
-        """`session` (если передан вызывающим) прокидывается в `_save_state()` —
+        """`session` (если передан вызывающим) прокидывается в `guards.save()` —
         см. её docstring про фикс гонки за блокировкой БД 12.08.2026."""
         trade.exit_price = exit_price
         trade.exit_time = datetime.now(tz=timezone.utc)
@@ -1269,26 +1092,24 @@ class PositionManager:
         # Circuit Breaker: обновляем счётчик убытков подряд
         if self.config.circuit_breaker_enabled:
             if (trade.pnl or 0) <= 0:
-                self._consecutive_losses += 1
+                self.guards.register_loss()
                 logger.warning(
-                    f"Circuit Breaker: {self._consecutive_losses} убытков подряд "
+                    f"Circuit Breaker: {self.guards.consecutive_losses} убытков подряд "
                     f"(PnL=${trade.pnl:+.2f} на {trade.symbol})"
                 )
-                if self._consecutive_losses >= self.config.circuit_breaker_loss_streak_reduce:
+                if self.guards.consecutive_losses >= self.config.circuit_breaker_loss_streak_reduce:
                     mult = self.config.circuit_breaker_reduce_mult_pct
                     logger.warning(
                         f"Circuit Breaker: размер позиций уменьшен до {mult:.0f}%"
                     )
             else:
-                if self._consecutive_losses > 0:
+                if self.guards.consecutive_losses > 0:
                     logger.info(
-                        f"Circuit Breaker: серия из {self._consecutive_losses} убытков "
+                        f"Circuit Breaker: серия из {self.guards.consecutive_losses} убытков "
                         f"прервана прибылью ${trade.pnl:+.2f} на {trade.symbol}"
                     )
-                self._consecutive_losses = 0
-                self._circuit_breaker_until = None
-                self._circuit_breaker_stop_consumed_at = 0
-            await self._save_state(session)
+                self.guards.register_win()
+            await self.guards.save(session)
 
         labels = {
             "tp": ("✅", "Тейк-профит"),
@@ -1378,29 +1199,4 @@ class PositionManager:
     # Error cascade protection
     # ------------------------------------------------------------------
 
-    def _track_error(self, symbol: str) -> None:
-        """Зафиксировать ошибку открытия позиции по символу.
-        После 3 ошибок подряд — кулдаун 4 часа (защита от каскада)."""
-        count = self._error_counts.get(symbol, 0) + 1
-        self._error_counts[symbol] = count
-        if count >= 3:
-            cooldown_hours = 4
-            self._error_cooldown_until[symbol] = (
-                datetime.now(tz=timezone.utc)
-                + timedelta(hours=cooldown_hours)
-            )
-            logger.warning(
-                f"Error cascade: {symbol} — {count} ошибок подряд, "
-                f"кулдаун на {cooldown_hours}ч"
-            )
-        # Метод синхронный (вызывается из мест без session под рукой, включая
-        # обработку исключений биржи) — сохраняем фоновой задачей, см. _save_state.
-        self._schedule_save_state()
 
-    def _reset_errors(self, symbol: str) -> None:
-        """Сбросить счётчик ошибок после успешной сделки."""
-        if symbol not in self._error_counts and symbol not in self._error_cooldown_until:
-            return
-        self._error_counts.pop(symbol, None)
-        self._error_cooldown_until.pop(symbol, None)
-        self._schedule_save_state()
