@@ -934,15 +934,26 @@ class PositionManager:
     ) -> None:
         """Позиция уже закрыта на бирже (сработал TP/SL) — синхронизировать в БД."""
         exit_price = current_price or pos.entry_price
-        # Пытаемся получить фактическую цену выхода
+        # Пытаемся получить фактическую цену выхода. Если не вышло — закрываем по
+        # последнему тикеру, но обязательно с логом: иначе PnL сделки молча
+        # считался по приблизительной цене, и в отчётах это было неотличимо от
+        # точного учёта (fee/PnL расходились с биржей без всякого следа).
         try:
             last_trade = await self._connector.fetch_last_trade(  # type: ignore[union-attr]
                 pos.symbol, pos.entry_time
             )
             if last_trade:
                 exit_price = last_trade["price"]
-        except Exception:
-            pass
+            else:
+                logger.warning(
+                    f"{pos.symbol}: биржа не вернула сделку выхода — PnL посчитан "
+                    f"по последнему тикеру (${exit_price:.6f}), возможна неточность"
+                )
+        except Exception as e:
+            logger.warning(
+                f"{pos.symbol}: не удалось получить фактическую цену выхода ({e}) — "
+                f"PnL посчитан по последнему тикеру (${exit_price:.6f})"
+            )
         await self._close_position(pos, exit_price, "tp_sl_exchange", session)
         closed.append(pos)
 
@@ -1028,17 +1039,24 @@ class PositionManager:
 
         close_qty = pos.quantity * (self.config.partial_close_qty_pct / 100)
 
-        # Проверить, нет ли уже лимитника на бирже (после рестарта)
-        has_open_orders = False
+        # Проверить, нет ли уже лимитника на бирже (после рестарта).
+        # Сбой этого запроса НЕ означает "ордеров нет": раньше исключение здесь
+        # молча проглатывалось, флаг оставался False, и код отправлял market
+        # reduce-only ПОВЕРХ живого лимитника частичной фиксации — закрывалось
+        # вдвое больше запланированного, без единой строчки в логе. Любая
+        # неопределённость = пропустить цикл, повторим на следующем.
         try:
-            open_orders = await self._connector._call(  # type: ignore[union-attr]
-                "fetch_open_orders", pos.symbol
+            open_orders = await self._connector.fetch_open_orders(  # type: ignore[union-attr]
+                pos.symbol
             )
-            has_open_orders = len(open_orders) > 0
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(
+                f"Частичная фиксация {pos.symbol}: не удалось проверить открытые "
+                f"ордера ({e}) — fallback пропущен, повтор в следующем цикле"
+            )
+            return True
 
-        if has_open_orders:
+        if open_orders:
             logger.info(
                 f"Частичная фиксация {pos.symbol}: "
                 f"на бирже есть открытые ордера, "
@@ -1047,12 +1065,10 @@ class PositionManager:
             return True
 
         try:
-            await self._connector._call(  # type: ignore[union-attr]
-                "create_order",
-                pos.symbol, "market",
+            await self._connector.create_market_reduce_order(  # type: ignore[union-attr]
+                pos.symbol,
                 "sell" if pos.direction == "long" else "buy",
-                close_qty, None,
-                {"reduceOnly": True},
+                close_qty,
             )
             # Получаем фактический остаток и переводим стоп в б/у
             ex_positions = await self._connector.fetch_positions(  # type: ignore[union-attr]

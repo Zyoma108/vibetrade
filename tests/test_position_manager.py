@@ -891,3 +891,76 @@ class TestMarketContextBlockEntries:
         """Неизвестный режим → не блокируем (ждём данных)."""
         mc = self._make_mc(regime="unknown", supertrend_color="red")
         assert mc.should_block_entries() is False
+
+
+# ---------------------------------------------------------------------------
+# Fallback частичной фиксации — _check_partial_close_fallback
+# ---------------------------------------------------------------------------
+
+
+class TestPartialCloseFallback:
+    """Fallback срабатывает, только когда на бирже ТОЧНО нет живого лимитника.
+
+    Регрессия 26.08.2026: сбой `fetch_open_orders` проглатывался, флаг
+    `has_open_orders` оставался False, и market reduce-only уходил поверх
+    работающего лимитника — закрывалось вдвое больше запланированного, молча.
+    """
+
+    @staticmethod
+    def _pm_with_connector(open_orders_result, **overrides) -> tuple[PositionManager, MagicMock]:
+        pm = _pm(partial_close_pct=40.0, partial_close_qty_pct=30.0, **overrides)
+        connector = MagicMock()
+        if isinstance(open_orders_result, Exception):
+            connector.fetch_open_orders = AsyncMock(side_effect=open_orders_result)
+        else:
+            connector.fetch_open_orders = AsyncMock(return_value=open_orders_result)
+        connector.create_market_reduce_order = AsyncMock(return_value={})
+        connector.fetch_positions = AsyncMock(return_value=[])
+        connector.set_tpsl = AsyncMock()
+        pm._connector = connector
+        return pm, connector
+
+    @staticmethod
+    def _triggered_price(pm: PositionManager, pos: Trade) -> float:
+        """Цена ровно на пороге частичной фиксации."""
+        return pm._partial_trigger_price(pos.entry_price, pm._tp_price(pos.entry_price))
+
+    async def test_below_trigger_does_nothing(self):
+        """Ниже порога — fallback вообще не рассматривается."""
+        pm, connector = self._pm_with_connector([])
+        pos = _trade(entry_price=100.0, quantity=10.0)
+        assert await pm._check_partial_close_fallback(pos, 100.5) is False
+        connector.create_market_reduce_order.assert_not_called()
+
+    async def test_existing_limit_order_blocks_fallback(self):
+        """Лимитник уже работает — market-дубль не отправляем."""
+        pm, connector = self._pm_with_connector([{"id": "1"}])
+        pos = _trade(entry_price=100.0, quantity=10.0)
+        handled = await pm._check_partial_close_fallback(pos, self._triggered_price(pm, pos))
+        assert handled is True
+        connector.create_market_reduce_order.assert_not_called()
+        assert not pos.partial_closed
+
+    async def test_order_check_failure_skips_cycle(self):
+        """Сбой проверки ордеров = неизвестное состояние → пропускаем цикл.
+
+        Это и есть исходный баг: раньше исключение означало «ордеров нет».
+        """
+        pm, connector = self._pm_with_connector(TimeoutError("exchange timeout"))
+        pos = _trade(entry_price=100.0, quantity=10.0)
+        handled = await pm._check_partial_close_fallback(pos, self._triggered_price(pm, pos))
+        assert handled is True
+        connector.create_market_reduce_order.assert_not_called()
+        assert not pos.partial_closed
+        assert pos.quantity == 10.0  # позиция не тронута
+
+    async def test_no_orders_fires_fallback(self):
+        """Ордеров действительно нет — fallback отрабатывает и двигает стоп в б/у."""
+        pm, connector = self._pm_with_connector([])
+        pos = _trade(entry_price=100.0, quantity=10.0)
+        handled = await pm._check_partial_close_fallback(pos, self._triggered_price(pm, pos))
+        assert handled is True
+        connector.create_market_reduce_order.assert_awaited_once()
+        assert pos.partial_closed is True
+        assert pos.quantity == pytest.approx(7.0)  # закрыто 30%
+        assert pos.current_sl_price == pos.entry_price  # стоп в безубыток

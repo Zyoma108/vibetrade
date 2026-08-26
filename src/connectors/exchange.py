@@ -185,6 +185,24 @@ class ExchangeConnector:
         )
         return {**raw, "fill_price": fill_price}
 
+    async def create_market_reduce_order(
+        self, symbol: str, side: str, amount: float
+    ) -> dict:
+        """Рыночный reduce-only ордер — частичная или полная фиксация уже открытой
+        позиции. Отдельно от `create_market_order`, потому что reduceOnly меняет
+        смысл ордера: биржа гарантирует, что он только уменьшает позицию и не может
+        случайно открыть встречную."""
+        return await self._call(
+            "create_order", symbol, "market", side, amount, None, {"reduceOnly": True}
+        )
+
+    async def fetch_open_orders(self, symbol: str) -> list[dict]:
+        """Открытые ордера по символу. Бросает наружу — вызывающий код обязан
+        отличать «ордеров нет» от «спросить не удалось»: подмена второго первым
+        приводила к дублю reduce-only поверх живого лимитника (см.
+        `PositionManager._check_partial_close_fallback`)."""
+        return await self._call("fetch_open_orders", symbol)
+
     async def create_limit_order(
         self, symbol: str, side: str, amount: float, price: float
     ) -> dict:
