@@ -14,26 +14,26 @@ from src.analytics.data_provider import DataProvider
 from src.analytics.price_surge import PriceSurgeDetector
 from src.analytics.utils import timeframe_to_minutes
 from src.config import StrategyConfig
-from src.notifier.telegram_bot import TelegramNotifier
 from src.storage.models import Candle, OpenInterest, PriceSurgeSignal
 
 logger = logging.getLogger(__name__)
 
 
 class PriceSurgeSignalProcessor:
-    """Enriches price surge signals with additional metrics and sends notifications."""
+    """Обогащает сигналы пампа метриками и готовит тексты сообщений.
+
+    Отправкой не занимается: она сетевая, а обработка идёт внутри транзакции
+    цикла сбора — см. `process()`."""
 
     def __init__(
         self,
         config: StrategyConfig,
         detector: PriceSurgeDetector,
-        notifier: TelegramNotifier,
         timeframe: str = "3m",
         data_provider: DataProvider | None = None,
     ):
         self.config = config
         self.detector = detector
-        self.notifier = notifier
         self.timeframe = timeframe
         self._dp = data_provider or DataProvider()
 
@@ -46,12 +46,20 @@ class PriceSurgeSignalProcessor:
         self._dp = dp
         self.detector.data_provider = dp
 
-    async def process_and_notify(self, session: AsyncSession) -> None:
-        """Run detector, enrich each signal, save to DB, and notify."""
+    async def process(self, session: AsyncSession) -> list[str]:
+        """Прогнать детектор, обогатить сигналы и записать в БД.
+
+        Возвращает тексты сообщений, но САМ ИХ НЕ ШЛЁТ: отправка идёт по сети, а
+        метод вызывается изнутри транзакции цикла сбора — раньше write-лок SQLite
+        удерживался на время HTTP-запроса к Telegram. Вызывающий код отправляет
+        результат после `commit()` (см. `Application._flush_outbox`).
+        """
         signals = await self.detector.analyze(session)
 
         if not signals:
-            return
+            return []
+
+        outbox: list[str] = []
 
         interval = self.config.price_surge_minutes
         window_bars = self.detector._window_bars
@@ -121,7 +129,9 @@ class PriceSurgeSignalProcessor:
                 f"Изменение OI: {oi_change:+.1f}%\n\n"
                 f"Сигналов за сутки: {day_count}"
             )
-            await self.notifier.notify_all(text, disable_preview=True)
+            outbox.append(text)
+
+        return outbox
 
     # ------------------------------------------------------------------
     # Helpers

@@ -3,7 +3,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Coroutine
 
-from sqlalchemy import desc, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.analytics.base import Signal
@@ -34,6 +34,9 @@ class PositionManager:
         self._send_message = send_message
         self._connector = trading_connector
         self.guards = TradingGuards(config)  # Circuit Breaker, бан-лист, кулдаун ошибок
+        # Очередь уведомлений: наполняется внутри транзакции, отправляется после
+        # коммита — см. _notify/flush_notifications.
+        self._outbox: list[str] = []
         self.market_regime: str = "unknown"
         self.position_size_mult: float = 1.0
         self.block_entries: bool = False  # should_block_entries() из market_context
@@ -213,8 +216,9 @@ class PositionManager:
             logger.info(f"Сигнал {signal.symbol} пропущен: кулдаун после закрытия")
             return None, "cooldown", None
 
-        # Референсная цена (последний тикер)
-        reference_price = await self._get_current_price(session, signal.symbol)
+        # Референсная цена — живая с биржи (см. _get_entry_price про то, почему
+        # не сохранённый тикер)
+        reference_price = await self._get_entry_price(session, signal.symbol)
         if reference_price is None or reference_price <= 0:
             logger.warning(f"Нет цены для {signal.symbol}, позиция не открыта")
             return None, "no_price", None
@@ -1036,14 +1040,45 @@ class PositionManager:
         фильтра по exchange здесь можно было получить цену с ЧУЖОЙ биржи
         (например, Binance) и использовать её как reference_price для ордера,
         который реально уходит в стакан Bybit (лимитник на откате, fallback
-        частичного закрытия, выход по времени)."""
-        stmt = select(Ticker.last).where(Ticker.symbol == symbol)
-        if self._connector is not None:
-            stmt = stmt.where(Ticker.exchange == self._connector.exchange_id)
-        stmt = stmt.order_by(desc(Ticker.timestamp)).limit(1)
+        частичного закрытия, выход по времени).
+
+        Это СОХРАНЁННАЯ цена: сборщик обновляет тикер раз в цикл, то есть значение
+        может отставать примерно на длину скана. Для мониторинга это нормально —
+        он и сам идёт раз в цикл. Для входа в позицию нет, см. `_get_entry_price`."""
+        stmt = (
+            select(Ticker.last)
+            .where(Ticker.symbol == symbol, Ticker.exchange == self._connector.exchange_id)
+            .limit(1)
+        )
         result = await session.execute(stmt)
         row = result.first()
         return row[0] if row else None
+
+    async def _get_entry_price(self, session: AsyncSession, symbol: str) -> float | None:
+        """Цена для расчёта входа — живым запросом к бирже, с фолбэком на БД.
+
+        Раньше вход считался по сохранённому тикеру, а тот обновляется раз в цикл
+        сбора: на проде интервал между записями по одной монете был около 135 секунд.
+        Market-ордер при этом исполняется по ЖИВОЙ цене, и вся разница оседала в
+        расхождении между `signal_price` и фактической ценой заполнения — то есть
+        ровно в том проскальзывании, которое `backtest_slippage_pct` подбирал вслепую
+        (см. комментарий к нему в config.yaml). Для стратегии, которая входит на
+        быстром движении, две минуты отставания — это не мелочь.
+
+        Фолбэк на сохранённую цену оставлен намеренно: не получить цену вообще хуже,
+        чем получить слегка устаревшую, но об этом должно быть видно в логе."""
+        try:
+            ticker = await self._connector.fetch_ticker(symbol)
+            price = ticker.get("last")
+            if price:
+                return float(price)
+            logger.warning(f"{symbol}: биржа вернула тикер без цены, беру сохранённую")
+        except Exception as e:
+            logger.warning(
+                f"{symbol}: не удалось получить живую цену ({e}) — вход считается "
+                f"по сохранённому тикеру, возможен увеличенный слиппедж"
+            )
+        return await self._get_current_price(session, symbol)
 
     async def _close_position(
         self, trade: Trade, exit_price: float, reason: str,
@@ -1131,7 +1166,25 @@ class PositionManager:
         )
 
     async def _notify(self, text: str) -> None:
+        """Положить уведомление в очередь, а не слать немедленно.
+
+        Отправка идёт по сети, а вызывается отсюда изнутри транзакции цикла
+        сбора — то есть write-лок SQLite удерживался на время HTTP-запроса к
+        Telegram. Теперь сообщения копятся и уходят из `flush_notifications()`
+        уже ПОСЛЕ коммита (см. `Application._on_collect_cycle_done`).
+
+        Цена решения: если процесс упадёт между действием и flush, уведомление
+        потеряется. Это осознанно — источник правды по сделкам всё равно БД,
+        а держать лок ради телеметрии дороже."""
         if self._send_message:
+            self._outbox.append(text)
+
+    async def flush_notifications(self) -> None:
+        """Отправить накопленные уведомления. Вызывать ПОСЛЕ commit()."""
+        if not self._send_message or not self._outbox:
+            return
+        pending, self._outbox = self._outbox, []
+        for text in pending:
             try:
                 await self._send_message(text)
             except Exception:

@@ -165,7 +165,6 @@ class Application:
                 self._ps_processor = PriceSurgeSignalProcessor(
                     config=self.settings.strategy_price_surge,
                     detector=self._detector_price_surge,
-                    notifier=self._notifier_price_surge,
                     timeframe=self.settings.collectors.timeframe,
                 )
                 logger.info("PriceSurgeSignalProcessor инициализирован")
@@ -241,7 +240,16 @@ class Application:
         logger.info("Приложение остановлено")
 
     async def _on_collect_cycle_done(self, session: AsyncSession) -> None:
-        """Вызывается после каждого цикла сбора данных."""
+        """Вызывается после каждого цикла сбора данных.
+
+        Работа с БД и отправка в Telegram разделены намеренно. Раньше весь цикл —
+        рыночный контекст, детекция, открытие позиций, уведомления — шёл одной
+        транзакцией с единственным коммитом в конце, и сетевые вызовы к Telegram
+        оказывались ВНУТРИ неё: write-лок SQLite удерживался на время HTTP-запроса.
+        Теперь сообщения копятся (`_outbox` в PositionManager, `outbox` здесь) и
+        уходят после `commit()`.
+        """
+        outbox: list[str] = []
 
         # Создаём общий DataProvider на цикл — с персистентным кешем свечей
         dp = DataProvider(candle_cache=self._candle_cache)
@@ -256,9 +264,9 @@ class Application:
         if self._market_ctx:
             await self._market_ctx.update(session)
 
-            # Уведомление о смене рыночного режима
+            # Уведомление о смене рыночного режима (уйдёт после коммита)
             if self._market_ctx.regime_changed and self._notifier:
-                await self._notifier.send_message(
+                outbox.append(
                     "🔄 <b>Смена рыночного режима!</b>\n\n"
                     + self._market_ctx.trend_summary()
                 )
@@ -299,6 +307,7 @@ class Application:
                 logger.info(f"Активировано pending-входов за цикл: {len(activated)}")
 
         # 2. Аналитика — основная стратегия
+        signals_to_send: list[tuple] = []
         if self._detector:
             signals = await self._detector.analyze(session)
             for sig in signals:
@@ -326,15 +335,47 @@ class Application:
                     db_signal.missed_reason = status
                     db_signal.missed_detail = detail
 
-                # Сигнал в Telegram — всегда, с реальной причиной
+                # Сигнал в Telegram — всегда, с реальной причиной (после коммита)
                 if self._notifier:
-                    await self._notifier.send_signal(sig, status=status)
+                    signals_to_send.append((sig, status))
 
         # 3. Аналитика — price surge детектор (только сигналы)
+        surge_messages: list[str] = []
         if self._ps_processor:
-            await self._ps_processor.process_and_notify(session)
+            surge_messages = await self._ps_processor.process(session)
 
         await session.commit()
+
+        # Всё сетевое — строго после коммита, вне write-лока БД
+        await self._flush_outbox(outbox, signals_to_send, surge_messages)
+
+    async def _flush_outbox(
+        self, messages: list[str], signals: list[tuple], surge_messages: list[str],
+    ) -> None:
+        """Отправить накопленное за цикл. Сбой отправки не должен ронять цикл —
+        данные уже зафиксированы в БД, уведомление вторично."""
+        for text in surge_messages:
+            if not self._notifier_price_surge:
+                break
+            try:
+                await self._notifier_price_surge.notify_all(text, disable_preview=True)
+            except Exception:
+                logger.exception("Не удалось отправить сигнал пампа в Telegram")
+
+        if not self._notifier:
+            return
+        for text in messages:
+            try:
+                await self._notifier.send_message(text)
+            except Exception:
+                logger.exception("Не удалось отправить сообщение в Telegram")
+        for sig, status in signals:
+            try:
+                await self._notifier.send_signal(sig, status=status)
+            except Exception:
+                logger.exception(f"Не удалось отправить сигнал {sig.symbol} в Telegram")
+        if self._positions:
+            await self._positions.flush_notifications()
 
     async def wait(self) -> None:
         """Ожидание graceful shutdown."""

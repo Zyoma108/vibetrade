@@ -646,6 +646,7 @@ class TestExchangeErrorAlert:
     async def test_first_error_alerts_immediately(self):
         pm, send_message = self._pm_with_notifier()
         await pm._alert_exchange_error("fetch_balance", Exception("boom"))
+        await pm.flush_notifications()
         send_message.assert_awaited_once()
         assert "boom" in send_message.await_args.args[0]
         assert pm._exchange_error_since is not None
@@ -655,6 +656,7 @@ class TestExchangeErrorAlert:
         pm, send_message = self._pm_with_notifier()
         await pm._alert_exchange_error("fetch_balance", Exception("boom"))
         await pm._alert_exchange_error("fetch_balance", Exception("boom again"))
+        await pm.flush_notifications()
         send_message.assert_awaited_once()
 
     @pytest.mark.asyncio
@@ -664,6 +666,7 @@ class TestExchangeErrorAlert:
         pm._exchange_error_since -= timedelta(minutes=31)  # type: ignore[operator]
         pm._exchange_error_last_alert_at -= timedelta(minutes=31)  # type: ignore[operator]
         await pm._alert_exchange_error("fetch_balance", Exception("still down"))
+        await pm.flush_notifications()
         assert send_message.await_count == 2
         assert "продолжается" in send_message.await_args.args[0]
 
@@ -673,12 +676,14 @@ class TestExchangeErrorAlert:
         await pm._alert_exchange_error(
             "fetch_balance", Exception("Your api key has expired.")
         )
+        await pm.flush_notifications()
         assert "ключ" in send_message.await_args.args[0]
 
     @pytest.mark.asyncio
     async def test_non_auth_error_has_no_hint(self):
         pm, send_message = self._pm_with_notifier()
         await pm._alert_exchange_error("fetch_balance", Exception("network timeout"))
+        await pm.flush_notifications()
         assert "ключ" not in send_message.await_args.args[0]
 
     @pytest.mark.asyncio
@@ -686,6 +691,7 @@ class TestExchangeErrorAlert:
         pm, send_message = self._pm_with_notifier()
         await pm._alert_exchange_error("fetch_balance", Exception("boom"))
         await pm._clear_exchange_error()
+        await pm.flush_notifications()
         assert send_message.await_count == 2
         assert "восстановлена" in send_message.await_args.args[0]
         assert pm._exchange_error_since is None
@@ -695,6 +701,7 @@ class TestExchangeErrorAlert:
     async def test_clear_without_prior_error_is_noop(self):
         pm, send_message = self._pm_with_notifier()
         await pm._clear_exchange_error()
+        await pm.flush_notifications()
         send_message.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -983,3 +990,37 @@ class TestPartialCloseFallback:
         assert pos.partial_closed is True
         assert pos.quantity == pytest.approx(7.0)  # закрыто 30%
         assert pos.current_sl_price == pos.entry_price  # стоп в безубыток
+
+
+# ---------------------------------------------------------------------------
+# Цена входа — живая с биржи (26.08.2026)
+# ---------------------------------------------------------------------------
+
+
+class TestEntryPrice:
+    """Вход считается по ЖИВОЙ цене, а не по сохранённому тикеру.
+
+    Сборщик обновляет тикер раз в цикл (на проде ~135 с между записями по монете),
+    а market-ордер исполняется по текущей цене — вся разница оседала в
+    проскальзывании, которое backtest_slippage_pct подбирал вслепую.
+    """
+
+    async def test_uses_live_ticker(self):
+        connector = _fake_connector(fetch_ticker=AsyncMock(return_value={"last": 123.45}))
+        pm = _pm(connector)
+        price = await pm._get_entry_price(None, "TEST/USDT:USDT")
+        assert price == 123.45
+        connector.fetch_ticker.assert_awaited_once_with("TEST/USDT:USDT")
+
+    async def test_falls_back_to_stored_price_on_error(self, monkeypatch):
+        """Не получить цену вообще хуже, чем получить слегка устаревшую."""
+        connector = _fake_connector(fetch_ticker=AsyncMock(side_effect=TimeoutError("down")))
+        pm = _pm(connector)
+        monkeypatch.setattr(pm, "_get_current_price", AsyncMock(return_value=99.0))
+        assert await pm._get_entry_price(None, "TEST/USDT:USDT") == 99.0
+
+    async def test_falls_back_when_ticker_has_no_price(self, monkeypatch):
+        connector = _fake_connector(fetch_ticker=AsyncMock(return_value={"last": None}))
+        pm = _pm(connector)
+        monkeypatch.setattr(pm, "_get_current_price", AsyncMock(return_value=88.0))
+        assert await pm._get_entry_price(None, "TEST/USDT:USDT") == 88.0
