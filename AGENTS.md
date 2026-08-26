@@ -427,6 +427,26 @@ Docker VM напрямую, не через host-bridge, поэтому `mmap` �
 (`trading_bot_*.db`) и такой же снапшот `trading_bot.db.pre-named-volume-snapshot-*` — актуальный
 файл живёт только в volume, доступен через `docker exec`/`docker cp`, не напрямую с хоста.
 
+### Индексы `tickers` (фикс 26.08.2026)
+
+Таблица читается почти исключительно как «последняя строка по (symbol, exchange)»
+(`PositionManager._get_current_price`), поэтому индекс один и составной:
+`ix_tickers_symbol_exchange_ts (symbol, exchange, timestamp)`. Одиночные
+`ix_tickers_exchange`/`ix_tickers_symbol` **удалены и не должны возвращаться**:
+`exchange` имеет две различные величины на миллионы строк, и планировщик SQLite
+выбирал именно его — отбирал по нему половину таблицы и сортировал через
+`TEMP B-TREE`. Замеры на базе за 10.08–25.08 (8 млн строк):
+
+| Запрос | Было | Стало |
+|---|---|---|
+| `_get_current_price` (в пути открытия позиции) | 5.231 с | 0.007 с |
+| `DataProvider`: `DISTINCT symbol WHERE exchange` | 11.947 с | 2.341 с (covering scan) |
+| `MarketContext`: история BTC | 0.009 с | 0.009 с |
+
+Индекс по `timestamp` оставлен намеренно — по нему идёт обрезка истории
+(`prune_tickers`). `init_db()` дропает устаревшие индексы явно: `create_all()`
+добавляет недостающие, но никогда не убирает лишние.
+
 **Модели:**
 
 | Таблица | Назначение |

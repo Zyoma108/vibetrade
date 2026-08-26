@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import Boolean, Float, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -27,11 +27,28 @@ class Candle(Base):
 
 
 class Ticker(Base):
+    """Снимок последнего тикера. Пишется каждый цикл сбора, читается почти всегда
+    как "последняя строка по (symbol, exchange)" — отсюда составной индекс ниже.
+
+    Одиночных индексов по symbol/exchange здесь намеренно НЕТ. `ix_tickers_exchange`
+    (две различные величины на миллионы строк) не просто бесполезен по кардинальности —
+    планировщик SQLite выбирал именно его для запроса `_get_current_price`, отбирал по
+    нему половину таблицы и сортировал её через TEMP B-TREE: 5.2с против 0.011с на
+    базе за 10.08-25.08.2026. `ix_tickers_symbol` полностью покрыт составным индексом
+    (symbol — ведущая колонка). Индекс по timestamp оставлен: по нему идёт
+    периодическая обрезка истории (`prune_tickers`)."""
+
     __tablename__ = "tickers"
 
+    __table_args__ = (
+        # Порядок колонок = порядок использования: равенство по symbol и exchange,
+        # затем уже упорядоченный timestamp, поэтому LIMIT 1 берётся без сортировки.
+        Index("ix_tickers_symbol_exchange_ts", "symbol", "exchange", "timestamp"),
+    )
+
     id: Mapped[int] = mapped_column(primary_key=True)
-    exchange: Mapped[str] = mapped_column(String(32), index=True)
-    symbol: Mapped[str] = mapped_column(String(32), index=True)
+    exchange: Mapped[str] = mapped_column(String(32))
+    symbol: Mapped[str] = mapped_column(String(32))
     timestamp: Mapped[datetime] = mapped_column(index=True)
     bid: Mapped[float | None] = mapped_column(Float, nullable=True)
     ask: Mapped[float | None] = mapped_column(Float, nullable=True)

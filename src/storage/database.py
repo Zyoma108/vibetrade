@@ -1,7 +1,10 @@
+import logging
 from pathlib import Path
 
 from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+
+logger = logging.getLogger(__name__)
 
 DB_PATH = Path("data/trading_bot.db")
 
@@ -84,3 +87,13 @@ async def init_db() -> None:
                 )
             except Exception:
                 pass  # колонка уже существует
+
+        # Индексы tickers: create_all() создаёт только недостающие, но не убирает
+        # устаревшие — старые БД тащат за собой ix_tickers_exchange, из-за которого
+        # планировщик выбирал заведомо худший план для `_get_current_price`
+        # (см. Ticker.__doc__). Дропаем их явно.
+        for idx in ("ix_tickers_exchange", "ix_tickers_symbol"):
+            try:
+                await conn.exec_driver_sql(f"DROP INDEX IF EXISTS {idx}")
+            except Exception:
+                logger.warning(f"Не удалось удалить устаревший индекс {idx}")
