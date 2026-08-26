@@ -211,6 +211,37 @@ def test_loader_does_not_merge_exchanges(tmp_path):
     assert len(bars) == 64, "должен остаться ряд с большей историей (binance)"
 
 
+def test_candle_slice_matches_live_detector_window(golden_db, monkeypatch):
+    """Окно, которое движок отдаёт детектору, должно быть той же длины, что в проливе.
+
+    Боевой `SetupDetector.analyze()` грузит `baseline_bars + sustain_bars + 10` баров.
+    Без `+ 1` в диапазоне срез получался на один бар длиннее, и baseline (первые
+    `baseline_bars` элементов) съезжал на бар назад — сдвигалась медиана объёма, а
+    с ней и порог всплеска. Фикс был в runner.py и терялся при унификации движков.
+    """
+    settings = _settings()
+    expected = (
+        settings.strategy.baseline_bars + settings.strategy.sustain_bars + 10
+    )
+
+    seen: list[int] = []
+    import src.analytics.detector as det_mod
+    original = det_mod.SetupDetector.check_volume_pattern
+
+    def spy(self, candles, context=None):
+        seen.append(len(candles))
+        return original(self, candles, context)
+
+    monkeypatch.setattr(det_mod.SetupDetector, "check_volume_pattern", spy)
+    simulate(settings, load_data(golden_db), has_oi=True)
+
+    assert seen, "детектор должен был вызываться"
+    # Ближе к началу истории баров меньше — важен максимум (полное окно)
+    assert max(seen) == expected, (
+        f"полное окно должно быть {expected} баров, а не {max(seen)}"
+    )
+
+
 def test_golden_run_is_stable(golden_db):
     """Эталон: на этой фикстуре движок обязан дать ровно такой результат.
 

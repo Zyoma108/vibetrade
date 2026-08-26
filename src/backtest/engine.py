@@ -431,8 +431,14 @@ def simulate(settings, data, has_oi: bool = True, collect_retracement: bool = Tr
             if bar_idx < 0 or bar_idx < need_bars:
                 continue
 
+            # Ровно столько же баров, сколько грузит боевой детектор
+            # (SetupDetector.analyze: limit = baseline_bars + sustain_bars + 10).
+            # Без "+ 1" срез длиннее на один бар, и baseline (первые baseline_bars
+            # элементов среза) съезжает на бар назад относительно живого — сдвигается
+            # медиана объёма, а значит и порог всплеска. Этот фикс был в runner.py и
+            # отсутствовал в свип-движке; унификация 26.08.2026 его потеряла.
             candle_slice = []
-            for j in range(bar_idx - need_bars - 10, bar_idx + 1):
+            for j in range(bar_idx - need_bars - 10 + 1, bar_idx + 1):
                 bar = _bar(sym_data, j)
                 if bar:
                     candle_slice.append({
