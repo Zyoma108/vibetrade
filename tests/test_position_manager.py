@@ -89,6 +89,8 @@ def _fake_connector(**attrs) -> MagicMock:
     connector = MagicMock()
     connector.exchange_id = "bybit"
     connector.has_credentials = attrs.pop("has_credentials", True)
+    # По умолчанию биржа без округления — шаг лота проверяется отдельными тестами.
+    connector.amount_to_precision = AsyncMock(side_effect=lambda _sym, amount: amount)
     for name, value in attrs.items():
         setattr(connector, name, value)
     return connector
@@ -1024,3 +1026,145 @@ class TestEntryPrice:
         pm = _pm(connector)
         monkeypatch.setattr(pm, "_get_current_price", AsyncMock(return_value=88.0))
         assert await pm._get_entry_price(None, "TEST/USDT:USDT") == 88.0
+
+
+# ---------------------------------------------------------------------------
+# Шаг лота биржи (27.08.2026)
+# ---------------------------------------------------------------------------
+
+
+class TestExchangeLotStep:
+    """Объём округляется до шага лота, и в БД пишется то, что реально на бирже.
+
+    Регрессия 27.08.2026 (SUI/USDT:USDT на bybit, шаг лота = 10 контрактов):
+    бот посчитал qty=15.34, ccxt обрезал ордер до 10, а в БД ушло 15.34. Дальше
+    рушилось всё подряд — партиал-лимитник на 4.60 контрактов биржа отвергла
+    (меньше шага), а следующий цикл увидел «на бирже 10 вместо 15.34», принял
+    разницу за исполнение лимитника и записал фиктивную частичную фиксацию с
+    выдуманным PnL.
+    """
+
+    @staticmethod
+    def _step_connector(step: float, contracts: float | None = None, **attrs) -> MagicMock:
+        """Коннектор биржи с шагом лота `step` (округление вниз, как в ccxt)."""
+        import math
+
+        connector = _fake_connector(
+            fetch_ticker=AsyncMock(return_value={"last": 1.0}),
+            fetch_balance=AsyncMock(return_value={"total": 76.7}),
+            set_leverage=AsyncMock(),
+            create_market_order=AsyncMock(return_value={"fill_price": 1.0}),
+            set_tpsl=AsyncMock(),
+            place_reduce_only_limit=AsyncMock(return_value={"id": "1"}),
+            min_order_amount=AsyncMock(return_value=step),
+            **attrs,
+        )
+        connector.amount_to_precision = AsyncMock(
+            side_effect=lambda _sym, amount: math.floor(amount / step) * step
+        )
+        connector.fetch_positions = AsyncMock(
+            return_value=[{"entry_price": 1.0, "contracts": contracts}] if contracts else []
+        )
+        return connector
+
+    @staticmethod
+    def _pm_ready(connector: MagicMock, **overrides) -> PositionManager:
+        pm = _pm(connector, risk_per_trade_pct=1.0, stop_loss_pct=5.0,
+                 partial_close_qty_pct=30.0, **overrides)
+        pm._count_open = AsyncMock(return_value=0)  # type: ignore[method-assign]
+        pm._has_position = AsyncMock(return_value=False)  # type: ignore[method-assign]
+        pm._in_cooldown = AsyncMock(return_value=False)  # type: ignore[method-assign]
+        pm._send_message = AsyncMock()
+        return pm
+
+    @staticmethod
+    def _session() -> AsyncMock:
+        session = AsyncMock()
+        session.add = MagicMock()  # синхронный метод SQLAlchemy
+        return session
+
+    async def test_quantity_truncated_to_lot_step(self):
+        """Депозит 76.7, риск 1%, SL 5% → 15.34 контракта; шаг 10 → пишем 10."""
+        connector = self._step_connector(step=10.0, contracts=10.0)
+        pm = self._pm_ready(connector)
+        with patch("asyncio.sleep", AsyncMock()):
+            trade, status, _ = await pm.open_position(self._session(), _signal())
+        assert status is None or status == "opened"
+        assert trade is not None
+        assert trade.quantity == 10.0
+        assert connector.create_market_order.await_args.kwargs["amount"] == 10.0
+
+    async def test_quantity_follows_exchange_fill(self):
+        """Биржа — источник истины по объёму, даже если расчёт дал другое."""
+        connector = self._step_connector(step=0.001, contracts=9.0)
+        pm = self._pm_ready(connector)
+        with patch("asyncio.sleep", AsyncMock()):
+            trade, _, _ = await pm.open_position(self._session(), _signal())
+        assert trade is not None
+        assert trade.quantity == 9.0
+
+    async def test_partial_limit_skipped_when_below_lot_step(self):
+        """30% от 10 контрактов = 3 < шага 10 — заведомо отбойный ордер не шлём."""
+        connector = self._step_connector(step=10.0, contracts=10.0)
+        pm = self._pm_ready(connector)
+        with patch("asyncio.sleep", AsyncMock()):
+            await pm.open_position(self._session(), _signal())
+        connector.place_reduce_only_limit.assert_not_awaited()
+
+    async def test_signal_skipped_when_whole_lot_does_not_fit(self):
+        """Позиция меньше одного лота — сигнал пропускаем, а не шлём нулевой ордер."""
+        connector = self._step_connector(step=1000.0)
+        pm = self._pm_ready(connector)
+        trade, status, _ = await pm.open_position(self._session(), _signal())
+        assert trade is None
+        assert status == "amount_too_small"
+        connector.create_market_order.assert_not_awaited()
+
+    async def test_fallback_moves_stop_to_breakeven_when_slice_too_small(self):
+        """Фиксировать нечем, но безубыток от объёма не зависит — стоп двигаем."""
+        connector = self._step_connector(step=10.0, contracts=10.0)
+        connector.fetch_open_orders = AsyncMock(return_value=[])
+        connector.create_market_reduce_order = AsyncMock()
+        pm = self._pm_ready(connector, partial_close_pct=40.0)
+        pos = _trade(entry_price=100.0, quantity=10.0)
+
+        trigger = pm._partial_trigger_price(pos.entry_price, pm._tp_price(pos.entry_price))
+        assert await pm._check_partial_close_fallback(pos, trigger) is True
+
+        connector.create_market_reduce_order.assert_not_awaited()
+        assert not pos.partial_closed          # фиктивной фиксации нет
+        assert pos.quantity == 10.0
+        assert pos.current_sl_price == pos.entry_price
+        connector.set_tpsl.assert_awaited_once()
+
+    async def test_breakeven_move_is_not_repeated_every_cycle(self):
+        """Стоп уже в б/у — второй раз set_tpsl не дёргаем."""
+        connector = self._step_connector(step=10.0, contracts=10.0)
+        connector.fetch_open_orders = AsyncMock(return_value=[])
+        pm = self._pm_ready(connector, partial_close_pct=40.0)
+        pos = _trade(entry_price=100.0, quantity=10.0)
+        pos.current_sl_price = pos.entry_price
+
+        trigger = pm._partial_trigger_price(pos.entry_price, pm._tp_price(pos.entry_price))
+        assert await pm._check_partial_close_fallback(pos, trigger) is True
+        connector.set_tpsl.assert_not_awaited()
+
+    async def test_pending_entry_quantity_truncated_to_lot_step(self):
+        """Тот же шаг лота на пути pending-входа лимитником."""
+        connector = self._step_connector(step=10.0)
+        connector.create_limit_order = AsyncMock()
+        pm = self._pm_ready(connector, pending_entry_pullback_pct=1.5)
+        trade, status, _ = await pm.open_position(self._session(), _signal())
+        assert status == "pending"
+        assert trade is not None
+        assert trade.quantity == 10.0
+        assert connector.create_limit_order.await_args.kwargs["amount"] == 10.0
+
+    async def test_pending_entry_quantity_follows_fill(self):
+        """При исполнении лимитника входа объём тоже берём с биржи."""
+        connector = self._step_connector(step=0.001)
+        pm = self._pm_ready(connector)
+        pos = _trade(entry_price=100.0, quantity=15.34)
+        pos.status = "pending"
+        await pm._activate_pending_entry(pos, {"entry_price": 100.0, "contracts": 10.0})
+        assert pos.quantity == 10.0

@@ -300,6 +300,17 @@ class PositionManager:
         tp_distance = sl_distance * self.config.risk_reward_ratio
         quantity = risk_budget / sl_distance
 
+        # Шаг лота биржи — последнее слово. ccxt всё равно обрежет объём до него
+        # при отправке, поэтому обрезаем сами: иначе в БД попадёт объём, которого
+        # на бирже нет. См. ExchangeConnector.amount_to_precision.
+        quantity = await self._connector.amount_to_precision(signal.symbol, quantity)
+        if quantity <= 0:
+            logger.info(
+                f"Сигнал {signal.symbol} пропущен: расчётный размер меньше шага "
+                f"лота биржи при риске ${risk_budget:.2f}"
+            )
+            return None, "amount_too_small", f"qty=0 после округления, risk=${risk_budget:.2f}"
+
         tp_price = entry_price + tp_distance
         sl_price = entry_price - sl_distance
 
@@ -338,6 +349,12 @@ class PositionManager:
                             f"биржа={fill_price:.6f}"
                         )
                     entry_price = fill_price
+                    filled = abs(ex_positions[0].get("contracts") or 0)
+                    if filled and filled != quantity:
+                        logger.info(
+                            f"Объём с биржи: расчёт={quantity} → факт={filled}"
+                        )
+                        quantity = filled
             except Exception as e:
                 logger.warning(f"Не удалось получить цену входа с биржи: {e}")
 
@@ -390,18 +407,30 @@ class PositionManager:
             if tp_sl_ok:
                 try:
                     partial_trigger = self._partial_trigger_price(entry_price, tp_price)
-                    partial_qty = quantity * (self.config.partial_close_qty_pct / 100)
-                    await self._connector.place_reduce_only_limit(
+                    partial_qty = await self._partial_qty(signal.symbol, quantity)
+                    if partial_qty <= 0:
+                        logger.info(
+                            f"Частичная фиксация {signal.symbol} недоступна: "
+                            f"{self.config.partial_close_qty_pct:.0f}% от {quantity} "
+                            f"меньше шага лота биржи — на триггере стоп уйдёт в б/у "
+                            f"без закрытия части"
+                        )
+                    elif await self._connector.place_reduce_only_limit(
                         symbol=signal.symbol,
                         side="buy",
                         amount=partial_qty,
                         price=partial_trigger,
-                    )
-                    logger.info(
-                        f"Лимитник частичной фиксации {signal.symbol}: "
-                        f"{partial_qty:.2f} контрактов @ {partial_trigger:.6f} "
-                        f"({self.config.partial_close_pct:.0f}% пути до TP)"
-                    )
+                    ):
+                        logger.info(
+                            f"Лимитник частичной фиксации {signal.symbol}: "
+                            f"{partial_qty:.2f} контрактов @ {partial_trigger:.6f} "
+                            f"({self.config.partial_close_pct:.0f}% пути до TP)"
+                        )
+                    else:
+                        logger.warning(
+                            f"Лимитник частичной фиксации {signal.symbol} не принят "
+                            f"биржей — будет проверка по циклу"
+                        )
                 except Exception:
                     # Не критично — update_positions проверит частичную
                     # фиксацию по цене как fallback.
@@ -480,6 +509,13 @@ class PositionManager:
         limit_price = reference_price * (1 - pullback_pct / 100)
         sl_distance = limit_price * (self.config.stop_loss_pct / 100)
         quantity = risk_budget / sl_distance
+        quantity = await self._connector.amount_to_precision(signal.symbol, quantity)
+        if quantity <= 0:
+            logger.info(
+                f"Сигнал {signal.symbol} пропущен: расчётный размер меньше шага "
+                f"лота биржи при риске ${risk_budget:.2f}"
+            )
+            return None, "amount_too_small", f"qty=0 после округления, risk=${risk_budget:.2f}"
 
         logger.info(
             f"Pending-вход {signal.symbol}: сигнал=${reference_price:.6f} → "
@@ -578,6 +614,10 @@ class PositionManager:
         pos.entry_price = fill_price
         pos.entry_time = datetime.now(tz=timezone.utc)
         pos.status = "open"
+        filled = abs(ex_position.get("contracts") or 0)
+        if filled and filled != pos.quantity:
+            logger.info(f"Объём с биржи: расчёт={pos.quantity} → факт={filled}")
+            pos.quantity = filled
 
         # Лимитник на вход исполнился как maker (резидентный ордер в стакане)
         tp_price, sl_price = await self._setup_tp_sl_and_partial(pos, fill_price, is_maker=True)
@@ -623,12 +663,21 @@ class PositionManager:
         if tp_sl_ok:
             try:
                 partial_trigger = self._partial_trigger_price(fill_price, tp_price)
-                await self._connector.place_reduce_only_limit(
+                partial_qty = await self._partial_qty(pos.symbol, pos.quantity)
+                if partial_qty <= 0:
+                    logger.info(
+                        f"Частичная фиксация {pos.symbol} недоступна: доля позиции "
+                        f"меньше шага лота биржи"
+                    )
+                elif not await self._connector.place_reduce_only_limit(
                     symbol=pos.symbol,
                     side="buy",
-                    amount=pos.quantity * (self.config.partial_close_qty_pct / 100),
+                    amount=partial_qty,
                     price=partial_trigger,
-                )
+                ):
+                    logger.warning(
+                        f"Лимитник частичной фиксации {pos.symbol} не принят биржей"
+                    )
             except Exception:
                 logger.warning(
                     f"Не удалось выставить лимитник частичной фиксации для {pos.symbol}"
@@ -790,6 +839,17 @@ class PositionManager:
             self.config.partial_close_pct / 100
         )
 
+    async def _partial_qty(self, symbol: str, quantity: float) -> float:
+        """Доля позиции под частичную фиксацию, округлённая до шага лота биржи.
+
+        0.0 означает, что фиксировать нечем: шаг лота крупнее доли. Так бывает на
+        малом депозите у монет с грубым шагом (SUI на bybit — 10 контрактов при
+        позиции в 10), и раньше в этом случае уходил заведомо отбойный ордер.
+        """
+        return await self._connector.amount_to_precision(
+            symbol, quantity * (self.config.partial_close_qty_pct / 100)
+        )
+
     async def _check_limit_partial_fill(self, pos: Trade) -> bool:
         """Проверить исполнение лимитника частичной фиксации.
 
@@ -864,7 +924,30 @@ class PositionManager:
         if not triggered:
             return False
 
-        close_qty = pos.quantity * (self.config.partial_close_qty_pct / 100)
+        close_qty = await self._partial_qty(pos.symbol, pos.quantity)
+        if close_qty <= 0:
+            # Закрыть часть нечем — шаг лота крупнее доли. Но вторая половина
+            # механизма (перевод стопа в безубыток) от объёма не зависит, а
+            # защищает она больше, чем сама фиксация. Идемпотентно по
+            # current_sl_price, иначе set_tpsl уходил бы каждый цикл.
+            if pos.current_sl_price != pos.entry_price:
+                try:
+                    await self._connector.set_tpsl(
+                        symbol=pos.symbol,
+                        side="buy" if pos.direction == "long" else "sell",
+                        amount=pos.quantity,
+                        tp_price=self._tp_price(pos.entry_price),
+                        sl_price=pos.entry_price,
+                        tp_as_limit=self.config.tp_as_limit_order,
+                    )
+                    pos.current_sl_price = pos.entry_price
+                    logger.info(
+                        f"Частичная фиксация {pos.symbol} невозможна (шаг лота), "
+                        f"стоп переведён в безубыток"
+                    )
+                except Exception as e:
+                    logger.warning(f"Перевод стопа в б/у для {pos.symbol}: {e}")
+            return True
 
         # Проверить, нет ли уже лимитника на бирже (после рестарта).
         # Сбой этого запроса НЕ означает "ордеров нет": раньше исключение здесь

@@ -290,6 +290,30 @@ class ExchangeConnector:
             logger.debug(f"{self.exchange_id}: не удалось определить min amount для {symbol}: {e}")
             return None
 
+    async def amount_to_precision(self, symbol: str, amount: float) -> float:
+        """Округлить объём вниз до шага лота биржи; 0.0, если целого лота не набирается.
+
+        Шаг может быть крупным: у SUI/USDT:USDT на bybit он равен 10 контрактам.
+        ccxt всё равно обрежет объём до шага при отправке ордера, поэтому считать
+        и записывать нужно уже обрезанное значение — иначе в БД остаётся объём,
+        которого на бирже нет (27.08.2026: открыли 15.34, на бирже оказалось 10,
+        и следующий же цикл принял разницу за исполнение партиал-лимитника).
+
+        Ошибку ccxt ("must be greater than minimum amount precision") здесь
+        превращаем в 0.0: для вызывающего это «такой объём не отправить», а не сбой.
+        """
+        try:
+            await self._call("load_markets")
+            return float(self._exchange.amount_to_precision(symbol, amount))
+        except ccxt.InvalidOrder:
+            return 0.0
+        except Exception as e:
+            logger.warning(
+                f"{self.exchange_id}: не удалось округлить объём {amount} "
+                f"для {symbol} до шага лота: {e}"
+            )
+            return float(amount)
+
     async def set_leverage(self, symbol: str, leverage: int) -> None:
         """Установить плечо для символа."""
         logger.info(f"{self.exchange_id}: устанавливаю плечо {leverage}x для {symbol}")
