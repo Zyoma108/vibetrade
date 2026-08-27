@@ -40,6 +40,27 @@ def _set_journal_mode(dbapi_connection, connection_record):
 async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
 
+async def _has_unique_index(conn, table: str, columns: tuple[str, ...]) -> bool:
+    """Есть ли на таблице уникальный ключ ровно по указанным колонкам.
+
+    Проверяем через PRAGMA, а не по имени в sqlite_master: имя из
+    `UniqueConstraint(..., name=...)` живёт только в метаданных SQLAlchemy —
+    inline-констрейнт в CREATE TABLE SQLite обслуживает безымянным
+    sqlite_autoindex_<table>_<N>. Именно на этом гейт tickers ошибочно
+    срабатывал на свежих БД (26.08.2026).
+    """
+    wanted = set(columns)
+    indexes = (await conn.exec_driver_sql(f"PRAGMA index_list({table})")).fetchall()
+    for row in indexes:
+        name, is_unique = row[1], row[2]
+        if not is_unique:
+            continue
+        info = (await conn.exec_driver_sql(f"PRAGMA index_info({name})")).fetchall()
+        if {col[2] for col in info} == wanted:
+            return True
+    return False
+
+
 async def init_db() -> None:
     """Создать таблицы и недостающие колонки."""
     from src.storage.models import Base
@@ -102,11 +123,11 @@ async def init_db() -> None:
         # На БД, накопленной до этой смены, уникального ключа нет, и upsert упал бы
         # в рантайме с невнятным "ON CONFLICT clause does not match any ... UNIQUE
         # constraint". Проверяем на старте и говорим прямо, что делать.
-        has_uq = await conn.exec_driver_sql(
-            "SELECT 1 FROM sqlite_master WHERE type='index' AND tbl_name='tickers'"
-            " AND name='uq_ticker'"
-        )
-        if not has_uq.first():
+        #
+        # Ищем ключ по составу колонок, а не по имени: SQLite для inline-констрейнта
+        # `CONSTRAINT uq_ticker UNIQUE (...)` заводит индекс sqlite_autoindex_tickers_1,
+        # имя uq_ticker в схему не попадает вообще.
+        if not await _has_unique_index(conn, "tickers", ("exchange", "symbol")):
             raise RuntimeError(
                 f"В {DB_PATH} таблица tickers из старой схемы (без уникального ключа "
                 f"exchange+symbol). Начиная с 26.08.2026 это снимок, а не журнал — "
