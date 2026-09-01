@@ -1168,3 +1168,31 @@ class TestExchangeLotStep:
         pos.status = "pending"
         await pm._activate_pending_entry(pos, {"entry_price": 100.0, "contracts": 10.0})
         assert pos.quantity == 10.0
+
+
+# ---------------------------------------------------------------------------
+# Отказ ByBit по неподписанному соглашению — обе разновидности кода
+# ---------------------------------------------------------------------------
+
+
+def test_agreement_error_covers_both_bybit_codes():
+    """Регресс: ловился только 110126, а XAG отдавал 110123 и под бан не попадал.
+
+    Аудит боевой БД 27.08-01.09.2026: CRCL и NVDA (код 110126) забанились с
+    первой ошибки, XAG (код 110123) продолжал жечь сигналы циклами по три
+    ошибки и четыре часа кулдауна.
+    """
+    from src.executor.position_manager import _is_agreement_error
+
+    assert _is_agreement_error(
+        'bybit {"retCode":110126,"retMsg":"You must sign the required agreement '
+        'before trading this contract."}'
+    )
+    assert _is_agreement_error(
+        'bybit {"retCode":110123,"retMsg":"You must agree to the Trading Terms '
+        'before trading this contract."}'
+    )
+    assert not _is_agreement_error(
+        'bybit {"retCode":110007,"retMsg":"ab not enough for new order"}'
+    )
+    assert not _is_agreement_error("Connection timed out")

@@ -15,6 +15,30 @@ from src.storage.models import Ticker, Trade
 logger = logging.getLogger(__name__)
 
 
+# ByBit отказывает в торговле «особыми» контрактами (токенизированные акции,
+# товарные фьючерсы) двумя разными кодами, и до 01.09.2026 ловился только один.
+# Аудит боевой БД за 27.08-01.09: XAG/USDT отдавал 110123 («agree to the Trading
+# Terms»), под бан не попадал и продолжал жечь сигналы циклами по три ошибки и
+# четыре часа кулдауна — в отличие от CRCL и NVDA, которые отдавали 110126 и
+# были забанены с первой ошибки. Всего на этой тройке ушло 10 сигналов из 44.
+#
+# Ловим класс целиком, а не перечисляем монеты: следующий такой контракт
+# забанится сам. Список `strategy.exclude_coins` — вторая линия, она убирает
+# уже известные символы ещё на этапе сканирования.
+_AGREEMENT_ERROR_MARKERS = (
+    "110126",                        # You must sign the required agreement
+    "110123",                        # You must agree to the Trading Terms
+    "sign the required agreement",
+    "agree to the trading terms",
+)
+
+
+def _is_agreement_error(err: str) -> bool:
+    """Отказ ByBit из-за неподписанного соглашения по контракту."""
+    low = err.lower()
+    return any(marker in low for marker in _AGREEMENT_ERROR_MARKERS)
+
+
 
 class PositionManager:
     """Управление позициями: вход, TP/SL, уведомления (только real)."""
@@ -442,7 +466,7 @@ class PositionManager:
         except Exception as e:
             err = str(e)
             # ByBit требует подписать соглашение — пропускаем без шума
-            if "sign the required agreement" in err or "110126" in err:
+            if _is_agreement_error(err):
                 self.guards.ban_symbol(signal.symbol)
                 self.guards.track_error(signal.symbol)
                 logger.info(
@@ -529,7 +553,7 @@ class PositionManager:
             )
         except Exception as e:
             err = str(e)
-            if "sign the required agreement" in err or "110126" in err:
+            if _is_agreement_error(err):
                 self.guards.ban_symbol(signal.symbol)
                 self.guards.track_error(signal.symbol)
                 logger.info(
