@@ -15,6 +15,37 @@ from src.storage.models import Ticker, Trade
 logger = logging.getLogger(__name__)
 
 
+# ByBit отказывает в торговле «особыми» контрактами (токенизированные акции,
+# товарные фьючерсы) двумя разными кодами, и до 01.09.2026 ловился только один.
+# Аудит боевой БД за 27.08-01.09: XAG/USDT отдавал 110123 («agree to the Trading
+# Terms»), под бан не попадал и продолжал жечь сигналы циклами по три ошибки и
+# четыре часа кулдауна — в отличие от CRCL и NVDA, которые отдавали 110126 и
+# были забанены с первой ошибки. Всего на этой тройке ушло 10 сигналов из 44.
+#
+# Ловим класс целиком, а не перечисляем монеты: следующий такой контракт
+# забанится сам. Список `strategy.exclude_coins` — вторая линия, она убирает
+# уже известные символы ещё на этапе сканирования.
+_AGREEMENT_ERROR_MARKERS = (
+    "110126",                        # You must sign the required agreement
+    "110123",                        # You must agree to the Trading Terms
+    "sign the required agreement",
+    "agree to the trading terms",
+)
+
+
+# Какую долю ожидаемого партиала считать достаточной, чтобы признать лимитник
+# исполненным. Не 1.0, потому что лимитник может исполниться частично, и не
+# доля всей позиции (как было до 01.09.2026), потому что та не знает ни о
+# partial_close_qty_pct, ни о шаге лота — см. `_check_limit_partial_fill`.
+PARTIAL_FILL_DETECT_RATIO = 0.5
+
+
+def _is_agreement_error(err: str) -> bool:
+    """Отказ ByBit из-за неподписанного соглашения по контракту."""
+    low = err.lower()
+    return any(marker in low for marker in _AGREEMENT_ERROR_MARKERS)
+
+
 
 class PositionManager:
     """Управление позициями: вход, TP/SL, уведомления (только real)."""
@@ -442,7 +473,7 @@ class PositionManager:
         except Exception as e:
             err = str(e)
             # ByBit требует подписать соглашение — пропускаем без шума
-            if "sign the required agreement" in err or "110126" in err:
+            if _is_agreement_error(err):
                 self.guards.ban_symbol(signal.symbol)
                 self.guards.track_error(signal.symbol)
                 logger.info(
@@ -529,7 +560,7 @@ class PositionManager:
             )
         except Exception as e:
             err = str(e)
-            if "sign the required agreement" in err or "110126" in err:
+            if _is_agreement_error(err):
                 self.guards.ban_symbol(signal.symbol)
                 self.guards.track_error(signal.symbol)
                 logger.info(
@@ -753,6 +784,9 @@ class PositionManager:
                 if await self._check_partial_close_fallback(pos, current_price):
                     continue
 
+            if pos.partial_closed:
+                await self._ensure_breakeven_stop(pos)
+
             if await self._check_time_exit(session, pos, now, current_price, closed):
                 continue
 
@@ -761,6 +795,49 @@ class PositionManager:
     # ------------------------------------------------------------------
     # update_positions — по одной стадии на метод
     # ------------------------------------------------------------------
+
+    async def _ensure_breakeven_stop(self, pos: Trade) -> None:
+        """Догнать перевод стопа в безубыток, если он не удался при партиале.
+
+        Обе ветки частичной фиксации ставят б/у-стоп ровно один раз и на
+        исключении `set_tpsl` только пишут warning. `partial_closed` при этом
+        уже True, а обе ветки в `update_positions` заходят под условием
+        `not pos.partial_closed` — то есть повтора не было вообще: позиция
+        доживала до конца под исходным стопом -5%, хотя в БД помечена как
+        переведённая в б/у.
+
+        Ровно так вышло со сделкой №2 (SUI) в аудите 27.08-01.09.2026: партиал
+        зафиксирован, `current_sl_price` остался 0.729125 (исходный -5%), и
+        сделка вышла именно по нему. Там триггер был ложным (последствие бага
+        с округлением лота, чинится в a45c85f), но механизм от природы сделки
+        не зависит: одна неудачная `set_tpsl` на настоящем партиале снимает всю
+        защиту, ради которой партиал и делается.
+
+        Идемпотентно по `current_sl_price` — тем же приёмом, что уже
+        используется в ветке «шаг лота крупнее доли», — поэтому в штатном
+        случае не делает ни одного запроса к бирже.
+        """
+        if pos.current_sl_price == pos.entry_price:
+            return
+        try:
+            await self._connector.set_tpsl(
+                symbol=pos.symbol,
+                side="buy" if pos.direction == "long" else "sell",
+                amount=pos.quantity,
+                tp_price=self._tp_price(pos.entry_price),
+                sl_price=pos.entry_price,
+                tp_as_limit=self.config.tp_as_limit_order,
+            )
+            pos.current_sl_price = pos.entry_price
+            logger.info(
+                f"Стоп в безубыток для {pos.symbol} доставлен повторной попыткой "
+                f"(при частичной фиксации не удался)"
+            )
+        except Exception as e:
+            logger.warning(
+                f"Повторный перевод стопа в б/у для {pos.symbol} не удался ({e}) — "
+                f"позиция под исходным стопом, повтор в следующем цикле"
+            )
 
     async def _resync_missing_tpsl(
         self, session: AsyncSession, pos: Trade, closed: list[Trade]
@@ -867,7 +944,21 @@ class PositionManager:
             return False
 
         actual_contracts = abs(ex_positions[0]["contracts"])
-        if actual_contracts >= pos.quantity * 0.75:
+
+        # Сколько именно ждём от лимитника — считаем той же формулой, которой
+        # он выставлялся при открытии (см. open_position, шаг 4). Раньше здесь
+        # стоял порог «осталось меньше 75% позиции», и он молча ломался на
+        # грубом шаге лота: позиция в 4 контракта при целом шаге даёт партиал
+        # 4 * 0.3 = 1.2 -> 1, остаток 3 из 4 — ровно 75%, исполнение не
+        # детектировалось никогда. На депозите, где нотионал позиции ~$12,
+        # такие объёмы штатны (в аудите 27.08-01.09.2026 есть сделки с
+        # остатком 3.0 и 2.4 контракта). Константа так же молча ломала любое
+        # понижение partial_close_qty_pct до 25% и ниже — а свип от 12.08.2026
+        # вёл ровно туда.
+        expected_partial = await self._partial_qty(pos.symbol, pos.quantity)
+        if expected_partial <= 0:
+            return False  # лимитника не было — шаг лота крупнее доли
+        if actual_contracts > pos.quantity - expected_partial * PARTIAL_FILL_DETECT_RATIO:
             return False
 
         # Позиция уменьшилась → лимитник исполнился

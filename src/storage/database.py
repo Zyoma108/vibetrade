@@ -113,7 +113,15 @@ async def init_db() -> None:
         # лишние — старые БД тащат за собой одиночные индексы, из-за одного из
         # которых (ix_tickers_exchange) планировщик выбирал заведомо худший план
         # для `_get_current_price`. См. Ticker.__doc__.
-        for idx in ("ix_tickers_exchange", "ix_tickers_symbol", "ix_tickers_timestamp"):
+        #
+        # `ix_open_interest_exchange` — там же по смыслу: колонка с двумя
+        # различными величинами, из-за которой планировщик выбирал заведомо
+        # худший план для `_write_oi_batch`. Составной индекс из
+        # `OpenInterest.__table_args__` его полностью заменяет (см. её докстринг).
+        for idx in (
+            "ix_tickers_exchange", "ix_tickers_symbol", "ix_tickers_timestamp",
+            "ix_open_interest_exchange",
+        ):
             try:
                 await conn.exec_driver_sql(f"DROP INDEX IF EXISTS {idx}")
             except Exception:

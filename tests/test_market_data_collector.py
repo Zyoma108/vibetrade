@@ -12,6 +12,8 @@ exchange. This made the volume-fading/declining filters in SetupDetector
 trip on stale data instead of the real, closed-bar volume.
 """
 
+import asyncio
+import time
 from datetime import datetime, timedelta, timezone
 
 import pytest_asyncio
@@ -31,6 +33,7 @@ class FakeConnector:
 
     def __init__(self, ohlcv_batches: list[list[dict]]):
         self.exchange_id = "binance"
+        self.unsupported_symbols: set[str] = set()
         self._batches = ohlcv_batches
         self._call = 0
 
@@ -254,6 +257,7 @@ class _MultiCoinConnector:
 
     def __init__(self, exchange_id: str, symbols: list[str], volume: float = 5_000_000.0):
         self.exchange_id = exchange_id
+        self.unsupported_symbols: set[str] = set()
         self._symbols = symbols
         self._volume = volume
         self._poll = 0
@@ -331,3 +335,226 @@ async def test_history_kept_for_all_scanned_coins(session_factory, monkeypatch):
 
     # Тикеры: ровно один снимок на монету — это и есть экономия места
     assert len(tickers) == len(symbols)
+
+
+# ---------------------------------------------------------------------------
+# Цена записи: коммитов на цикл должно быть на два порядка меньше числа монет
+# ---------------------------------------------------------------------------
+
+
+class _ManyCoinConnector:
+    """Заглушка на произвольное число монет: один новый бар и свой OI на монету."""
+
+    def __init__(self, symbols: list[str], oi_offset: float = 0.0):
+        self.exchange_id = "binance"
+        self.unsupported_symbols: set[str] = set()
+        self._symbols = symbols
+        self._oi_offset = oi_offset
+
+    async def fetch_ohlcv(self, symbol: str, timeframe: str = "3m", limit: int = 100):
+        return [{
+            "exchange": "binance", "symbol": symbol, "timestamp": BASE_TS,
+            "open": 1.0, "high": 1.1, "low": 0.9, "close": 1.0, "volume": 100.0,
+        }]
+
+    async def fetch_open_interest(self, symbol: str):
+        return {
+            "exchange": "binance", "symbol": symbol, "timestamp": BASE_TS,
+            "value": 1000.0 + self._oi_offset + len(symbol),
+        }
+
+
+def _selected(symbols: list[str]) -> list[dict]:
+    return [{
+        "exchange": "binance", "symbol": s, "timestamp": BASE_TS, "last": 1.0,
+    } for s in symbols]
+
+
+async def test_write_path_commits_are_batched(session_factory):
+    """Регресс: раньше здесь был коммит НА КАЖДУЮ монету — по одному в
+    `_upsert_candles` и по одному на каждый изменившийся OI, около 1050 fsync'ов
+    за цикл. С честным барьером записи (Linux) это ~22 с на ровном месте.
+
+    Тест сторожит не скорость (её в юнит-тесте не померить), а само число
+    коммитов: оно должно расти как N/COMMIT_CHUNK, а не как N.
+    """
+    from src.collectors.market_data import COMMIT_CHUNK
+
+    n = COMMIT_CHUNK * 3
+    symbols = [f"C{i:04d}/USDT:USDT" for i in range(n)]
+    collector = _make_collector()
+    connector = _ManyCoinConnector(symbols)
+
+    commits = 0
+    async with session_factory() as session:
+        original = session.commit
+
+        async def counting_commit():
+            nonlocal commits
+            commits += 1
+            await original()
+
+        session.commit = counting_commit
+        await collector._collect_for_exchange(connector, session, _selected(symbols))
+
+        rows = (await session.execute(select(Candle))).scalars().all()
+        ois = (await session.execute(select(OpenInterest))).scalars().all()
+
+    assert len(rows) == n, "все свечи должны быть записаны"
+    assert len(ois) == n, "OI должен быть записан по каждой монете"
+    # 3 чанка свечей + финальный коммит свечей + один коммит фазы OI + запас
+    assert commits <= n // COMMIT_CHUNK + 4, (
+        f"коммитов {commits} на {n} монет — похоже, вернулся коммит на монету"
+    )
+    assert commits < n / 10, f"коммитов {commits}, ожидалось на порядок меньше {n}"
+
+
+async def test_oi_unchanged_value_is_not_rewritten(session_factory):
+    """Дедупликация OI переживает переход на батчевую запись: одинаковое
+    значение подряд не должно плодить строки."""
+    symbols = ["AAA/USDT:USDT", "BBB/USDT:USDT"]
+    collector = _make_collector()
+    connector = _ManyCoinConnector(symbols)
+
+    async with session_factory() as session:
+        await collector._collect_for_exchange(connector, session, _selected(symbols))
+        await collector._collect_for_exchange(connector, session, _selected(symbols))
+        first = (await session.execute(select(OpenInterest))).scalars().all()
+
+        # то же самое, но OI изменился — теперь строки добавиться должны
+        await collector._collect_for_exchange(
+            connector, session, _selected(symbols),
+        )
+        changed_connector = _ManyCoinConnector(symbols, oi_offset=5.0)
+        await collector._collect_for_exchange(
+            changed_connector, session, _selected(symbols),
+        )
+        second = (await session.execute(select(OpenInterest))).scalars().all()
+
+    assert len(first) == len(symbols), "повтор того же OI не должен плодить строки"
+    assert len(second) == len(symbols) * 2, "изменившийся OI должен быть записан"
+
+
+async def test_fetch_phase_has_a_hard_deadline(monkeypatch):
+    """Верхняя граница на фазу фетча — то, что делает каданс скана гарантией.
+
+    Дедлайн на отдельный вызов снижает шанс зависнуть, но 580 вызовов по 8 с
+    в худшем случае всё равно дают неприемлемо длинный цикл. Не успевшие
+    монеты должны быть отменены, а успевшие — возвращены.
+    """
+    import src.collectors.market_data as md
+
+    monkeypatch.setattr(md, "SCAN_PHASE_TIMEOUT_SEC", 0.3)
+    collector = _make_collector()
+
+    class _Conn:
+        exchange_id = "binance"
+        unsupported_symbols: set[str] = set()
+
+    async def quick(n):
+        return ("быстрая", n)
+
+    async def slow(n):
+        await asyncio.sleep(5)
+        return ("медленная", n)
+
+    t = time.perf_counter()
+    got = await collector._gather_with_deadline(
+        _Conn(), [quick(1), quick(2), slow(3), slow(4)], "свечи",
+    )
+    elapsed = time.perf_counter() - t
+
+    assert elapsed < 2.0, f"фаза шла {elapsed:.2f}с при дедлайне 0.3с"
+    assert sorted(got) == [("быстрая", 1), ("быстрая", 2)], (
+        f"успевшие монеты должны вернуться, зависшие — отмениться, получено {got}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Ретенция: история не должна расти без верхней границы
+# ---------------------------------------------------------------------------
+
+
+async def test_retention_drops_old_rows_and_keeps_recent(session_factory, monkeypatch):
+    """Регресс: удаления не было вообще — за 5 суток БД набирала 459 МБ,
+    архивная за 15 суток весит 3.2 ГБ. Каждая лишняя строка удорожает вставку
+    (правятся B-деревья индексов), то есть история платит за себя каждый цикл.
+    """
+    import src.collectors.market_data as md
+
+    monkeypatch.setattr(md, "async_session", session_factory)
+    monkeypatch.setattr(md, "CLEANUP_BATCH", 3)  # чистка обязана идти порциями
+
+    now = datetime.now(tz=timezone.utc).replace(tzinfo=None)
+    old = now - timedelta(days=40)
+    recent = now - timedelta(days=2)
+
+    async with session_factory() as session:
+        for i in range(10):
+            session.add(Candle(
+                exchange="binance", symbol=f"S{i}/USDT", timestamp=old,
+                open=1, high=1, low=1, close=1, volume=1,
+            ))
+            session.add(OpenInterest(
+                exchange="binance", symbol=f"S{i}/USDT", timestamp=old, value=1.0,
+            ))
+        for i in range(4):
+            session.add(Candle(
+                exchange="binance", symbol=f"N{i}/USDT", timestamp=recent,
+                open=1, high=1, low=1, close=1, volume=1,
+            ))
+        await session.commit()
+
+    collector = MarketDataCollector(
+        connectors=[], exclude_coins=[], min_volume_usdt=0.0,
+        interval_seconds=15, timeframe="3m", retention_days=30,
+    )
+    await collector._cleanup_old_data()
+
+    async with session_factory() as session:
+        candles = (await session.execute(select(Candle))).scalars().all()
+        ois = (await session.execute(select(OpenInterest))).scalars().all()
+
+    assert len(candles) == 4, "старые свечи должны быть удалены, свежие — остаться"
+    assert all(c.timestamp == recent for c in candles)
+    assert ois == [], "старый OI должен быть удалён"
+
+
+async def test_retention_runs_at_most_once_a_day(session_factory, monkeypatch):
+    """Чистка не должна идти каждый цикл: цикл — это полторы минуты."""
+    import src.collectors.market_data as md
+
+    monkeypatch.setattr(md, "async_session", session_factory)
+    collector = MarketDataCollector(
+        connectors=[], exclude_coins=[], min_volume_usdt=0.0,
+        interval_seconds=15, timeframe="3m", retention_days=30,
+    )
+
+    await collector._cleanup_old_data()
+    first = collector._last_cleanup
+    assert first is not None
+
+    await collector._cleanup_old_data()
+    assert collector._last_cleanup == first, "второй вызов подряд должен быть no-op"
+
+
+async def test_retention_disabled_by_zero(session_factory, monkeypatch):
+    import src.collectors.market_data as md
+
+    monkeypatch.setattr(md, "async_session", session_factory)
+    now = datetime.now(tz=timezone.utc).replace(tzinfo=None)
+    async with session_factory() as session:
+        session.add(Candle(
+            exchange="binance", symbol="OLD/USDT", timestamp=now - timedelta(days=999),
+            open=1, high=1, low=1, close=1, volume=1,
+        ))
+        await session.commit()
+
+    collector = MarketDataCollector(
+        connectors=[], exclude_coins=[], min_volume_usdt=0.0,
+        interval_seconds=15, timeframe="3m", retention_days=0,
+    )
+    await collector._cleanup_old_data()
+
+    async with session_factory() as session:
+        assert len((await session.execute(select(Candle))).scalars().all()) == 1
