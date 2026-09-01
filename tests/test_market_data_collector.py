@@ -12,6 +12,8 @@ exchange. This made the volume-fading/declining filters in SetupDetector
 trip on stale data instead of the real, closed-bar volume.
 """
 
+import asyncio
+import time
 from datetime import datetime, timedelta, timezone
 
 import pytest_asyncio
@@ -428,3 +430,37 @@ async def test_oi_unchanged_value_is_not_rewritten(session_factory):
 
     assert len(first) == len(symbols), "повтор того же OI не должен плодить строки"
     assert len(second) == len(symbols) * 2, "изменившийся OI должен быть записан"
+
+
+async def test_fetch_phase_has_a_hard_deadline(monkeypatch):
+    """Верхняя граница на фазу фетча — то, что делает каданс скана гарантией.
+
+    Дедлайн на отдельный вызов снижает шанс зависнуть, но 580 вызовов по 8 с
+    в худшем случае всё равно дают неприемлемо длинный цикл. Не успевшие
+    монеты должны быть отменены, а успевшие — возвращены.
+    """
+    import src.collectors.market_data as md
+
+    monkeypatch.setattr(md, "SCAN_PHASE_TIMEOUT_SEC", 0.3)
+    collector = _make_collector()
+
+    class _Conn:
+        exchange_id = "binance"
+
+    async def quick(n):
+        return ("быстрая", n)
+
+    async def slow(n):
+        await asyncio.sleep(5)
+        return ("медленная", n)
+
+    t = time.perf_counter()
+    got = await collector._gather_with_deadline(
+        _Conn(), [quick(1), quick(2), slow(3), slow(4)], "свечи",
+    )
+    elapsed = time.perf_counter() - t
+
+    assert elapsed < 2.0, f"фаза шла {elapsed:.2f}с при дедлайне 0.3с"
+    assert sorted(got) == [("быстрая", 1), ("быстрая", 2)], (
+        f"успевшие монеты должны вернуться, зависшие — отмениться, получено {got}"
+    )

@@ -6,9 +6,32 @@ import ccxt
 
 logger = logging.getLogger(__name__)
 
-FETCH_TIMEOUT = 30_000  # ms
+FETCH_TIMEOUT = 30_000  # ms — сокетный таймаут ccxt, общий на весь объект биржи
 MAX_RETRIES = 3
 RETRY_DELAY = 5  # seconds
+
+# Политика для вызовов ЦИКЛА СБОРА (`scan=True`): короткий дедлайн, ноль ретраев.
+#
+# Торговые вызовы и вызовы сбора имеют противоположную цену ошибки. Потерять
+# ордер нельзя — там 30 с и три попытки с backoff'ом оправданы. А пропустить
+# свечи одной монеты в одном цикле стоит ~0: они приедут следующим циклом через
+# полторы минуты. Зато ЖДАТЬ их стоит дорого: попытка держит слот семафора, и
+# одна зависшая монета съедает 3 x 30 = 90 слото-секунд — столько же, сколько
+# 273 здоровых запроса (замер 01.09.2026: p50 latency 0.33 с). Сорок таких
+# монет за цикл дают наблюдавшиеся 800-1600 с вместо 78 с.
+#
+# Дедлайн ставится на стороне asyncio, а не через ccxt `timeout`: он у объекта
+# биржи один на все потоки, менять его на лету — гонка. `asyncio.wait_for`
+# отпускает слот семафора сразу, даже если поток ccxt ещё висит на сокете
+# (поэтому пул потоков должен быть с запасом, см. Application._setup_thread_pool).
+SCAN_CALL_TIMEOUT_SEC = 8.0
+SCAN_PHASE_TIMEOUT_SEC = 120.0  # верхняя граница на фазу фетча одной биржи
+
+# Сколько сетевых вызовов к одной бирже держим в полёте одновременно.
+# Было 5 — это 116 последовательных раундов на ~580 монет, то есть цикл равен
+# 116 x латентность. Замер на публичном API bybit: 5 -> 11.8 req/s,
+# 20 -> 34 req/s. Поднимать выше пула потоков бессмысленно (см. там же).
+DEFAULT_CONCURRENCY = 20
 
 # Режим биржи по умолчанию — фьючерсы (нужен OI для стратегии)
 _DEFAULT_TYPE: dict[str, str] = {
@@ -25,6 +48,7 @@ class ExchangeConnector:
         exchange_id: str,
         api_key: str = "",
         secret: str = "",
+        concurrency: int = DEFAULT_CONCURRENCY,
     ):
         exchange_class = getattr(ccxt, exchange_id)
         market_type = _DEFAULT_TYPE.get(exchange_id, "spot")
@@ -38,7 +62,8 @@ class ExchangeConnector:
 
         self._exchange = exchange_class(config)
         self.exchange_id = exchange_id
-        self._semaphore = asyncio.Semaphore(5)
+        self._semaphore = asyncio.Semaphore(concurrency)
+        self.concurrency = concurrency
 
         if api_key:
             logger.info(
@@ -53,21 +78,39 @@ class ExchangeConnector:
     # Low-level
     # ------------------------------------------------------------------
 
-    async def _call(self, method_name: str, *args, **kwargs):
-        """Вызов синхронного метода ccxt в потоке с ретраями."""
+    async def _call(self, method_name: str, *args, scan: bool = False, **kwargs):
+        """Вызов синхронного метода ccxt в потоке.
+
+        `scan=True` — вызов из цикла сбора данных: дедлайн SCAN_CALL_TIMEOUT_SEC
+        и ни одного ретрая. `scan=False` (по умолчанию) — торговый вызов: ждём
+        до сокетного таймаута ccxt и повторяем MAX_RETRIES раз с backoff'ом.
+        Почему политики разные — см. комментарий к SCAN_CALL_TIMEOUT_SEC.
+        """
+        attempts = 1 if scan else MAX_RETRIES
         last_error = None
-        for attempt in range(MAX_RETRIES):
+        for attempt in range(attempts):
             try:
                 async with self._semaphore:
                     method = getattr(self._exchange, method_name)
-                    return await asyncio.to_thread(method, *args, **kwargs)
+                    call = asyncio.to_thread(method, *args, **kwargs)
+                    if scan:
+                        return await asyncio.wait_for(call, SCAN_CALL_TIMEOUT_SEC)
+                    return await call
+            except (asyncio.TimeoutError, TimeoutError) as e:
+                # Только scan-путь: поток ccxt может ещё висеть на сокете, но
+                # слот семафора уже отпущен — цикл не ждёт эту монету.
+                last_error = e
+                logger.warning(
+                    f"{self.exchange_id}: {method_name} не уложился в "
+                    f"{SCAN_CALL_TIMEOUT_SEC:.0f}с — монета пропущена в этом цикле"
+                )
             except (ccxt.NetworkError, ccxt.RequestTimeout) as e:
                 last_error = e
                 logger.warning(
-                    f"{self.exchange_id}: попытка {attempt + 1}/{MAX_RETRIES} "
+                    f"{self.exchange_id}: попытка {attempt + 1}/{attempts} "
                     f"для {method_name} не удалась: {e}"
                 )
-                if attempt < MAX_RETRIES - 1:
+                if attempt < attempts - 1:
                     await asyncio.sleep(RETRY_DELAY * (attempt + 1))
             except (ccxt.BadRequest, ccxt.AuthenticationError, ccxt.ExchangeError):
                 raise
@@ -88,7 +131,7 @@ class ExchangeConnector:
         kwargs = {"limit": limit}
         if since is not None:
             kwargs["since"] = since
-        raw = await self._call("fetch_ohlcv", symbol, timeframe, **kwargs)
+        raw = await self._call("fetch_ohlcv", symbol, timeframe, scan=True, **kwargs)
         return [
             {
                 "exchange": self.exchange_id,
@@ -121,7 +164,7 @@ class ExchangeConnector:
 
     async def fetch_open_interest(self, symbol: str) -> dict | None:
         try:
-            raw = await self._call("fetch_open_interest", symbol)
+            raw = await self._call("fetch_open_interest", symbol, scan=True)
         except (ccxt.BadRequest, ccxt.NotSupported, ccxt.ExchangeError):
             logger.debug(f"{self.exchange_id}: OI не поддерживается для {symbol}")
             return None
@@ -144,6 +187,10 @@ class ExchangeConnector:
         Ключ не входит в модель `Ticker` — вызывающий код обязан вынуть его
         (`dict.pop`) перед `Ticker(**t)`.
         """
+        # Намеренно БЕЗ scan=True: это один вызов на цикл, а не на монету, —
+        # усиления «зависшая монета съедает слот» здесь нет, зато полезная
+        # нагрузка большая (~1200 тикеров) и в короткий дедлайн может не влезть.
+        # Потерять её = остаться вообще без данных за цикл.
         raw = await self._call("fetch_tickers")
         result = []
         now = datetime.now(tz=timezone.utc)

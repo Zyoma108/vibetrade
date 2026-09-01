@@ -18,6 +18,16 @@ class ExchangeConfig(BaseModel):
 
 class CollectorsConfig(BaseModel):
     interval_seconds: int = Field(default=60, ge=10)
+    fetch_concurrency: int = Field(
+        default=20, ge=1, le=100,
+        description="Сколько сетевых вызовов к одной бирже держим в полёте "
+        "одновременно в цикле сбора. Было захардкожено 5 — это ~116 "
+        "последовательных раундов на 580 монет, то есть цикл равен "
+        "116 x латентность. Замер 01.09.2026 на публичном API bybit: "
+        "5 -> 11.8 req/s, 20 -> 34 req/s. Поднимать выше пула потоков "
+        "бессмысленно — пул выставляется по этому же числу, см. "
+        "Application._setup_thread_pool",
+    )
     timeframe: str = Field(default="5m", description="Таймфрейм свечей (1m, 5m, 15m, 1h)")
     scan_cycle_seconds: float = Field(
         default=105.0, ge=1.0,

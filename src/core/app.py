@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import signal
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -41,17 +42,43 @@ class Application:
         self._positions: PositionManager | None = None
         self._candle_cache = CandleCache()
 
+    def _setup_thread_pool(self) -> None:
+        """Явный пул потоков под синхронный ccxt.
+
+        `asyncio.to_thread` без этого берёт дефолтный executor размером
+        `min(32, cpu_count + 4)` — на двухъядерном VPS это ШЕСТЬ потоков.
+        Семафор коннектора при этом можно поднимать сколько угодно: реальная
+        конкурентность всё равно упрётся в пул, и поднятие
+        `fetch_concurrency` не даст ничего. Порядок важен: сначала пул,
+        потом семафоры.
+
+        Запас сверх суммы семафоров нужен для scan-таймаутов: `wait_for`
+        отпускает слот семафора сразу, но поток ccxt ещё висит на сокете до
+        своего FETCH_TIMEOUT — без запаса такие «хвосты» занимали бы пул.
+        """
+        n_conn = max(1, sum(1 for c in self.settings.exchanges.values() if c.enabled))
+        workers = self.settings.collectors.fetch_concurrency * n_conn + 8
+        loop = asyncio.get_running_loop()
+        loop.set_default_executor(
+            ThreadPoolExecutor(max_workers=workers, thread_name_prefix="ccxt")
+        )
+        logger.info(f"Пул потоков для ccxt: {workers} воркеров")
+
     async def start(self) -> None:
         logger.info("Запуск приложения...")
+        self._setup_thread_pool()
         await init_db()
 
         mode = self.settings.trading.mode
         trading_exchange = self.settings.trading.exchange
 
         # Коннекторы для сбора данных
+        concurrency = self.settings.collectors.fetch_concurrency
         for ex_id, ex_cfg in self.settings.exchanges.items():
             if ex_cfg.enabled:
-                self._connectors.append(ExchangeConnector(ex_id))
+                self._connectors.append(
+                    ExchangeConnector(ex_id, concurrency=concurrency)
+                )
         logger.info(f"Биржи (данные): {[c.exchange_id for c in self._connectors]}")
 
         # Коннектор для торговли (real)
@@ -68,6 +95,7 @@ class Application:
                 exchange_id=trading_exchange,
                 api_key=ex_cfg.api_key,
                 secret=ex_cfg.secret,
+                concurrency=concurrency,
             )
             logger.info(f"Торговый коннектор: {trading_exchange}")
 

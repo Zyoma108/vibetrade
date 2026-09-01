@@ -8,7 +8,7 @@ from sqlalchemy import desc, func, select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.connectors.exchange import ExchangeConnector
+from src.connectors.exchange import SCAN_PHASE_TIMEOUT_SEC, ExchangeConnector
 from src.storage.database import async_session
 from src.storage.models import Candle, OpenInterest, Ticker
 
@@ -275,7 +275,9 @@ class MarketDataCollector:
                 logger.warning(f"{connector.exchange_id}: свечи для {symbol}: {e}")
                 return symbol, None
 
-        return await asyncio.gather(*(fetch_one(t) for t in selected))
+        return await self._gather_with_deadline(
+            connector, [fetch_one(t) for t in selected], "свечи",
+        )
 
     async def _upsert_candles(
         self, session: AsyncSession, symbol: str, candles: list[dict],
@@ -338,7 +340,38 @@ class MarketDataCollector:
                 logger.warning(f"{connector.exchange_id}: OI для {symbol}: {e}")
                 return symbol, None
 
-        return await asyncio.gather(*(fetch_one(t) for t in selected))
+        return await self._gather_with_deadline(
+            connector, [fetch_one(t) for t in selected], "OI",
+        )
+
+    @staticmethod
+    async def _gather_with_deadline(
+        connector: ExchangeConnector, coros: list, what: str,
+    ) -> list:
+        """Собрать результаты, но не дольше SCAN_PHASE_TIMEOUT_SEC на фазу.
+
+        Верхняя граница на фазу — единственное, что делает каданс скана
+        гарантией, а не вероятностью: дедлайн на отдельный вызов снижает шанс
+        зависнуть, но 580 вызовов по 8 с в худшем случае всё равно дают
+        неприемлемо длинный цикл. Что не успело — не собираем в этом цикле;
+        свечи и OI приедут следующим. Ради этого фаза и отделена от записи в
+        БД: отмена здесь ничего не рвёт, транзакций тут нет.
+        """
+        if not coros:
+            return []
+        tasks = [asyncio.ensure_future(c) for c in coros]
+        done, pending = await asyncio.wait(tasks, timeout=SCAN_PHASE_TIMEOUT_SEC)
+        if pending:
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+            logger.warning(
+                f"{connector.exchange_id}: фаза «{what}» не уложилась в "
+                f"{SCAN_PHASE_TIMEOUT_SEC:.0f}с — {len(pending)} из {len(tasks)} "
+                f"монет пропущены до следующего цикла"
+            )
+        # Порядок задач не важен: вызывающий кладёт результаты в dict по symbol
+        return [t.result() for t in tasks if t in done and not t.cancelled()]
 
     async def _write_oi_batch(
         self, session: AsyncSession, exchange: str, values: dict[str, float],
