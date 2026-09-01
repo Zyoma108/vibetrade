@@ -464,3 +464,93 @@ async def test_fetch_phase_has_a_hard_deadline(monkeypatch):
     assert sorted(got) == [("быстрая", 1), ("быстрая", 2)], (
         f"успевшие монеты должны вернуться, зависшие — отмениться, получено {got}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Ретенция: история не должна расти без верхней границы
+# ---------------------------------------------------------------------------
+
+
+async def test_retention_drops_old_rows_and_keeps_recent(session_factory, monkeypatch):
+    """Регресс: удаления не было вообще — за 5 суток БД набирала 459 МБ,
+    архивная за 15 суток весит 3.2 ГБ. Каждая лишняя строка удорожает вставку
+    (правятся B-деревья индексов), то есть история платит за себя каждый цикл.
+    """
+    import src.collectors.market_data as md
+
+    monkeypatch.setattr(md, "async_session", session_factory)
+    monkeypatch.setattr(md, "CLEANUP_BATCH", 3)  # чистка обязана идти порциями
+
+    now = datetime.now(tz=timezone.utc).replace(tzinfo=None)
+    old = now - timedelta(days=40)
+    recent = now - timedelta(days=2)
+
+    async with session_factory() as session:
+        for i in range(10):
+            session.add(Candle(
+                exchange="binance", symbol=f"S{i}/USDT", timestamp=old,
+                open=1, high=1, low=1, close=1, volume=1,
+            ))
+            session.add(OpenInterest(
+                exchange="binance", symbol=f"S{i}/USDT", timestamp=old, value=1.0,
+            ))
+        for i in range(4):
+            session.add(Candle(
+                exchange="binance", symbol=f"N{i}/USDT", timestamp=recent,
+                open=1, high=1, low=1, close=1, volume=1,
+            ))
+        await session.commit()
+
+    collector = MarketDataCollector(
+        connectors=[], exclude_coins=[], min_volume_usdt=0.0,
+        interval_seconds=15, timeframe="3m", retention_days=30,
+    )
+    await collector._cleanup_old_data()
+
+    async with session_factory() as session:
+        candles = (await session.execute(select(Candle))).scalars().all()
+        ois = (await session.execute(select(OpenInterest))).scalars().all()
+
+    assert len(candles) == 4, "старые свечи должны быть удалены, свежие — остаться"
+    assert all(c.timestamp == recent for c in candles)
+    assert ois == [], "старый OI должен быть удалён"
+
+
+async def test_retention_runs_at_most_once_a_day(session_factory, monkeypatch):
+    """Чистка не должна идти каждый цикл: цикл — это полторы минуты."""
+    import src.collectors.market_data as md
+
+    monkeypatch.setattr(md, "async_session", session_factory)
+    collector = MarketDataCollector(
+        connectors=[], exclude_coins=[], min_volume_usdt=0.0,
+        interval_seconds=15, timeframe="3m", retention_days=30,
+    )
+
+    await collector._cleanup_old_data()
+    first = collector._last_cleanup
+    assert first is not None
+
+    await collector._cleanup_old_data()
+    assert collector._last_cleanup == first, "второй вызов подряд должен быть no-op"
+
+
+async def test_retention_disabled_by_zero(session_factory, monkeypatch):
+    import src.collectors.market_data as md
+
+    monkeypatch.setattr(md, "async_session", session_factory)
+    now = datetime.now(tz=timezone.utc).replace(tzinfo=None)
+    async with session_factory() as session:
+        session.add(Candle(
+            exchange="binance", symbol="OLD/USDT", timestamp=now - timedelta(days=999),
+            open=1, high=1, low=1, close=1, volume=1,
+        ))
+        await session.commit()
+
+    collector = MarketDataCollector(
+        connectors=[], exclude_coins=[], min_volume_usdt=0.0,
+        interval_seconds=15, timeframe="3m", retention_days=0,
+    )
+    await collector._cleanup_old_data()
+
+    async with session_factory() as session:
+        assert len((await session.execute(select(Candle))).scalars().all()) == 1

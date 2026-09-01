@@ -242,6 +242,7 @@ class Application:
             interval_seconds=self.settings.collectors.interval_seconds,
             timeframe=self.settings.collectors.timeframe,
             on_cycle_done=self._on_collect_cycle_done,
+            retention_days=self.settings.collectors.retention_days,
         )
 
         self._running = True

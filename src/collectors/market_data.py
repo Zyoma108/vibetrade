@@ -1,10 +1,10 @@
 import asyncio
 import logging
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Callable, Coroutine
 
-from sqlalchemy import desc, func, select
+from sqlalchemy import delete, desc, func, select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -30,6 +30,18 @@ logger = logging.getLogger(__name__)
 # но их здесь больше нет: фетч вынесен в отдельную фазу до записи.
 COMMIT_CHUNK = 50
 
+# Ретенция. Чистим раз в сутки и порциями: DELETE на миллион строк — это
+# несколько секунд под write-локом, а лок здесь блокирует менеджер позиций.
+#
+# VACUUM намеренно НЕ делается. Он переписывает весь файл под эксклюзивной
+# блокировкой — на многогигабайтной базе это минуты, в течение которых бот
+# не может ни закрыть позицию, ни записать свечу. А чтобы остановить рост,
+# он и не нужен: освободившиеся страницы SQLite переиспользует под новые
+# строки сама. Файл перестаёт расти, даже если не уменьшается. Если место
+# на диске всё же поджимает — VACUUM запускается руками на остановленном боте.
+CLEANUP_INTERVAL = timedelta(hours=24)
+CLEANUP_BATCH = 20_000
+
 
 class MarketDataCollector:
     """Сбор рыночных данных с бирж по расписанию."""
@@ -42,6 +54,7 @@ class MarketDataCollector:
         interval_seconds: int = 60,
         timeframe: str = "5m",
         on_cycle_done: Callable[[AsyncSession], Coroutine] | None = None,
+        retention_days: int = 0,
     ):
         self._connectors = connectors
         self._exclude_coins = set(name.upper() for name in exclude_coins)
@@ -51,6 +64,8 @@ class MarketDataCollector:
         self._on_cycle_done = on_cycle_done
         self._running = False
         self._task: asyncio.Task | None = None
+        self._retention_days = retention_days
+        self._last_cleanup: datetime | None = None
 
     async def start(self) -> None:
         self._running = True
@@ -77,7 +92,57 @@ class MarketDataCollector:
                 break
             except Exception:
                 logger.exception("Ошибка в цикле сбора данных")
+            try:
+                await self._cleanup_old_data()
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                logger.exception("Ошибка чистки старых данных")
             await asyncio.sleep(self._interval)
+
+    async def _cleanup_old_data(self) -> None:
+        """Удалить свечи и OI старше `retention_days`. Раз в сутки, порциями.
+
+        Своя сессия, а не сессия цикла: чистка не должна попадать внутрь
+        транзакции сбора и удлинять её лок.
+        """
+        if self._retention_days <= 0:
+            return
+        now = datetime.now(tz=timezone.utc)
+        if self._last_cleanup is not None and now - self._last_cleanup < CLEANUP_INTERVAL:
+            return
+        self._last_cleanup = now
+
+        cutoff = now - timedelta(days=self._retention_days)
+        t0 = time.perf_counter()
+        removed: dict[str, int] = {}
+        async with async_session() as session:
+            for model in (Candle, OpenInterest):
+                total = 0
+                while True:
+                    victims = (
+                        select(model.id)
+                        .where(model.timestamp < cutoff)
+                        .limit(CLEANUP_BATCH)
+                        .scalar_subquery()
+                    )
+                    result = await session.execute(
+                        delete(model).where(model.id.in_(victims))
+                    )
+                    await session.commit()
+                    if not result.rowcount:
+                        break
+                    total += result.rowcount
+                if total:
+                    removed[model.__tablename__] = total
+
+        if removed:
+            details = ", ".join(f"{k}: {v}" for k, v in removed.items())
+            logger.info(
+                f"Чистка истории старше {self._retention_days} сут "
+                f"({cutoff:%Y-%m-%d}): удалено {details} "
+                f"за {time.perf_counter() - t0:.1f}с"
+            )
 
     def _passes_basic_filter(self, ticker: dict) -> bool:
         """Базовые фильтры (без учёта объёма): USDT-пара и не в exclusion-листе."""
