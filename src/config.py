@@ -177,6 +177,19 @@ class StrategyConfig(BaseModel):
     price_surge_minutes: int = Field(
         default=9, description="Промежуток времени для замера роста цены, минут"
     )
+    price_surge_cooldown_minutes: int = Field(
+        default=60, ge=0,
+        description="Не повторять сигнал по монете N минут после отправленного (0 = выкл). "
+        "Окно детектора длиннее цикла сканирования, поэтому один памп попадает в него на "
+        "каждом цикле: при цикле 45с и окне 18 мин это до 24 одинаковых сообщений. "
+        "Меньше price_surge_minutes ставить бессмысленно — окна будут пересекаться"
+    )
+    price_surge_escalation_pct: float = Field(
+        default=0.0, ge=0.0,
+        description="Пробить кулдаун, если рост стал больше уже отправленного максимума "
+        "на N процентных пунктов (0 = выкл). Нужен, чтобы не пропустить разгон пампа "
+        "+5% -> +20%, о котором кулдаун иначе промолчит"
+    )
     # Множитель volume_surge_mult для CAUTIOUS режима рынка
     cautious_volume_surge_mult_increase_pct: float = Field(
         default=50.0, ge=0.0, le=200.0,
