@@ -1196,3 +1196,114 @@ def test_agreement_error_covers_both_bybit_codes():
         'bybit {"retCode":110007,"retMsg":"ab not enough for new order"}'
     )
     assert not _is_agreement_error("Connection timed out")
+
+
+# ---------------------------------------------------------------------------
+# Защита после частичной фиксации: б/у-стоп и детект исполнения лимитника
+# ---------------------------------------------------------------------------
+
+
+class TestBreakevenStopRetry:
+    """Регресс: б/у-стоп ставился ровно один раз, без повтора при сбое.
+
+    Обе ветки партиала на исключении `set_tpsl` только писали warning, а
+    `partial_closed` к тому моменту уже был True — и обе ветки в
+    `update_positions` заходят под `not pos.partial_closed`. Позиция доживала
+    до конца под исходным стопом -5%, хотя в БД помечена как переведённая в
+    безубыток (сделка №2/SUI в аудите 27.08-01.09.2026).
+    """
+
+    @staticmethod
+    def _pos() -> Trade:
+        pos = _trade(entry_price=100.0, quantity=10.0)
+        pos.partial_closed = True
+        pos.current_sl_price = 95.0  # исходный -5%, б/у не доехал
+        return pos
+
+    async def test_retries_when_stop_is_not_at_breakeven(self):
+        connector = _fake_connector()
+        connector.set_tpsl = AsyncMock(return_value=True)
+        pm = _pm(connector)
+        pos = self._pos()
+
+        await pm._ensure_breakeven_stop(pos)
+
+        connector.set_tpsl.assert_awaited_once()
+        assert pos.current_sl_price == pos.entry_price, "стоп должен стать б/у"
+        assert connector.set_tpsl.await_args.kwargs["sl_price"] == pos.entry_price
+
+    async def test_is_idempotent_when_stop_is_already_at_breakeven(self):
+        """В штатном случае — ни одного запроса к бирже."""
+        connector = _fake_connector()
+        connector.set_tpsl = AsyncMock(return_value=True)
+        pm = _pm(connector)
+        pos = self._pos()
+        pos.current_sl_price = pos.entry_price
+
+        await pm._ensure_breakeven_stop(pos)
+
+        connector.set_tpsl.assert_not_awaited()
+
+    async def test_failure_keeps_position_eligible_for_next_retry(self):
+        """Сбой не должен «съесть» попытку: следующий цикл обязан повторить."""
+        connector = _fake_connector()
+        connector.set_tpsl = AsyncMock(side_effect=RuntimeError("биржа недоступна"))
+        pm = _pm(connector)
+        pos = self._pos()
+
+        await pm._ensure_breakeven_stop(pos)  # не должно бросить
+
+        assert pos.current_sl_price == 95.0, (
+            "при сбое current_sl_price не должен притворяться безубытком — "
+            "иначе повтор никогда не случится"
+        )
+
+
+class TestPartialFillDetection:
+    """Регресс: порог «осталось меньше 75% позиции» ломался на грубом шаге лота.
+
+    Позиция в 4 контракта при целом шаге даёт партиал 4 * 0.3 = 1.2 -> 1,
+    остаток 3 из 4 — ровно 75%, и исполнение не детектировалось никогда.
+    """
+
+    @staticmethod
+    def _pm_for(remaining: float, lot_step: float, qty: float, pct: float):
+        connector = _fake_connector()
+        connector.fetch_positions = AsyncMock(
+            return_value=[{"symbol": "TEST/USDT:USDT", "contracts": remaining}]
+        )
+        connector.amount_to_precision = AsyncMock(
+            side_effect=lambda _s, amount: float(int(amount / lot_step) * lot_step)
+        )
+        connector.set_tpsl = AsyncMock(return_value=True)
+        pm = _pm(connector, partial_close_qty_pct=pct)
+        pos = _trade(entry_price=100.0, quantity=qty)
+        return pm, pos
+
+    async def test_detects_fill_on_coarse_lot_step(self):
+        """4 контракта, целый шаг: партиал = 1, остаток 3 = ровно 75%."""
+        pm, pos = self._pm_for(remaining=3.0, lot_step=1.0, qty=4.0, pct=30.0)
+
+        assert await pm._check_limit_partial_fill(pos) is True
+        assert pos.partial_closed is True
+        assert pos.quantity == 3.0
+
+    async def test_no_fill_is_not_mistaken_for_one(self):
+        """Позиция не уменьшилась — детекта быть не должно."""
+        pm, pos = self._pm_for(remaining=4.0, lot_step=1.0, qty=4.0, pct=30.0)
+
+        assert await pm._check_limit_partial_fill(pos) is False
+        assert not pos.partial_closed
+
+    async def test_detects_fill_at_low_partial_pct(self):
+        """partial_close_qty_pct=15%: остаток 85%, старый порог 0.75 не сработал бы."""
+        pm, pos = self._pm_for(remaining=85.0, lot_step=1.0, qty=100.0, pct=15.0)
+
+        assert await pm._check_limit_partial_fill(pos) is True
+        assert pos.quantity == 85.0
+
+    async def test_no_limit_order_means_no_detection(self):
+        """Шаг лота крупнее доли — лимитника не было, детектить нечего."""
+        pm, pos = self._pm_for(remaining=10.0, lot_step=10.0, qty=10.0, pct=30.0)
+
+        assert await pm._check_limit_partial_fill(pos) is False
