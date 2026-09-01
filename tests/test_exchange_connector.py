@@ -131,3 +131,19 @@ async def test_collector_skips_unsupported_symbols():
     kept = collector._supported(_Conn(), selected)
 
     assert [t["symbol"] for t in kept] == ["SUI/USDT:USDT"]
+
+
+def test_connection_pool_matches_concurrency():
+    """Регресс деплоя 01.09.2026: подняли concurrency до 20, а пул соединений
+    `requests.Session` остался дефолтным (10). Половина запросов не находила
+    свободного соединения — urllib3 создавал новое, отдавал ответ и выбрасывал
+    его, платя полный TCP+TLS handshake, и заливал лог сотнями строк
+    «Connection pool is full, discarding connection» за цикл.
+    """
+    c = ExchangeConnector("bybit", concurrency=20)
+    adapter = c._exchange.session.get_adapter("https://api.bybit.com")
+
+    assert adapter._pool_maxsize >= 20, (
+        f"пул соединений {adapter._pool_maxsize} меньше конкурентности 20"
+    )
+    assert adapter._pool_connections >= 20

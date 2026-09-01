@@ -1,7 +1,7 @@
 import logging
 from pathlib import Path
 
-from sqlalchemy import event
+from sqlalchemy import event, inspect
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 logger = logging.getLogger(__name__)
@@ -61,6 +61,44 @@ async def _has_unique_index(conn, table: str, columns: tuple[str, ...]) -> bool:
     return False
 
 
+async def _create_missing_indexes(conn) -> None:
+    """Досоздать индексы, которых нет в уже существующих таблицах.
+
+    `Base.metadata.create_all()` этого НЕ делает: он проверяет наличие
+    таблицы, и если она есть — пропускает её целиком вместе со всеми
+    индексами. На пустой БД новый индекс появляется, на боевой — никогда.
+
+    Поймано 01.09.2026 на деплое `ix_oi_exchange_symbol_timestamp`: на хосте
+    старый `ix_open_interest_exchange` удалился (код ниже), а новый составной
+    не создался, и главный фикс цикла молча не применился. Проверять такое
+    глазами по логам бесполезно — оно не падает и ничего не пишет.
+
+    Сделано общим проходом по метаданным, а не разовым CREATE INDEX: следующий
+    добавленный в модель индекс доедет до боевой БД сам.
+    """
+    def _existing(sync_conn) -> set[str]:
+        insp = inspect(sync_conn)
+        names: set[str] = set()
+        for table in insp.get_table_names():
+            for idx in insp.get_indexes(table):
+                if idx.get("name"):
+                    names.add(idx["name"])
+        return names
+
+    from src.storage.models import Base
+
+    existing = await conn.run_sync(_existing)
+    for table in Base.metadata.tables.values():
+        for index in table.indexes:
+            if index.name in existing:
+                continue
+            try:
+                await conn.run_sync(lambda sync_conn, i=index: i.create(sync_conn))
+                logger.info(f"Создан недостающий индекс {index.name} на {table.name}")
+            except Exception:
+                logger.exception(f"Не удалось создать индекс {index.name}")
+
+
 async def init_db() -> None:
     """Создать таблицы и недостающие колонки."""
     from src.storage.models import Base
@@ -89,6 +127,7 @@ async def init_db() -> None:
 
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        await _create_missing_indexes(conn)
         # Добавляем новые колонки, если их ещё нет (для старых БД)
         for col_name, col_type in [
             ("tp_sl_set", "INTEGER DEFAULT 0"),

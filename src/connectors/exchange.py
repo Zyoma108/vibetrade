@@ -3,6 +3,7 @@ import logging
 from datetime import datetime, timezone
 
 import ccxt
+from requests.adapters import HTTPAdapter
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +62,7 @@ class ExchangeConnector:
             config.update({"apiKey": api_key, "secret": secret})
 
         self._exchange = exchange_class(config)
+        self._widen_connection_pool(concurrency)
         self.exchange_id = exchange_id
         self._semaphore = asyncio.Semaphore(concurrency)
         self.concurrency = concurrency
@@ -76,6 +78,28 @@ class ExchangeConnector:
             logger.info(
                 f"{exchange_id}: trading connector создан (mainnet)"
             )
+
+    def _widen_connection_pool(self, concurrency: int) -> None:
+        """Согласовать пул HTTP-соединений с числом параллельных вызовов.
+
+        Синхронный ccxt ходит через одну `requests.Session`, а её адаптер по
+        умолчанию держит пул из 10 соединений. При concurrency=20 половина
+        запросов не находит свободного соединения: urllib3 создаёт новое,
+        отдаёт ответ и ВЫБРАСЫВАЕТ его, потому что класть обратно некуда.
+        Каждый такой запрос платит полный TCP+TLS handshake, а лог заливается
+        «Connection pool is full, discarding connection» — по строке на вызов
+        (поймано на деплое 01.09.2026, сотни строк за цикл).
+
+        Держим пул не меньше конкурентности — тогда соединения переиспользуются
+        и handshake платится один раз на соединение, а не на запрос.
+        """
+        session = getattr(self._exchange, "session", None)
+        if session is None:  # ccxt без requests-транспорта — ничего не делаем
+            return
+        size = max(concurrency, 10)
+        adapter = HTTPAdapter(pool_connections=size, pool_maxsize=size)
+        session.mount("https://", adapter)
+        session.mount("http://", adapter)
 
     @property
     def has_credentials(self) -> bool:
