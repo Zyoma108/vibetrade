@@ -331,3 +331,100 @@ async def test_history_kept_for_all_scanned_coins(session_factory, monkeypatch):
 
     # Тикеры: ровно один снимок на монету — это и есть экономия места
     assert len(tickers) == len(symbols)
+
+
+# ---------------------------------------------------------------------------
+# Цена записи: коммитов на цикл должно быть на два порядка меньше числа монет
+# ---------------------------------------------------------------------------
+
+
+class _ManyCoinConnector:
+    """Заглушка на произвольное число монет: один новый бар и свой OI на монету."""
+
+    def __init__(self, symbols: list[str], oi_offset: float = 0.0):
+        self.exchange_id = "binance"
+        self._symbols = symbols
+        self._oi_offset = oi_offset
+
+    async def fetch_ohlcv(self, symbol: str, timeframe: str = "3m", limit: int = 100):
+        return [{
+            "exchange": "binance", "symbol": symbol, "timestamp": BASE_TS,
+            "open": 1.0, "high": 1.1, "low": 0.9, "close": 1.0, "volume": 100.0,
+        }]
+
+    async def fetch_open_interest(self, symbol: str):
+        return {
+            "exchange": "binance", "symbol": symbol, "timestamp": BASE_TS,
+            "value": 1000.0 + self._oi_offset + len(symbol),
+        }
+
+
+def _selected(symbols: list[str]) -> list[dict]:
+    return [{
+        "exchange": "binance", "symbol": s, "timestamp": BASE_TS, "last": 1.0,
+    } for s in symbols]
+
+
+async def test_write_path_commits_are_batched(session_factory):
+    """Регресс: раньше здесь был коммит НА КАЖДУЮ монету — по одному в
+    `_upsert_candles` и по одному на каждый изменившийся OI, около 1050 fsync'ов
+    за цикл. С честным барьером записи (Linux) это ~22 с на ровном месте.
+
+    Тест сторожит не скорость (её в юнит-тесте не померить), а само число
+    коммитов: оно должно расти как N/COMMIT_CHUNK, а не как N.
+    """
+    from src.collectors.market_data import COMMIT_CHUNK
+
+    n = COMMIT_CHUNK * 3
+    symbols = [f"C{i:04d}/USDT:USDT" for i in range(n)]
+    collector = _make_collector()
+    connector = _ManyCoinConnector(symbols)
+
+    commits = 0
+    async with session_factory() as session:
+        original = session.commit
+
+        async def counting_commit():
+            nonlocal commits
+            commits += 1
+            await original()
+
+        session.commit = counting_commit
+        await collector._collect_for_exchange(connector, session, _selected(symbols))
+
+        rows = (await session.execute(select(Candle))).scalars().all()
+        ois = (await session.execute(select(OpenInterest))).scalars().all()
+
+    assert len(rows) == n, "все свечи должны быть записаны"
+    assert len(ois) == n, "OI должен быть записан по каждой монете"
+    # 3 чанка свечей + финальный коммит свечей + один коммит фазы OI + запас
+    assert commits <= n // COMMIT_CHUNK + 4, (
+        f"коммитов {commits} на {n} монет — похоже, вернулся коммит на монету"
+    )
+    assert commits < n / 10, f"коммитов {commits}, ожидалось на порядок меньше {n}"
+
+
+async def test_oi_unchanged_value_is_not_rewritten(session_factory):
+    """Дедупликация OI переживает переход на батчевую запись: одинаковое
+    значение подряд не должно плодить строки."""
+    symbols = ["AAA/USDT:USDT", "BBB/USDT:USDT"]
+    collector = _make_collector()
+    connector = _ManyCoinConnector(symbols)
+
+    async with session_factory() as session:
+        await collector._collect_for_exchange(connector, session, _selected(symbols))
+        await collector._collect_for_exchange(connector, session, _selected(symbols))
+        first = (await session.execute(select(OpenInterest))).scalars().all()
+
+        # то же самое, но OI изменился — теперь строки добавиться должны
+        await collector._collect_for_exchange(
+            connector, session, _selected(symbols),
+        )
+        changed_connector = _ManyCoinConnector(symbols, oi_offset=5.0)
+        await collector._collect_for_exchange(
+            changed_connector, session, _selected(symbols),
+        )
+        second = (await session.execute(select(OpenInterest))).scalars().all()
+
+    assert len(first) == len(symbols), "повтор того же OI не должен плодить строки"
+    assert len(second) == len(symbols) * 2, "изменившийся OI должен быть записан"

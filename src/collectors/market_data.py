@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import time
 from datetime import datetime, timezone
 from typing import Callable, Coroutine
 
@@ -12,6 +13,22 @@ from src.storage.database import async_session
 from src.storage.models import Candle, OpenInterest, Ticker
 
 logger = logging.getLogger(__name__)
+
+# Сколько монет записывать между коммитами. Коммит по монете (как было до
+# 01.09.2026) — это ~1050 fsync'ов за цикл: по одному на монету в
+# `_upsert_candles` и по одному на каждый изменившийся OI. На macOS fsync
+# не сбрасывает кеш диска и стоит 0.39 мс, поэтому цена была незаметна в
+# замерах; с настоящим барьером (Linux, `fullfsync=1`) это 21.3 мс, то есть
+# ~22 с за цикл на ровном месте. Замер записи 583 строк OI на боевой БД:
+#   коммит на монету — 12.53 с | чанк 25 — 0.55 с | чанк 50 — 0.31 с
+#
+# Коммитить всё одной транзакцией всё же нельзя: SQLAlchemy держит write-лок
+# SQLite с первого автофлаша и до коммита, а лок на весь скан блокирует
+# параллельных писателей (менеджер позиций, Telegram). Чанк — компромисс:
+# лок держится доли секунды, а fsync'ов на два порядка меньше. Прежнее
+# обоснование «коммит по монете» ссылалось на сетевые паузы внутри скана,
+# но их здесь больше нет: фетч вынесен в отдельную фазу до записи.
+COMMIT_CHUNK = 50
 
 
 class MarketDataCollector:
@@ -192,25 +209,37 @@ class MarketDataCollector:
 
         # 4. Свечи: сначала параллельный фетч с биржи, потом быстрая последовательная запись
         logger.info(f"{connector.exchange_id}: сбор свечей для {len(selected)} монет...")
+        t_fetch = time.perf_counter()
         candle_batches = await self._fetch_candles_concurrently(connector, selected)
-        for symbol, candles in candle_batches:
+        t_write = time.perf_counter()
+        for i, (symbol, candles) in enumerate(candle_batches):
             if candles:
                 await self._upsert_candles(session, symbol, candles)
+            if (i + 1) % COMMIT_CHUNK == 0:
+                await session.commit()
+        await session.commit()
+        t_oi = time.perf_counter()
 
         # 5. OI: для ByBit значение уже под рукой (получено бесплатно вместе с тикерами
         # в начале цикла) — без сетевого запроса. Для остальных бирж — параллельный фетч,
         # как и для свечей.
         if oi_by_symbol is not None:
-            for t in selected:
-                await self._write_oi(
-                    session, connector.exchange_id, t["symbol"], oi_by_symbol.get(t["symbol"]),
-                )
+            values = {
+                t["symbol"]: oi_by_symbol[t["symbol"]]
+                for t in selected
+                if oi_by_symbol.get(t["symbol"]) is not None
+            }
         else:
             logger.info(f"{connector.exchange_id}: сбор OI для {len(selected)} монет...")
             oi_batches = await self._fetch_oi_concurrently(connector, selected)
-            for symbol, oi in oi_batches:
-                if oi is not None:
-                    await self._write_oi(session, oi["exchange"], oi["symbol"], oi["value"])
+            values = {sym: oi["value"] for sym, oi in oi_batches if oi is not None}
+        await self._write_oi_batch(session, connector.exchange_id, values)
+
+        t_end = time.perf_counter()
+        logger.info(
+            f"{connector.exchange_id}: фазы — фетч свечей {t_write - t_fetch:.1f}с, "
+            f"запись свечей {t_oi - t_write:.1f}с, OI {t_end - t_oi:.1f}с"
+        )
 
     async def _upsert_tickers(self, session: AsyncSession, tickers: list[dict]) -> None:
         """Записать текущие тикеры — одна строка на (exchange, symbol), см. `Ticker`.
@@ -254,7 +283,11 @@ class MarketDataCollector:
         """Записывает свечи одной монеты. Закрытые бары (старше последнего сохранённого)
         неизменны на бирже, поэтому не перепроверяются по одной — достаточно узнать
         максимальный уже сохранённый timestamp одним запросом, а не делать SELECT на
-        каждую из ~100 полученных свечей."""
+        каждую из ~100 полученных свечей.
+
+        Не коммитит: коммит делает вызывающий раз в `COMMIT_CHUNK` монет (см. её
+        комментарий). Запрос max(timestamp) ниже видит и ещё не закоммиченные строки
+        текущего чанка — SQLAlchemy автофлашит их перед SELECT."""
         exchange = candles[0]["exchange"]
         max_ts = await session.scalar(
             select(func.max(Candle.timestamp)).where(
@@ -290,7 +323,6 @@ class MarketDataCollector:
                     existing.volume = c["volume"]
                     continue
             session.add(Candle(**c))
-        await session.commit()
 
     async def _fetch_oi_concurrently(
         self, connector: ExchangeConnector, selected: list[dict],
@@ -308,24 +340,47 @@ class MarketDataCollector:
 
         return await asyncio.gather(*(fetch_one(t) for t in selected))
 
-    async def _write_oi(
-        self, session: AsyncSession, exchange: str, symbol: str, value: float | None,
+    async def _write_oi_batch(
+        self, session: AsyncSession, exchange: str, values: dict[str, float],
     ) -> None:
-        """Сохраняет OI с дедупликацией: только если значение изменилось."""
-        if value is None:
+        """Сохраняет OI всей биржи с дедупликацией: только изменившиеся значения.
+
+        Поиск последнего значения остаётся поштучным, а вот вставка и коммит —
+        одни на всю биржу (было: коммит на каждую изменившуюся монету, ~500 за
+        цикл, см. COMMIT_CHUNK про цену fsync'а).
+
+        Поштучный SELECT здесь не случайность, а осознанный выбор против
+        «одного запроса на все монеты» через `GROUP BY symbol`: тот вынужден
+        просканировать весь раздел биржи (у binance это 1.05 млн строк), и его
+        стоимость снова росла бы линейно с историей — ровно та беда, которую
+        чинит составной индекс. Поштучный поиск по индексу — O(log n). Замер на
+        боевой БД: батч-вариант 29.7 мс, 520 поштучных с индексом — доли
+        миллисекунды. Без индекса поштучный стоил 13.7 мс НА МОНЕТУ.
+        """
+        if not values:
             return
-        last_oi = await session.scalar(
-            select(OpenInterest.value)
-            .where(OpenInterest.exchange == exchange, OpenInterest.symbol == symbol)
-            .order_by(desc(OpenInterest.timestamp))
-            .limit(1)
-        )
-        if last_oi is None or last_oi != value:
-            session.add(OpenInterest(
-                exchange=exchange, symbol=symbol,
-                timestamp=datetime.now(tz=timezone.utc), value=value,
-            ))
-            await session.commit()
+
+        now = datetime.now(tz=timezone.utc)
+        changed: list[dict] = []
+        for symbol, value in values.items():
+            last = await session.scalar(
+                select(OpenInterest.value)
+                .where(
+                    OpenInterest.exchange == exchange,
+                    OpenInterest.symbol == symbol,
+                )
+                .order_by(desc(OpenInterest.timestamp))
+                .limit(1)
+            )
+            if last is None or last != value:
+                changed.append({
+                    "exchange": exchange, "symbol": symbol,
+                    "timestamp": now, "value": value,
+                })
+
+        if changed:
+            await session.execute(sqlite_insert(OpenInterest), changed)
+        await session.commit()
 
     def _filter_tickers(self, tickers: list[dict]) -> list[dict]:
         """Динамический отбор: USDT-пары, объём >= min, не в exclusion list."""

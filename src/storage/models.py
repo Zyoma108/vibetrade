@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import Boolean, Float, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -57,10 +57,33 @@ class Ticker(Base):
 
 
 class OpenInterest(Base):
+    """Журнал открытого интереса — одна строка на изменение значения.
+
+    Составной индекс обязателен. Все горячие читатели (`_write_oi_batch`,
+    `DataProvider.load_oi_values`) спрашивают «последние N значений по
+    (exchange, symbol)», а одиночных индексов для этого мало: на `exchange`
+    всего две различные величины, и планировщик на миллионе строк выбирал
+    именно его — отбирал по нему половину таблицы и досортировывал через
+    TEMP B-TREE. Замер 01.09.2026 на боевой БД: 13.7 мс на запрос против
+    0.17 мс на такой же, но «молодой» базе; в цикле сбора это 8.1 с из 8.5 с
+    всего времени записи, и росло линейно с историей. Ровно та же патология,
+    что была у `Ticker` (см. её докстринг), — там вылечили, здесь пропустили.
+
+    `ix_open_interest_exchange` удалён как бесполезный (две различные
+    величины) — он только удорожал вставку. `ix_open_interest_symbol`
+    оставлен: `PriceSurgeSignalProcessor._calc_oi_change` спрашивает по
+    одному symbol без exchange. `ix_open_interest_timestamp` оставлен ради
+    `SELECT MAX(timestamp)` в загрузчике бэктеста.
+    """
+
     __tablename__ = "open_interest"
 
+    __table_args__ = (
+        Index("ix_oi_exchange_symbol_timestamp", "exchange", "symbol", "timestamp"),
+    )
+
     id: Mapped[int] = mapped_column(primary_key=True)
-    exchange: Mapped[str] = mapped_column(String(32), index=True)
+    exchange: Mapped[str] = mapped_column(String(32))
     symbol: Mapped[str] = mapped_column(String(32), index=True)
     timestamp: Mapped[datetime] = mapped_column(index=True)
     value: Mapped[float] = mapped_column(Float)
