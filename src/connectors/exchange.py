@@ -64,6 +64,13 @@ class ExchangeConnector:
         self.exchange_id = exchange_id
         self._semaphore = asyncio.Semaphore(concurrency)
         self.concurrency = concurrency
+        # Монеты, которых на этой бирже нет (ccxt.BadSymbol). Живут в tickers,
+        # но каждый цикл гарантированно отдают ошибку — например ACX/USDT:USDT
+        # на bybit. Ошибка мгновенная (ccxt проверяет по загруженным markets,
+        # без сети), так что цена — только шум в логе и место в очереди фетча.
+        # Сбрасывается перезапуском процесса: если монету на бирже наконец
+        # листанули, бот подхватит её после ближайшего рестарта.
+        self.unsupported_symbols: set[str] = set()
 
         if api_key:
             logger.info(
@@ -73,6 +80,15 @@ class ExchangeConnector:
     @property
     def has_credentials(self) -> bool:
         return bool(self._exchange.apiKey)
+
+    def _mark_unsupported(self, symbol: str) -> None:
+        """Запомнить, что монеты на этой бирже нет — чтобы не спрашивать снова."""
+        if symbol not in self.unsupported_symbols:
+            self.unsupported_symbols.add(symbol)
+            logger.info(
+                f"{self.exchange_id}: {symbol} на бирже отсутствует — "
+                f"исключена из сбора до перезапуска"
+            )
 
     # ------------------------------------------------------------------
     # Low-level
@@ -131,7 +147,11 @@ class ExchangeConnector:
         kwargs = {"limit": limit}
         if since is not None:
             kwargs["since"] = since
-        raw = await self._call("fetch_ohlcv", symbol, timeframe, scan=True, **kwargs)
+        try:
+            raw = await self._call("fetch_ohlcv", symbol, timeframe, scan=True, **kwargs)
+        except ccxt.BadSymbol:
+            self._mark_unsupported(symbol)
+            raise
         return [
             {
                 "exchange": self.exchange_id,
@@ -164,7 +184,11 @@ class ExchangeConnector:
 
     async def fetch_open_interest(self, symbol: str) -> dict | None:
         try:
-            raw = await self._call("fetch_open_interest", symbol, scan=True)
+            try:
+                raw = await self._call("fetch_open_interest", symbol, scan=True)
+            except ccxt.BadSymbol:
+                self._mark_unsupported(symbol)
+                raise
         except (ccxt.BadRequest, ccxt.NotSupported, ccxt.ExchangeError):
             logger.debug(f"{self.exchange_id}: OI не поддерживается для {symbol}")
             return None

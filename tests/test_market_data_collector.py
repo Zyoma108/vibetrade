@@ -33,6 +33,7 @@ class FakeConnector:
 
     def __init__(self, ohlcv_batches: list[list[dict]]):
         self.exchange_id = "binance"
+        self.unsupported_symbols: set[str] = set()
         self._batches = ohlcv_batches
         self._call = 0
 
@@ -256,6 +257,7 @@ class _MultiCoinConnector:
 
     def __init__(self, exchange_id: str, symbols: list[str], volume: float = 5_000_000.0):
         self.exchange_id = exchange_id
+        self.unsupported_symbols: set[str] = set()
         self._symbols = symbols
         self._volume = volume
         self._poll = 0
@@ -345,6 +347,7 @@ class _ManyCoinConnector:
 
     def __init__(self, symbols: list[str], oi_offset: float = 0.0):
         self.exchange_id = "binance"
+        self.unsupported_symbols: set[str] = set()
         self._symbols = symbols
         self._oi_offset = oi_offset
 
@@ -446,6 +449,7 @@ async def test_fetch_phase_has_a_hard_deadline(monkeypatch):
 
     class _Conn:
         exchange_id = "binance"
+        unsupported_symbols: set[str] = set()
 
     async def quick(n):
         return ("быстрая", n)

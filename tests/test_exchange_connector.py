@@ -94,3 +94,40 @@ async def test_trading_call_still_retries(monkeypatch):
         f"торговый вызов сделал {c._exchange.calls} попыток, "
         f"ожидалось {ex_mod.MAX_RETRIES}"
     )
+
+
+class _BadSymbolCcxt(_FakeCcxt):
+    def fetch_ohlcv(self, *args, **kwargs):
+        self.calls += 1
+        raise ccxt.BadSymbol("bybit does not have market symbol ACX/USDT:USDT")
+
+
+async def test_missing_symbol_is_remembered_once():
+    """Монеты, которых на бирже нет, живут в tickers и каждый цикл отдают
+    ошибку (замер 01.09.2026: ACX/USDT:USDT на bybit). Ошибка мгновенная,
+    но и спрашивать про неё каждый цикл незачем."""
+    c = ExchangeConnector("bybit", concurrency=5)
+    c._exchange = _BadSymbolCcxt("ok")
+
+    with pytest.raises(ccxt.BadSymbol):
+        await c.fetch_ohlcv("ACX/USDT:USDT")
+
+    assert "ACX/USDT:USDT" in c.unsupported_symbols
+
+
+async def test_collector_skips_unsupported_symbols():
+    from src.collectors.market_data import MarketDataCollector
+
+    collector = MarketDataCollector(
+        connectors=[], exclude_coins=[], min_volume_usdt=0.0,
+        interval_seconds=15, timeframe="3m",
+    )
+
+    class _Conn:
+        exchange_id = "bybit"
+        unsupported_symbols = {"ACX/USDT:USDT"}
+
+    selected = [{"symbol": "ACX/USDT:USDT"}, {"symbol": "SUI/USDT:USDT"}]
+    kept = collector._supported(_Conn(), selected)
+
+    assert [t["symbol"] for t in kept] == ["SUI/USDT:USDT"]

@@ -341,7 +341,8 @@ class MarketDataCollector:
                 return symbol, None
 
         return await self._gather_with_deadline(
-            connector, [fetch_one(t) for t in selected], "свечи",
+            connector, [fetch_one(t) for t in self._supported(connector, selected)],
+            "свечи",
         )
 
     async def _upsert_candles(
@@ -406,8 +407,18 @@ class MarketDataCollector:
                 return symbol, None
 
         return await self._gather_with_deadline(
-            connector, [fetch_one(t) for t in selected], "OI",
+            connector, [fetch_one(t) for t in self._supported(connector, selected)],
+            "OI",
         )
+
+    @staticmethod
+    def _supported(connector: ExchangeConnector, selected: list[dict]) -> list[dict]:
+        """Отбросить монеты, которых на этой бирже нет (см.
+        `ExchangeConnector.unsupported_symbols`)."""
+        bad = connector.unsupported_symbols
+        if not bad:
+            return selected
+        return [t for t in selected if t["symbol"] not in bad]
 
     @staticmethod
     async def _gather_with_deadline(
