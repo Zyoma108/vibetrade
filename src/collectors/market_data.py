@@ -14,6 +14,32 @@ from src.storage.models import Candle, OpenInterest, Ticker
 
 logger = logging.getLogger(__name__)
 
+
+def _note_skip(
+    skipped: list[str], connector: "ExchangeConnector", what: str,
+    symbol: str, error: Exception,
+) -> None:
+    """Копим пропуски по таймауту, настоящие ошибки логируем сразу.
+
+    Таймаут — штатная ветка (монета приедет следующим циклом), и в заминку
+    их сразу десятки; настоящая ошибка биржи единична и информативна.
+    """
+    if isinstance(error, (asyncio.TimeoutError, TimeoutError)):
+        skipped.append(symbol)
+        return
+    logger.warning(f"{connector.exchange_id}: {what} для {symbol}: {error}")
+
+
+def _log_skips(connector: "ExchangeConnector", what: str, skipped: list[str]) -> None:
+    if not skipped:
+        return
+    sample = ", ".join(skipped[:SKIP_LOG_SAMPLE])
+    tail = f" и ещё {len(skipped) - SKIP_LOG_SAMPLE}" if len(skipped) > SKIP_LOG_SAMPLE else ""
+    logger.warning(
+        f"{connector.exchange_id}: {what} не успели за дедлайн у {len(skipped)} монет "
+        f"({sample}{tail}) — приедут следующим циклом"
+    )
+
 # Сколько монет записывать между коммитами. Коммит по монете (как было до
 # 01.09.2026) — это ~1050 fsync'ов за цикл: по одному на монету в
 # `_upsert_candles` и по одному на каждый изменившийся OI. На macOS fsync
@@ -29,6 +55,13 @@ logger = logging.getLogger(__name__)
 # обоснование «коммит по монете» ссылалось на сетевые паузы внутри скана,
 # но их здесь больше нет: фетч вынесен в отдельную фазу до записи.
 COMMIT_CHUNK = 50
+
+# Порог, после которого пропуски по монетам сводятся в одну строку вместо
+# строки на монету. Сетевая заминка на бирже роняет весь батч разом (замер
+# 01.09.2026: заминка на bybit пропустила 11 монет из 23 за один цикл), и
+# лог получал по ДВЕ строки на каждую — из коннектора и отсюда, причём вторая
+# с пустым текстом исключения: у TimeoutError его нет.
+SKIP_LOG_SAMPLE = 5
 
 # Ретенция. Чистим раз в сутки и порциями: DELETE на миллион строк — это
 # несколько секунд под write-локом, а лок здесь блокирует менеджер позиций.
@@ -331,19 +364,23 @@ class MarketDataCollector:
     ) -> list[tuple[str, list[dict] | None]]:
         """Параллельно (под семафором коннектора) фетчит свечи для всех монет —
         никаких обращений к БД здесь, только сеть."""
+        skipped: list[str] = []
+
         async def fetch_one(t: dict) -> tuple[str, list[dict] | None]:
             symbol = t["symbol"]
             try:
                 candles = await connector.fetch_ohlcv(symbol, timeframe=self._timeframe, limit=100)
                 return symbol, candles
             except Exception as e:
-                logger.warning(f"{connector.exchange_id}: свечи для {symbol}: {e}")
+                _note_skip(skipped, connector, "свечи", symbol, e)
                 return symbol, None
 
-        return await self._gather_with_deadline(
+        result = await self._gather_with_deadline(
             connector, [fetch_one(t) for t in self._supported(connector, selected)],
             "свечи",
         )
+        _log_skips(connector, "свечи", skipped)
+        return result
 
     async def _upsert_candles(
         self, session: AsyncSession, symbol: str, candles: list[dict],
@@ -397,19 +434,23 @@ class MarketDataCollector:
     ) -> list[tuple[str, dict | None]]:
         """Параллельно (под семафором коннектора) фетчит OI для всех монет —
         только для бирж, где он не приехал бесплатно вместе с тикером."""
+        skipped: list[str] = []
+
         async def fetch_one(t: dict) -> tuple[str, dict | None]:
             symbol = t["symbol"]
             try:
                 oi = await connector.fetch_open_interest(symbol)
                 return symbol, oi
             except Exception as e:
-                logger.warning(f"{connector.exchange_id}: OI для {symbol}: {e}")
+                _note_skip(skipped, connector, "OI", symbol, e)
                 return symbol, None
 
-        return await self._gather_with_deadline(
+        result = await self._gather_with_deadline(
             connector, [fetch_one(t) for t in self._supported(connector, selected)],
             "OI",
         )
+        _log_skips(connector, "OI", skipped)
+        return result
 
     @staticmethod
     def _supported(connector: ExchangeConnector, selected: list[dict]) -> list[dict]:

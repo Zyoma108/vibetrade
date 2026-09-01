@@ -558,3 +558,62 @@ async def test_retention_disabled_by_zero(session_factory, monkeypatch):
 
     async with session_factory() as session:
         assert len((await session.execute(select(Candle))).scalars().all()) == 1
+
+
+async def test_timeout_skips_are_logged_once_not_per_coin(monkeypatch, caplog):
+    """Регресс наблюдения 01.09.2026: сетевая заминка роняет весь батч разом,
+    и лог получал ПО ДВЕ строки на каждую монету — из коннектора и из
+    сборщика, причём вторая с пустым текстом исключения (у TimeoutError его
+    нет). Пропуски по дедлайну должны сводиться в одну строку.
+    """
+    import logging as _logging
+
+    import src.collectors.market_data as md
+
+    collector = _make_collector()
+
+    class _TimeoutConn:
+        exchange_id = "bybit"
+        unsupported_symbols: set[str] = set()
+
+        async def fetch_ohlcv(self, symbol, timeframe="3m", limit=100):
+            raise asyncio.TimeoutError()
+
+    selected = [{"symbol": f"C{i}/USDT:USDT"} for i in range(11)]
+
+    with caplog.at_level(_logging.WARNING, logger=md.__name__):
+        got = await collector._fetch_candles_concurrently(_TimeoutConn(), selected)
+
+    assert all(c is None for _, c in got), "все монеты должны вернуться пустыми"
+    warnings = [r for r in caplog.records if r.levelno >= _logging.WARNING]
+    assert len(warnings) == 1, (
+        f"ожидалась одна сводная строка, получено {len(warnings)}: "
+        f"{[r.getMessage() for r in warnings]}"
+    )
+    msg = warnings[0].getMessage()
+    assert "11 монет" in msg, msg
+
+
+async def test_real_errors_are_still_logged_per_coin(caplog):
+    """Настоящая ошибка биржи единична и информативна — её сводить нельзя."""
+    import logging as _logging
+
+    import src.collectors.market_data as md
+
+    collector = _make_collector()
+
+    class _BrokenConn:
+        exchange_id = "bybit"
+        unsupported_symbols: set[str] = set()
+
+        async def fetch_ohlcv(self, symbol, timeframe="3m", limit=100):
+            raise ValueError("биржа вернула мусор")
+
+    selected = [{"symbol": "A/USDT:USDT"}, {"symbol": "B/USDT:USDT"}]
+
+    with caplog.at_level(_logging.WARNING, logger=md.__name__):
+        await collector._fetch_candles_concurrently(_BrokenConn(), selected)
+
+    msgs = [r.getMessage() for r in caplog.records if r.levelno >= _logging.WARNING]
+    assert len(msgs) == 2, msgs
+    assert all("биржа вернула мусор" in m for m in msgs), msgs

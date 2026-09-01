@@ -143,7 +143,9 @@ def test_connection_pool_matches_concurrency():
     c = ExchangeConnector("bybit", concurrency=20)
     adapter = c._exchange.session.get_adapter("https://api.bybit.com")
 
-    assert adapter._pool_maxsize >= 20, (
-        f"пул соединений {adapter._pool_maxsize} меньше конкурентности 20"
+    assert adapter._pool_maxsize > 20, (
+        f"пул соединений {adapter._pool_maxsize} без запаса над конкурентностью 20: "
+        f"зависшие по дедлайну потоки держат соединения до FETCH_TIMEOUT, и "
+        f"следующая партия снова упрётся в полный пул"
     )
-    assert adapter._pool_connections >= 20
+    assert adapter._pool_connections > 20
