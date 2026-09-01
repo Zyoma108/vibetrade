@@ -106,15 +106,35 @@ async def init_db() -> None:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 
     if DB_PATH.exists():
-        # Проверить целостность базы
+        # Проверить целостность базы.
+        #
+        # `quick_check`, а НЕ `integrity_check`: полная проверка читает весь файл
+        # и вдобавок сверяет содержимое каждого индекса с таблицей. Замер
+        # 01.09.2026 на копии боевой БД (459 МБ, 5 суток истории): integrity_check
+        # 29.4 с на SSD ноутбука и ~60 с на боевом VPS — это ровно та задержка
+        # старта, что видна в логе между «Пул потоков» и «Биржи (данные)». Растёт
+        # линейно с файлом, а при `retention_days: 30` база идёт к ~2.7 ГБ, то есть
+        # к нескольким минутам простоя НА КАЖДЫЙ рестарт, когда бот не сканирует и
+        # не торгует. quick_check на той же базе — 5.8 с.
+        #
+        # Что теряем: quick_check ловит повреждение страниц и структуры b-деревьев,
+        # но не сверяет записи индексов с записями таблиц. Риск принят осознанно:
+        # оба исторических повреждения (21-22.07.2026) вызваны WAL поверх
+        # bind-mount тома Docker Desktop, а эта причина устранена переездом на
+        # named volume (см. докстринг `_set_journal_mode` и AGENTS.md).
+        #
+        # Полная проверка при подозрении на порчу — руками, не на старте:
+        #   docker exec trading-bot sqlite3 /app/data/trading_bot.db "PRAGMA integrity_check;"
         import sqlite3
         try:
             db = sqlite3.connect(str(DB_PATH))
-            result = db.execute("PRAGMA integrity_check").fetchone()
+            result = db.execute("PRAGMA quick_check").fetchone()
             db.close()
             if result[0] != "ok":
                 raise RuntimeError(
-                    f"База данных повреждена! integrity_check: {result[0]}\n"
+                    f"База данных повреждена! quick_check: {result[0]}\n"
+                    f"Полная диагностика:\n"
+                    f'  sqlite3 {DB_PATH.resolve()} "PRAGMA integrity_check;"\n'
                     f"Удали файл и перезапусти бота:\n"
                     f"  rm {DB_PATH.resolve()}"
                 )
