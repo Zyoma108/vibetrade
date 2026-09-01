@@ -32,4 +32,4 @@ make backtest-run               # прогнать стратегию на ис�
 
 ## Конфигурация
 
-Основные параметры стратегии в `config/config.yaml → strategy`. Подробное описание — в [AGENTS.md](AGENTS.md).
+Основные параметры стратегии в `config/config.yaml → strategy`. Подробное описание — в [AGENTS.md](AGENTS.md) (ядро) и [docs/](docs/): [стратегия](docs/strategy.md), [позиции](docs/positions.md), [бэктест](docs/backtest.md), [БД](docs/database.md), [эксплуатация](docs/operations.md), [решения](docs/decisions.md).
