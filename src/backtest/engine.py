@@ -337,7 +337,19 @@ def simulate(settings, data, has_oi: bool = True, collect_retracement: bool = Tr
                 positions.remove(pos)
                 last_exit_time[pos.symbol] = ts
                 if cfg.circuit_breaker_enabled:
-                    cb_losses += 1
+                    # Боевой PositionManager._close_position решает по ЗНАКУ PnL
+                    # (`if (trade.pnl or 0) <= 0`), а не по причине выхода. Выход по
+                    # стопу после партиала — прибыльный (доля забронирована на 35%
+                    # пути), и в проливе он СБРАСЫВАЕТ серию убытков. Движок же
+                    # инкрементировал серию на любом `sl`, из-за чего Circuit Breaker
+                    # в бэктесте срабатывал заметно чаще боевого: на БД 27.08-08.09
+                    # 21 сделка уменьшенным размером против 12 в проливе.
+                    if pos.pnl > 0:
+                        cb_losses = 0
+                        cb_stop_until = None
+                        cb_stop_consumed_at = 0
+                    else:
+                        cb_losses += 1
                 continue
 
             age = (ts - pos.entry_time).total_seconds() / 3600

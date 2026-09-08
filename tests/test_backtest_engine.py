@@ -402,3 +402,128 @@ def test_runner_delegates_to_engine(golden_db, tmp_path, monkeypatch):
     for key in ("signals", "trades", "wins", "losses", "total_pnl", "tp_wins", "partials"):
         assert via_runner[key] == via_engine[key], f"расхождение по {key}"
     assert via_runner["trades_list"] == via_engine["trades_list"]
+
+
+# ---------------------------------------------------------------------------
+# Circuit Breaker: parity со знаком PnL, а не с причиной выхода
+# ---------------------------------------------------------------------------
+
+
+def _build_partial_then_be(symbol: str, n_baseline: int, n_sustain: int, start_bar: int = 0):
+    """Всплеск объёма → цена доходит до партиал-триггера → возврат ко входу.
+
+    Выход получается по `sl` (б/у-стоп), но PnL положительный: доля позиции уже
+    забронирована на 35% пути к TP. Боевой `PositionManager._close_position`
+    считает такую сделку ПРИБЫЛЬНОЙ и сбрасывает серию убытков.
+    """
+    rows = []
+    price = 100.0
+    for i in range(n_baseline):
+        rows.append((
+            "bybit", symbol, _ts(start_bar + i),
+            price, price * 1.001, price * 0.999, price, 1_000.0,
+        ))
+    for j in range(n_sustain):
+        i = n_baseline + j
+        nxt = price * 1.012
+        rows.append((
+            "bybit", symbol, _ts(start_bar + i),
+            price, nxt * 1.001, price * 0.999, nxt, 8_000.0 + j * 500,
+        ))
+        price = nxt
+    entry = price
+    # рост выше партиал-триггера (+3.5% при SL=5%, RR=2.0, partial_close_pct=35)
+    for j, mult in enumerate((1.02, 1.05, 1.05)):
+        i = n_baseline + n_sustain + j
+        rows.append((
+            "bybit", symbol, _ts(start_bar + i),
+            entry, entry * mult, entry * 0.999, entry * mult * 0.99, 1_200.0,
+        ))
+    # возврат ровно ко входу — срабатывает б/у-стоп
+    for j in range(3, 40):
+        i = n_baseline + n_sustain + j
+        rows.append((
+            "bybit", symbol, _ts(start_bar + i),
+            entry, entry * 1.001, entry * 0.98, entry * 0.99, 1_200.0,
+        ))
+    return rows
+
+
+def _build_straight_to_sl(symbol: str, n_baseline: int, n_sustain: int, start_bar: int):
+    """Всплеск объёма → цена сразу валится ниже стопа. Полный SL без партиала."""
+    rows = []
+    price = 100.0
+    for i in range(n_baseline):
+        rows.append((
+            "bybit", symbol, _ts(start_bar + i),
+            price, price * 1.001, price * 0.999, price, 1_000.0,
+        ))
+    for j in range(n_sustain):
+        i = n_baseline + j
+        nxt = price * 1.012
+        rows.append((
+            "bybit", symbol, _ts(start_bar + i),
+            price, nxt * 1.001, price * 0.999, nxt, 8_000.0 + j * 500,
+        ))
+        price = nxt
+    entry = price
+    for j in range(40):
+        i = n_baseline + n_sustain + j
+        rows.append((
+            "bybit", symbol, _ts(start_bar + i),
+            entry, entry * 1.0005, entry * 0.90, entry * 0.91, 1_200.0,
+        ))
+    return rows
+
+
+@pytest.fixture
+def cb_parity_db(tmp_path):
+    """Две монеты подряд: первая выходит по б/у-стопу в плюс, вторая — в полный SL."""
+    n_baseline, n_sustain = 20, 4
+    first = _build_partial_then_be("AAA/USDT:USDT", n_baseline, n_sustain, start_bar=0)
+    second = _build_straight_to_sl("BBB/USDT:USDT", n_baseline, n_sustain, start_bar=44)
+    candles = first + second
+    oi = [
+        ("bybit", sym, _ts(i), 1_000_000.0 * (1 + 0.01 * i))
+        for sym in ("AAA/USDT:USDT", "BBB/USDT:USDT")
+        for i in range(120)
+    ]
+    path = tmp_path / "cb.db"
+    _write_db(path, candles, oi)
+    return str(path)
+
+
+def test_be_stop_exit_does_not_feed_circuit_breaker(cb_parity_db):
+    """Прибыльный выход по стопу обязан СБРАСЫВАТЬ серию убытков, как в проливе.
+
+    Движок инкрементировал `cb_losses` на любом `exit_reason == "sl"`, не глядя на
+    знак PnL. Боевой `PositionManager._close_position` смотрит именно на знак
+    (`if (trade.pnl or 0) <= 0`), поэтому б/у-выход после партиала в проливе —
+    победа. Расхождение завышало срабатывания Circuit Breaker в бэктесте и
+    искажало любой свип, где менялась доля партиала.
+
+    Мутация для проверки теста: вернуть в движке безусловный `cb_losses += 1` —
+    вторая сделка откроется половинным размером и |PnL| упадёт вдвое.
+    """
+    settings = _settings()
+    settings.trading.circuit_breaker_loss_streak_reduce = 1
+    settings.trading.circuit_breaker_loss_streak_stop = 99  # полную остановку не проверяем
+    settings.trading.cooldown_hours = 0.0
+
+    result = simulate(settings, load_data(cb_parity_db), has_oi=True)
+    trades = {t["symbol"]: t for t in result["trades_list"]}
+
+    assert "AAA/USDT:USDT" in trades and "BBB/USDT:USDT" in trades, result["trades_list"]
+    first = trades["AAA/USDT:USDT"]
+    assert first["exit_reason"] == "sl", "выход по б/у-стопу проходит по ветке sl"
+    assert first["partial_closed"] is True
+    assert first["pnl"] > 0, "доля забронирована на 35% пути — сделка прибыльная"
+
+    second = trades["BBB/USDT:USDT"]
+    assert second["exit_reason"] == "sl"
+    # Риск на сделку = virtual_balance 1000 × risk_per_trade_pct 1% = $10.
+    # Полный размер даёт убыток около -$10, уменьшенный вдвое — около -$5.
+    assert second["pnl"] < -7.0, (
+        f"вторая сделка открыта уменьшенным размером (PnL={second['pnl']:.2f}) — "
+        "значит прибыльный б/у-выход ошибочно засчитан в серию убытков"
+    )
