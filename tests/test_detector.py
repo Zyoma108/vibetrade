@@ -986,3 +986,125 @@ class TestOiTrendPasses:
         """Нет данных — не сигнал, но и не «отказ фильтра» для filtered_signals."""
         assert oi_trend_passes(None, True, 1.0) == (False, None, None)
         assert oi_trend_passes([100.0], True, 1.0) == (False, None, None)
+
+
+# ---------------------------------------------------------------------------
+# Замер «формирующегося бара»
+# ---------------------------------------------------------------------------
+
+
+def _flat_candles(volumes: list[float], last_close: float | None = None) -> list[dict]:
+    """Свечи с плоской ценой 1.0; у последней close можно поднять."""
+    out = []
+    for i, v in enumerate(volumes):
+        c = last_close if (last_close is not None and i == len(volumes) - 1) else 1.0
+        out.append(
+            {"open": 1.0, "high": max(1.0, c), "low": 1.0, "close": c, "volume": v}
+        )
+    return out
+
+
+class TestClosedBarVerdict:
+    """_closed_bar_verdict — наблюдение, не решение.
+
+    Проверяет, существовал бы тот же сетап на окне без ещё не закрытого
+    последнего бара. Ни на вход, ни на размер позиции не влияет: результат
+    только пишется в `signals`, чтобы через пару недель ответить на вопрос
+    о ценовых гейтах на формирующемся баре живыми данными.
+    """
+
+    @staticmethod
+    def _d():
+        return _detector(baseline_bars=5, sustain_bars=4, volume_surge_mult=3.0)
+
+    def test_volume_fails_without_forming_bar(self):
+        """Всплеск держится ровно 4 бара — без последнего окно рассыпается."""
+        d = self._d()
+        candles = _flat_candles([100.0] * 8 + [500.0] * 4)
+        ok, stage = d._closed_bar_verdict(candles, candles, min_bars=9, age_sec=90)
+        assert ok is False
+        assert stage == "volume_threshold"
+
+    def test_price_gate_fails_without_forming_bar(self):
+        """Объём сходится и на закрытых барах, а рост цены весь в форм. баре."""
+        d = self._d()
+        candles = _flat_candles([100.0] * 8 + [500.0] * 5, last_close=1.05)
+        ok, stage = d._closed_bar_verdict(candles, candles, min_bars=9, age_sec=90)
+        assert ok is False
+        assert stage == "price_growth_low"
+
+    def test_confirmed_when_setup_survives_closed_window(self):
+        """Всплеск шире sustain-окна — сетап есть и без последнего бара."""
+        d = self._d()
+        candles = _flat_candles([100.0] * 8 + [500.0] * 5, last_close=1.05)
+        candles[8]["close"] = candles[8]["high"] = 1.0
+        for i in (9, 10, 11):
+            candles[i]["open"] = 1.0 + (i - 9) * 0.01
+            candles[i]["close"] = candles[i]["high"] = 1.0 + (i - 8) * 0.01
+        ok, stage = d._closed_bar_verdict(candles, candles, min_bars=9, age_sec=90)
+        assert ok is True
+        assert stage is None
+
+    def test_already_closed_last_bar_is_trivially_confirmed(self):
+        """Бар прожил весь таймфрейм — окно и так «закрытое», гейты не гоняем."""
+        d = self._d()
+        candles = _flat_candles([100.0] * 8 + [500.0] * 4)
+        assert d._closed_bar_verdict(candles, candles, 9, age_sec=180) == (True, None)
+
+    def test_shifted_volume_window_is_trivially_confirmed(self):
+        """Объём взят со сдвигом -1 — форм. бар и так вне окна."""
+        d = self._d()
+        candles = _flat_candles([100.0] * 8 + [500.0] * 4)
+        assert d._closed_bar_verdict(candles, candles[:-1], 9, age_sec=90) == (True, None)
+
+    def test_unknown_bar_time_gives_undefined_verdict(self):
+        d = self._d()
+        candles = _flat_candles([100.0] * 8 + [500.0] * 4)
+        assert d._closed_bar_verdict(candles, candles, 9, age_sec=None) == (None, None)
+
+    def test_too_short_history_gives_undefined_verdict(self):
+        """После отбрасывания форм. бара окна не хватает — это не «сетапа нет»."""
+        d = self._d()
+        candles = _flat_candles([100.0] * 5 + [500.0] * 4)
+        assert d._closed_bar_verdict(candles, candles, 9, age_sec=90) == (None, None)
+
+    def test_measuring_run_does_not_log_rejections(self, caplog):
+        """«Сигнал пропущен» в логе означало бы обратное — сигнал как раз найден."""
+        d = self._d()
+        candles = _flat_candles([100.0] * 8 + [500.0] * 5, last_close=1.05)
+        with caplog.at_level("INFO"):
+            d._closed_bar_verdict(candles, candles, min_bars=9, age_sec=90)
+        assert "Сигнал пропущен" not in caplog.text
+        assert d._measuring is False
+
+    def test_measuring_flag_reset_on_exception(self):
+        d = self._d()
+        with pytest.raises(Exception):
+            d._closed_bar_verdict(None, None, 9, age_sec=90)
+        assert d._measuring is False
+
+
+class TestLastBarAge:
+    """_last_bar_age_sec — SQLite отдаёт время без tzinfo, биржа отдаёт с ним."""
+
+    def test_naive_timestamp(self):
+        from datetime import datetime, timedelta, timezone
+
+        d = _detector()
+        ts = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(seconds=95)
+        assert 90 <= d._last_bar_age_sec(ts) <= 100
+
+    def test_aware_timestamp_matches_naive(self):
+        from datetime import datetime, timedelta, timezone
+
+        d = _detector()
+        ts = datetime.now(timezone.utc) - timedelta(seconds=95)
+        assert 90 <= d._last_bar_age_sec(ts) <= 100
+
+    def test_none_and_future(self):
+        from datetime import datetime, timedelta, timezone
+
+        d = _detector()
+        assert d._last_bar_age_sec(None) is None
+        future = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(seconds=30)
+        assert d._last_bar_age_sec(future) == 0

@@ -34,11 +34,15 @@ class SetupDetector(BaseDetector):
         self.config = config
         self._exclude_coins = set(c.upper() for c in config.exclude_coins)
         self._hour_bars = max(60 // timeframe_to_minutes(timeframe), 1)
+        self._timeframe_sec = timeframe_to_minutes(timeframe) * 60
         self._dp = data_provider or DataProvider()
         self._regime_volume_mult: float = 1.0  # Множитель от рыночного режима
+        # Внутри «замерочного» прогона гейтов (_closed_bar_verdict) отказы не
+        # логируются: сигнал в этот момент уже найден и в Telegram уходит, а
+        # строка «Сигнал пропущен» в логе означала бы обратное.
+        self._measuring = False
 
-    @staticmethod
-    def _reject(context: dict | None, stage: str, reason: str) -> None:
+    def _reject(self, context: dict | None, stage: str, reason: str) -> None:
         """Записать отказ фильтра: лог + `context` для `filtered_signals`.
 
         Один источник текста на оба назначения. Раньше каждый из 14 блоков отказа
@@ -47,7 +51,8 @@ class SetupDetector(BaseDetector):
         `filtered_signals`, то есть с данными, по которым потом проводится аудит
         самих фильтров.
         """
-        logger.info(f"Сигнал пропущен: {reason}")
+        if not self._measuring:
+            logger.info(f"Сигнал пропущен: {reason}")
         if context is not None:
             context["stage"] = stage
             context["reason"] = reason
@@ -87,35 +92,10 @@ class SetupDetector(BaseDetector):
                 if len(candles) < min_bars:
                     continue
 
-                # Проверяем volume pattern с lookback: если текущее окно не проходит —
-                # пробуем на свечу раньше. Коллектор обновляет последнюю свечу по мере
-                # её формирования (interval_seconds << timeframe, см.
-                # MarketDataCollector._upsert_candles), поэтому в моменте скана самая
-                # свежая свеча в окне часто ещё не закрыта и её объём занижен — это и
-                # компенсирует сдвиг. НО: ретраим только если исходный отказ был
-                # "тихим" (свеча ещё не доросла до порога всплеска, vol_ctx пуст) —
-                # если отказ пришёл с explicit-причиной из VOLUME_REVERSAL_STAGES
-                # (спайк/дамп/угасание/падение объёма), это значит свеча УЖЕ прошла
-                # порог и её форма говорит о развороте — сдвиг тогда выбросил бы из
-                # окна ровно ту свечу, которую эти же проверки (и retracement/
-                # exhaustion-фильтры ниже, считающиеся на том же окне) должны ловить.
-                vol_window = None
                 vol_ctx: dict = {}
-                if self.check_volume_pattern(candles, vol_ctx):
-                    vol_window = candles
-                elif vol_ctx.get("stage") not in VOLUME_REVERSAL_STAGES:
-                    for shift in range(1, 2):  # -1 свеча
-                        shifted = candles[:-shift]
-                        shift_ctx: dict = {}
-                        if len(shifted) >= min_bars and self.check_volume_pattern(shifted, shift_ctx):
-                            vol_window = shifted
-                            logger.info(
-                                f"Сетап {symbol}: volume найден со сдвигом -{shift} свечей "
-                                f"(исходный отказ: тихий — порог всплеска ещё не достигнут)"
-                            )
-                            break
-                        if shift_ctx:
-                            vol_ctx = shift_ctx  # причина последней попытки — самая релевантная
+                vol_window = self._match_volume_window(
+                    candles, min_bars, vol_ctx, symbol=symbol
+                )
 
                 if vol_window is None:
                     self._log_filtered(session, exchange, symbol, vol_ctx)
@@ -139,6 +119,9 @@ class SetupDetector(BaseDetector):
                 seen.add(symbol)
 
                 signal = self._build_signal(symbol, direction, vol_window)
+                await self._annotate_closed_bar(
+                    session, exchange, symbol, candles, vol_window, min_bars, signal
+                )
                 signals.append(signal)
                 logger.info(f"Сетап найден: {symbol} {direction} ({exchange})")
 
@@ -164,6 +147,146 @@ class SetupDetector(BaseDetector):
                 reason=ctx["reason"],
             )
         )
+
+    # ------------------------------------------------------------------
+    # Выбор объёмного окна (ЕДИНСТВЕННАЯ реализация — см. AGENTS.md, правило 2)
+    # ------------------------------------------------------------------
+
+    def _match_volume_window(
+        self,
+        candles: list[dict],
+        min_bars: int,
+        context: dict,
+        symbol: str | None = None,
+    ) -> list[dict] | None:
+        """Окно, на котором сошёлся объёмный паттерн, либо None.
+
+        Проверяем volume pattern с lookback: если текущее окно не проходит —
+        пробуем на свечу раньше. Коллектор обновляет последнюю свечу по мере
+        её формирования (interval_seconds << timeframe, см.
+        MarketDataCollector._upsert_candles), поэтому в моменте скана самая
+        свежая свеча в окне часто ещё не закрыта и её объём занижен — это и
+        компенсирует сдвиг. НО: ретраим только если исходный отказ был
+        "тихим" (свеча ещё не доросла до порога всплеска, context пуст) —
+        если отказ пришёл с explicit-причиной из VOLUME_REVERSAL_STAGES
+        (спайк/дамп/угасание/падение объёма), это значит свеча УЖЕ прошла
+        порог и её форма говорит о развороте — сдвиг тогда выбросил бы из
+        окна ровно ту свечу, которую эти же проверки (и retracement/
+        exhaustion-фильтры ниже, считающиеся на том же окне) должны ловить.
+
+        Вынесено из ``analyze()`` отдельным методом, потому что этот же поток
+        нужен ``_closed_bar_verdict()`` на окне без формирующегося бара.
+        Копии здесь быть не должно: разъехавшаяся копия гейта уже дважды
+        стоила неверных выводов (AGENTS.md, правило 2).
+
+        ``symbol`` — только для лога; None на замерочном прогоне.
+        """
+        if self.check_volume_pattern(candles, context):
+            return candles
+        if context.get("stage") in VOLUME_REVERSAL_STAGES:
+            return None
+
+        for shift in range(1, 2):  # -1 свеча
+            shifted = candles[:-shift]
+            shift_ctx: dict = {}
+            if len(shifted) >= min_bars and self.check_volume_pattern(shifted, shift_ctx):
+                if symbol is not None:
+                    logger.info(
+                        f"Сетап {symbol}: volume найден со сдвигом -{shift} свечей "
+                        f"(исходный отказ: тихий — порог всплеска ещё не достигнут)"
+                    )
+                return shifted
+            if shift_ctx:
+                # причина последней попытки — самая релевантная
+                context.clear()
+                context.update(shift_ctx)
+
+        return None
+
+    # ------------------------------------------------------------------
+    # Замер: существовал бы сетап на закрытых барах (только запись, не решение)
+    # ------------------------------------------------------------------
+
+    async def _annotate_closed_bar(
+        self,
+        session,
+        exchange: str,
+        symbol: str,
+        candles: list[dict],
+        vol_window: list[dict],
+        min_bars: int,
+        signal: Signal,
+    ) -> None:
+        """Записать в сигнал, прошёл бы он на окне БЕЗ формирующегося бара.
+
+        На решение о входе НЕ влияет — сигнал к этому моменту уже построен.
+        Цель — накопить в `signals` данные, по которым через пару недель можно
+        будет решить вопрос о ценовых гейтах на формирующемся баре, не
+        реконструируя прошлое: в БД лежат только финальные бары, а `tickers`
+        перезаписывается upsert-ом, поэтому восстановить то, что бот видел в
+        момент решения, задним числом не из чего.
+        См. docs/strategy.md, «Формирующийся бар».
+        """
+        last_ts = await self._dp.get_last_candle_ts(session, exchange, symbol)
+        age_sec = self._last_bar_age_sec(last_ts)
+        signal.last_bar_age_sec = age_sec
+        signal.closed_bar_ok, signal.closed_bar_stage = self._closed_bar_verdict(
+            candles, vol_window, min_bars, age_sec
+        )
+
+    def _last_bar_age_sec(self, last_ts: datetime | None) -> int | None:
+        """Сколько секунд прожил последний бар окна к моменту скана.
+
+        SQLite роняет tzinfo при round-trip, поэтому сравниваем в naive-UTC
+        (тот же приём, что в MarketDataCollector._upsert_candles).
+        """
+        if last_ts is None:
+            return None
+        if last_ts.tzinfo is not None:
+            last_ts = last_ts.astimezone(timezone.utc).replace(tzinfo=None)
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        return max(int((now - last_ts).total_seconds()), 0)
+
+    def _closed_bar_verdict(
+        self,
+        candles: list[dict],
+        vol_window: list[dict],
+        min_bars: int,
+        age_sec: int | None,
+    ) -> tuple[bool | None, str | None]:
+        """(прошёл бы на закрытых барах, стадия отказа).
+
+        None в первом поле — вердикт не определён (нет времени бара или не
+        хватает истории после отбрасывания формирующегося). OI-гейт здесь не
+        проверяется: OI пишется по факту изменения, а не по барам, и «закрытого»
+        значения у него нет.
+        """
+        if age_sec is None:
+            return None, None
+        if age_sec >= self._timeframe_sec:
+            return True, None  # последний бар уже закрыт — окно и так «закрытое»
+        if len(vol_window) < len(candles):
+            return True, None  # объём взят со сдвигом — форм. бар и так вне окна
+
+        closed = candles[:-1]
+        if len(closed) < min_bars:
+            return None, None
+
+        self._measuring = True
+        try:
+            vol_ctx: dict = {}
+            window = self._match_volume_window(closed, min_bars, vol_ctx)
+            if window is None:
+                # «Тихий» отказ причину не заполняет — порог всплеска не достигнут
+                return False, vol_ctx.get("stage") or "volume_threshold"
+
+            price_ctx: dict = {}
+            if self.check_price_trend(window, price_ctx) is None:
+                return False, price_ctx.get("stage") or "price_trend"
+        finally:
+            self._measuring = False
+
+        return True, None
 
     # ------------------------------------------------------------------
     # Volume pattern (public — used by backtest)

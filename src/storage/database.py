@@ -153,8 +153,6 @@ async def init_db() -> None:
             ("tp_sl_set", "INTEGER DEFAULT 0"),
             ("partial_closed", "INTEGER DEFAULT 0"),
             ("partial_pnl", "FLOAT DEFAULT 0.0"),
-            ("missed_reason", "VARCHAR(32)"),
-            ("missed_detail", "TEXT"),
             ("fee", "FLOAT DEFAULT 0.0"),
             ("pending_expires_at", "DATETIME"),
             ("source", "VARCHAR(16) DEFAULT 'algo'"),
@@ -164,6 +162,24 @@ async def init_db() -> None:
             try:
                 await conn.exec_driver_sql(
                     f"ALTER TABLE trades ADD COLUMN {col_name} {col_type}"
+                )
+            except Exception:
+                pass  # колонка уже существует
+
+        # То же для signals. `missed_reason`/`missed_detail` стояли в списке выше,
+        # то есть добавлялись в `trades`, где таких колонок нет: на старой БД
+        # signals их не получала, а trades получала две мёртвые. Не проявлялось
+        # только потому, что боевая БД создавалась уже с ними через create_all().
+        for col_name, col_type in [
+            ("missed_reason", "VARCHAR(32)"),
+            ("missed_detail", "TEXT"),
+            ("closed_bar_ok", "INTEGER"),
+            ("closed_bar_stage", "VARCHAR(32)"),
+            ("last_bar_age_sec", "INTEGER"),
+        ]:
+            try:
+                await conn.exec_driver_sql(
+                    f"ALTER TABLE signals ADD COLUMN {col_name} {col_type}"
                 )
             except Exception:
                 pass  # колонка уже существует

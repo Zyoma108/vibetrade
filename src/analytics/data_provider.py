@@ -15,7 +15,7 @@ import logging
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import desc, select
+from sqlalchemy import desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.storage.models import Candle, OpenInterest, Ticker
@@ -85,6 +85,10 @@ class CandleCache:
             self._candles[cache_key] = []
         # Return a copy to prevent mutation by external code
         return list(self._candles[cache_key])
+
+    def last_timestamp(self, exchange: str, symbol: str) -> datetime | None:
+        """Timestamp of the newest cached candle for a pair, if any."""
+        return self._max_ts.get(f"{exchange}:{symbol}")
 
     @staticmethod
     async def _fetch_recent(
@@ -249,6 +253,27 @@ class DataProvider:
         ]
         self._candles[cache_key] = candles
         return candles
+
+    async def get_last_candle_ts(
+        self, session: AsyncSession, exchange: str, symbol: str,
+    ) -> datetime | None:
+        """Время открытия самого свежего бара, который видит детектор.
+
+        Нужно, чтобы понять, сколько последний бар окна прожил к моменту скана:
+        коллектор опрашивает биржу заметно чаще таймфрейма, поэтому этот бар
+        почти всегда ещё формируется (см. REFRESH_TAIL_BARS). Значение берётся
+        из персистентного кеша, если он есть — там оно уже посчитано при
+        загрузке свечей и не стоит отдельного запроса.
+        """
+        if self._persistent_cache is not None:
+            ts = self._persistent_cache.last_timestamp(exchange, symbol)
+            if ts is not None:
+                return ts
+        return await session.scalar(
+            select(func.max(Candle.timestamp)).where(
+                Candle.exchange == exchange, Candle.symbol == symbol,
+            )
+        )
 
     # ------------------------------------------------------------------
     # Open Interest

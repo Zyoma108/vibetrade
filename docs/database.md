@@ -90,7 +90,7 @@ not match any ... UNIQUE constraint`.
 | `tickers` | Текущий тикер (цена, объём) — одна строка на exchange + symbol, upsert (см. выше) |
 | `candles` | OHLCV-свечи — уникальность по exchange + symbol + timestamp |
 | `open_interest` | OI — сохраняется только при изменении значения |
-| `signals` | Сигналы основной стратегии, включает `missed_reason` (причина пропуска) |
+| `signals` | Сигналы основной стратегии, включает `missed_reason` (причина пропуска) и замер `closed_bar_ok` / `closed_bar_stage` / `last_bar_age_sec` (см. «Формирующийся бар» в `docs/strategy.md`) |
 | `price_surge_signals` | Сигналы PriceSurgeDetector |
 | `filtered_signals` | Сетапы, отсеянные `SetupDetector` до появления в `signals` (см. ниже) |
 | `trades` | Торговые позиции (вход/выход, PnL, partial close, TP/SL статус) |

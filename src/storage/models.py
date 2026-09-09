@@ -102,6 +102,12 @@ class Signal(Base):
     missed_reason: Mapped[str | None] = mapped_column(String(32), nullable=True, default=None)  # limit / duplicate / cooldown / risk_off / error
     missed_detail: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)  # детали ошибки (исключение, причина) / no_price
 
+    # Замер работы по формирующемуся бару (docs/strategy.md, «Формирующийся бар»).
+    # Только наблюдение: на вход и на размер позиции не влияет.
+    closed_bar_ok: Mapped[int | None] = mapped_column(Integer, nullable=True, default=None)  # 1 = сетап есть и на закрытых барах, 0 = нет, NULL = не определено
+    closed_bar_stage: Mapped[str | None] = mapped_column(String(32), nullable=True, default=None)  # гейт, валящий сетап на закрытых барах: volume_threshold / volume_* / price_trend / price_growth_low / window_range / exhaustion* / pre_surge_pump / hourly_drop
+    last_bar_age_sec: Mapped[int | None] = mapped_column(Integer, nullable=True, default=None)  # возраст последнего бара окна на момент сигнала, с (timeframe = 180 → бар закрыт)
+
 
 class FilteredSignal(Base):
     """Сетапы, отсеянные детектором до появления в signals (после того как объём уже

@@ -347,6 +347,11 @@ class Application:
                     direction=sig.direction,
                     confidence=sig.confidence,
                     message=sig.message,
+                    closed_bar_ok=(
+                        None if sig.closed_bar_ok is None else int(sig.closed_bar_ok)
+                    ),
+                    closed_bar_stage=sig.closed_bar_stage,
+                    last_bar_age_sec=sig.last_bar_age_sec,
                 )
                 session.add(db_signal)
                 await session.flush()  # Получить db_signal.id до вызова open_position
