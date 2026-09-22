@@ -68,8 +68,17 @@ class TradingGuards:
     # Чёрный список и кулдаун ошибок
     # ------------------------------------------------------------------
 
-    def ban_symbol(self, symbol: str) -> None:
+    def ban_symbol(self, symbol: str) -> bool:
+        """Забанить символ. Возвращает True, если бан новый.
+
+        Флаг нужен вызывающему, чтобы сообщить о бане РОВНО один раз: соглашение
+        по монете не появится само, и без уведомления тикер живёт в бан-листе БД
+        молча, продолжая тратить сигналы до следующего ручного аудита. Так
+        накопилось 18 тикеров за 6 недель (см. exclude_coins в config.yaml)."""
+        if symbol in self.banned_symbols:
+            return False
         self.banned_symbols.add(symbol)
+        return True
 
     def is_banned(self, symbol: str) -> bool:
         return symbol in self.banned_symbols

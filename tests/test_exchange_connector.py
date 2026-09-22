@@ -149,3 +149,83 @@ def test_connection_pool_matches_concurrency():
         f"следующая партия снова упрётся в полный пул"
     )
     assert adapter._pool_connections > 20
+
+
+# ---------------------------------------------------------------------------
+# Режим позиции: ByBit retCode 10001 "position idx not match position mode"
+# ---------------------------------------------------------------------------
+#
+# Регресс: бот не передаёт positionIdx и не выставлял режим позиции, поэтому на
+# символе с включённым hedge-режимом ордер отклонялся. Поймано на DASH — 3
+# сигнала 27.08-21.09.2026 не дошли до ордера, после третьего символ ушёл в
+# error-cooldown на 4 часа (аудит 22.09.2026).
+
+
+class _PositionModeCcxt(_FakeCcxt):
+    """Считает вызовы set_position_mode и умеет отвечать как ByBit."""
+
+    def __init__(self, error: Exception | None = None):
+        super().__init__("ok")
+        self.mode_calls: list[tuple] = []
+        self._error = error
+
+    def set_position_mode(self, hedged, symbol=None, params=None):
+        self.mode_calls.append((hedged, symbol))
+        if self._error is not None:
+            raise self._error
+        return {"retCode": 0}
+
+
+def _mode_connector(fake: _PositionModeCcxt) -> ExchangeConnector:
+    conn = ExchangeConnector.__new__(ExchangeConnector)
+    conn._exchange = fake
+    conn.exchange_id = "bybit"
+    conn._semaphore = asyncio.Semaphore(4)
+    conn.unsupported_symbols = set()
+    conn._one_way_symbols = set()
+    return conn
+
+
+async def test_one_way_mode_set_once_per_symbol():
+    """Режим выставляется при первом входе и больше не дёргается: лишний
+    приватный вызов на каждую сделку не нужен."""
+    fake = _PositionModeCcxt()
+    conn = _mode_connector(fake)
+
+    await conn.ensure_one_way_mode("DASH/USDT:USDT")
+    await conn.ensure_one_way_mode("DASH/USDT:USDT")
+    await conn.ensure_one_way_mode("ETH/USDT:USDT")
+
+    assert fake.mode_calls == [
+        (False, "DASH/USDT:USDT"),
+        (False, "ETH/USDT:USDT"),
+    ]
+
+
+async def test_already_one_way_is_not_an_error():
+    """retCode 110025 — это «режим уже такой», а не отказ: символ кешируется,
+    повторных вызовов не будет."""
+    fake = _PositionModeCcxt(error=ccxt.ExchangeError('bybit {"retCode":110025,'
+                                                      '"retMsg":"Position mode is not modified"}'))
+    conn = _mode_connector(fake)
+
+    await conn.ensure_one_way_mode("DASH/USDT:USDT")
+    await conn.ensure_one_way_mode("DASH/USDT:USDT")
+
+    assert len(fake.mode_calls) == 1
+
+
+async def test_real_failure_is_swallowed_and_retried_next_time():
+    """Настоящий отказ наружу не выпускаем — ордер всё равно стоит попробовать,
+    он провалится не хуже, чем раньше. Но символ не кешируем: следующий вход
+    попытается снова. Ретраев при этом НЕ будет: _call повторяет только сетевые
+    ошибки, а ExchangeError пробрасывает сразу — иначе постоянный отказ стоил бы
+    трёх приватных вызовов на каждый вход."""
+    fake = _PositionModeCcxt(error=ccxt.ExchangeError("что-то совсем другое"))
+    conn = _mode_connector(fake)
+
+    await conn.ensure_one_way_mode("DASH/USDT:USDT")  # не должно бросить
+    await conn.ensure_one_way_mode("DASH/USDT:USDT")
+
+    assert len(fake.mode_calls) == 2
+    assert conn._one_way_symbols == set()

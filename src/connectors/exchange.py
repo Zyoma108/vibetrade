@@ -48,6 +48,10 @@ _DEFAULT_TYPE: dict[str, str] = {
     "bybit": "linear",
 }
 
+# Маркеры ответа «режим позиции и так уже такой». ByBit отвечает retCode 110025
+# на повторную установку того же режима — это не ошибка, а подтверждение.
+_POSITION_MODE_NOT_MODIFIED = ("110025", "not modified")
+
 
 class ExchangeConnector:
     """Обёртка над ccxt для работы с CEX-биржами (public + trading)."""
@@ -81,6 +85,9 @@ class ExchangeConnector:
         # Сбрасывается перезапуском процесса: если монету на бирже наконец
         # листанули, бот подхватит её после ближайшего рестарта.
         self.unsupported_symbols: set[str] = set()
+        # Символы, уже приведённые к one-way режиму позиции в этом процессе.
+        # См. ensure_one_way_mode — там же объяснение, зачем это вообще нужно.
+        self._one_way_symbols: set[str] = set()
 
         if api_key:
             logger.info(
@@ -426,6 +433,33 @@ class ExchangeConnector:
         """Установить плечо для символа."""
         logger.info(f"{self.exchange_id}: устанавливаю плечо {leverage}x для {symbol}")
         await self._call("set_leverage", leverage, symbol)
+
+    async def ensure_one_way_mode(self, symbol: str) -> None:
+        """Привести символ к one-way режиму позиции. Идемпотентно, раз на процесс.
+
+        Бот торгует только в одну сторону и не передаёт `positionIdx`, поэтому
+        ccxt шлёт 0. Если по символу на счёте включён hedge-режим, ByBit ждёт 1
+        или 2 и отклоняет ордер кодом 10001 "position idx not match position
+        mode". Поймано на DASH: 3 сигнала 27.08-21.09.2026 не дошли до ордера,
+        после третьего символ ушёл в error-cooldown на 4 часа (аудит 22.09.2026).
+
+        Ошибку наружу не выпускаем: если режим переключить не удалось, ордер
+        всё равно стоит попробовать — он провалится ровно так же, как раньше,
+        и не хуже. Неудачный символ не кешируется, попытка повторится на
+        следующем входе.
+        """
+        if symbol in self._one_way_symbols:
+            return
+        try:
+            await self._call("set_position_mode", False, symbol)
+        except Exception as e:
+            if not any(m in str(e).lower() for m in _POSITION_MODE_NOT_MODIFIED):
+                logger.warning(
+                    f"{self.exchange_id}: не удалось перевести {symbol} в one-way "
+                    f"режим позиции: {e}"
+                )
+                return
+        self._one_way_symbols.add(symbol)
 
     async def fetch_last_trade(
         self, symbol: str, since: datetime

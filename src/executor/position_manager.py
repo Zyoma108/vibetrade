@@ -303,6 +303,10 @@ class PositionManager:
         except Exception as e:
             logger.warning(f"Не удалось выставить плечо для {signal.symbol}: {e}")
 
+        # Режим позиции — до ордера, иначе ByBit отклонит его кодом 10001
+        # "position idx not match position mode". Метод сам гасит свои ошибки.
+        await self._connector.ensure_one_way_mode(signal.symbol)
+
         if self.config.pending_entry_pullback_pct > 0:
             return await self._place_pending_entry(
                 session, signal, signal_id, reference_price, risk_budget,
@@ -474,7 +478,8 @@ class PositionManager:
             err = str(e)
             # ByBit требует подписать соглашение — пропускаем без шума
             if _is_agreement_error(err):
-                self.guards.ban_symbol(signal.symbol)
+                if self.guards.ban_symbol(signal.symbol):
+                    await self._alert_banned_symbol(signal.symbol)
                 self.guards.track_error(signal.symbol)
                 logger.info(
                     f"ByBit не даёт торговать {signal.symbol}: "
@@ -561,7 +566,8 @@ class PositionManager:
         except Exception as e:
             err = str(e)
             if _is_agreement_error(err):
-                self.guards.ban_symbol(signal.symbol)
+                if self.guards.ban_symbol(signal.symbol):
+                    await self._alert_banned_symbol(signal.symbol)
                 self.guards.track_error(signal.symbol)
                 logger.info(
                     f"ByBit не даёт торговать {signal.symbol}: "
@@ -1337,6 +1343,23 @@ class PositionManager:
         logger.info(
             f"Позиция закрыта: {trade.symbol} {reason} "
             f"PnL=${trade.pnl:+.2f} ({pnl_pct:+.1f}%) fee=${trade.fee or 0.0:.4f}"
+        )
+
+    async def _alert_banned_symbol(self, symbol: str) -> None:
+        """Сообщить о новом символе в чёрном списке — ровно один раз на бан.
+
+        Бан переживает рестарт (bot_state.banned_symbols_json), но сам по себе
+        ничего не чинит: пока тикер не попал в strategy.exclude_coins, детектор
+        продолжает тратить на него сигналы. Раньше это оставалось только в логе,
+        и тикеры находились лишь при ручном аудите БД — к 22.09.2026 их набралось
+        18, из них 5 не были занесены в конфиг и стоили 17 сигналов."""
+        ticker = symbol.split("/")[0]
+        await self._notify(
+            f"🚫 <b>Монета заблокирована биржей</b>\n"
+            f"{symbol} — ByBit требует отдельное соглашение.\n\n"
+            f"Добавьте в <code>strategy.exclude_coins</code>:\n"
+            f"<code>    - {ticker}</code>\n\n"
+            f"До этого детектор продолжит тратить на неё сигналы."
         )
 
     async def _notify(self, text: str) -> None:

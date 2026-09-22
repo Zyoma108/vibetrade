@@ -1053,6 +1053,7 @@ class TestExchangeLotStep:
             fetch_ticker=AsyncMock(return_value={"last": 1.0}),
             fetch_balance=AsyncMock(return_value={"total": 76.7}),
             set_leverage=AsyncMock(),
+            ensure_one_way_mode=AsyncMock(),
             create_market_order=AsyncMock(return_value={"fill_price": 1.0}),
             set_tpsl=AsyncMock(),
             place_reduce_only_limit=AsyncMock(return_value={"id": "1"}),
@@ -1093,6 +1094,28 @@ class TestExchangeLotStep:
         assert trade is not None
         assert trade.quantity == 10.0
         assert connector.create_market_order.await_args.kwargs["amount"] == 10.0
+
+    async def test_one_way_mode_enforced_before_order(self):
+        """Режим позиции приводится к one-way ДО отправки ордера.
+
+        Регресс: бот не передаёт positionIdx, и на символе с hedge-режимом ByBit
+        отклонял ордер кодом 10001 "position idx not match position mode" — 3
+        сигнала по DASH за 27.08-21.09.2026, после третьего символ ушёл в
+        error-cooldown на 4 часа (аудит 22.09.2026)."""
+        connector = self._step_connector(step=10.0, contracts=10.0)
+        order: list[str] = []
+        connector.ensure_one_way_mode = AsyncMock(
+            side_effect=lambda _s: order.append("mode")
+        )
+        connector.create_market_order = AsyncMock(
+            side_effect=lambda **_kw: order.append("order") or {"fill_price": 1.0}
+        )
+        pm = self._pm_ready(connector)
+        with patch("asyncio.sleep", AsyncMock()):
+            await pm.open_position(self._session(), _signal())
+
+        connector.ensure_one_way_mode.assert_awaited_once_with("TEST/USDT:USDT")
+        assert order == ["mode", "order"], f"порядок вызовов: {order}"
 
     async def test_quantity_follows_exchange_fill(self):
         """Биржа — источник истины по объёму, даже если расчёт дал другое."""
@@ -1307,3 +1330,59 @@ class TestPartialFillDetection:
         pm, pos = self._pm_for(remaining=10.0, lot_step=10.0, qty=10.0, pct=30.0)
 
         assert await pm._check_limit_partial_fill(pos) is False
+
+
+# ---------------------------------------------------------------------------
+# Уведомление о бане монеты биржей
+# ---------------------------------------------------------------------------
+#
+# Регресс: бан по bybit_agreement писался только в логи. Тикер оставался в
+# strategy.exclude_coins незанесённым, детектор продолжал тратить на него
+# сигналы, а находилось это лишь ручным аудитом БД. К 22.09.2026 накопилось 18
+# заблокированных тикеров, 5 из них отсутствовали в конфиге и стоили 17 сигналов.
+
+
+def test_ban_symbol_reports_only_the_first_time():
+    """Второй бан того же символа — не новость, уведомлять повторно нечего."""
+    pm = _pm()
+    assert pm.guards.ban_symbol("BMNR/USDT:USDT") is True
+    assert pm.guards.ban_symbol("BMNR/USDT:USDT") is False
+    assert pm.guards.ban_symbol("BABA/USDT:USDT") is True
+
+
+async def test_agreement_error_alerts_once_with_ticker_to_add():
+    """При отказе по соглашению уходит ровно одно уведомление, и в нём — готовая
+    строка для exclude_coins."""
+    connector = _fake_connector(
+        fetch_ticker=AsyncMock(return_value={"last": 1.0}),
+        fetch_balance=AsyncMock(return_value={"total": 1000.0}),
+        set_leverage=AsyncMock(),
+        ensure_one_way_mode=AsyncMock(),
+        min_order_amount=AsyncMock(return_value=0.001),
+        create_market_order=AsyncMock(side_effect=Exception(
+            'bybit {"retCode":110126,"retMsg":"You must sign the required agreement"}'
+        )),
+    )
+    pm = _pm(connector)
+    pm._count_open = AsyncMock(return_value=0)  # type: ignore[method-assign]
+    pm._has_position = AsyncMock(return_value=False)  # type: ignore[method-assign]
+    pm._in_cooldown = AsyncMock(return_value=False)  # type: ignore[method-assign]
+    pm._notify = AsyncMock()  # type: ignore[method-assign]
+
+    session = AsyncMock()
+    session.add = MagicMock()
+    signal = _signal(symbol="BMNR/USDT:USDT")
+
+    _, status, detail = await pm.open_position(session, signal)
+    assert status == "error" and detail.startswith("bybit_agreement")
+    assert pm.guards.is_banned("BMNR/USDT:USDT")
+
+    pm._notify.assert_awaited_once()
+    text = pm._notify.await_args.args[0]
+    assert "- BMNR" in text, text
+
+    # Второй сигнал по той же монете отсекается бан-листом ещё до ордера,
+    # и второго уведомления быть не должно.
+    _, status2, detail2 = await pm.open_position(session, signal)
+    assert detail2 == "banned_symbol"
+    pm._notify.assert_awaited_once()
