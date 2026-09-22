@@ -36,11 +36,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.backtest.engine import load_data, log, simulate  # noqa: E402
+from src.backtest.metrics import SIGNIFICANCE_LEGEND, fmt, format_delta  # noqa: E402
 from src.config import Settings  # noqa: E402
-
-# Риск на сделку в движке: virtual_balance 1000 × risk_per_trade_pct.
-# Нужен только чтобы переводить $ в R — свипы сравниваются в R.
-VIRTUAL_BALANCE = 1000.0
 
 
 def categorize(t: dict) -> str:
@@ -56,12 +53,18 @@ def categorize(t: dict) -> str:
     return "protect_timeout"
 
 
-def summarize(trades: list[dict], risk: float) -> dict:
+def by_outcome(trades: list[dict]) -> dict:
+    """Сумма R по категориям исхода.
+
+    Риск берётся из самой сделки: его двигают Circuit Breaker и множитель
+    рыночного режима, поэтому нормировка общей константой приписывала бы
+    сделкам половинного размера полный вес.
+    """
     cats: dict[str, dict] = {}
     for t in trades:
         c = cats.setdefault(categorize(t), {"n": 0, "R": 0.0})
         c["n"] += 1
-        c["R"] += t["pnl"] / risk
+        c["R"] += t["pnl"] / t["risk"] if t.get("risk") else 0.0
     for c in cats.values():
         c["R"] = round(c["R"], 2)
     return cats
@@ -90,7 +93,6 @@ def main():
     triggers = [float(x) for x in args.trigger.split(",")]
 
     base = Settings.from_yaml(args.config)
-    risk = VIRTUAL_BALANCE * (base.trading.risk_per_trade_pct / 100)
 
     t0 = time.time()
     log(f"Loading {args.db} ...")
@@ -99,6 +101,7 @@ def main():
         f"{len(qtys) * len(triggers)} configs to run")
 
     rows = []
+    runs: dict[tuple[float, float], list[dict]] = {}
     for trig in triggers:
         for qty in qtys:
             t1 = time.time()
@@ -108,36 +111,50 @@ def main():
             if args.no_cb:
                 s.trading.circuit_breaker_enabled = False
             r = simulate(s, data, has_oi=bool(args.has_oi), collect_retracement=False)
-            outcomes = summarize(r["trades_list"], risk)
-            total_r = r["total_pnl"] / risk
+            outcomes = by_outcome(r["trades_list"])
+            runs[(trig, qty)] = r["trades_list"]
+            total_r = r["total_R"]
             row = {
                 "trigger_pct": trig,
                 "qty_pct": qty,
                 "trades": r["trades"],
                 "win_rate": r["win_rate"],
                 "total_pnl": r["total_pnl"],
-                "total_R": round(total_r, 2),
-                "R_per_trade": round(total_r / r["trades"], 4) if r["trades"] else 0.0,
+                "total_R": total_r,
+                "R_per_trade": r["expectancy_R"],
+                "R_ci": r["expectancy_R_ci"],
                 "total_fees": r["total_fees"],
                 "outcomes": outcomes,
             }
             rows.append(row)
             log(f"trigger={trig}% qty={qty}%: trades={r['trades']} "
-                f"WR={r['win_rate']}% R={total_r:+.2f} "
-                f"R/сделку={row['R_per_trade']:+.4f} ({time.time() - t1:.1f}s)")
+                f"WR={r['win_rate']}% R={fmt(total_r)} "
+                f"R/сделку={fmt(row['R_per_trade'], '+.4f')} ({time.time() - t1:.1f}s)")
             for cat, o in sorted(outcomes.items()):
                 log(f"    {cat}: n={o['n']} R={o['R']:+.2f}")
             with open(out_dir / f"be_t{trig:g}_q{qty:g}.json", "w") as f:
                 json.dump(r, f, indent=2, default=str)
 
-    with open(out_dir / "summary.json", "w") as f:
-        json.dump(rows, f, indent=2)
-
+    # База сравнения — боевая пара (partial_close_pct, partial_close_qty_pct).
+    prod_key = (base.trading.partial_close_pct, base.trading.partial_close_qty_pct)
     log("")
-    log(f"{'триггер':>8} {'доля':>6} {'сделок':>7} {'WR':>6} {'сумма R':>9} {'R/сделку':>10}")
+    head = f"Δ R к боевому {prod_key[0]:g}%/{prod_key[1]:g}% (95% ДИ)"
+    log(f"{'триггер':>8} {'доля':>6} {'сделок':>7} {'WR':>6} {'сумма R':>9} "
+        f"{'R/сделку':>10} {head:>30}")
     for r in rows:
+        key = (r["trigger_pct"], r["qty_pct"])
+        if key == prod_key or prod_key not in runs:
+            delta = "— (боевой)" if key == prod_key else "—"
+        else:
+            delta, r["vs_prod"] = format_delta(runs[key], runs[prod_key])
         log(f"{r['trigger_pct']:>7g}% {r['qty_pct']:>5g}% {r['trades']:>7} "
-            f"{r['win_rate']:>5}% {r['total_R']:>+9.2f} {r['R_per_trade']:>+10.4f}")
+            f"{r['win_rate']:>5}% {fmt(r['total_R']):>9} {fmt(r['R_per_trade'], '+.4f'):>10} "
+            f"{delta:>30}")
+    log("")
+    log(SIGNIFICANCE_LEGEND)
+
+    with open(out_dir / "summary.json", "w") as f:
+        json.dump(rows, f, indent=2, ensure_ascii=False)
     log(f"TOTAL elapsed: {time.time() - t0:.1f}s")
 
 

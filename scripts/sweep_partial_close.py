@@ -40,6 +40,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.backtest.engine import load_data, log, simulate  # noqa: E402
+from src.backtest.metrics import sweep_table  # noqa: E402
 from src.config import Settings  # noqa: E402
 
 OUTCOME_LABELS = {
@@ -181,6 +182,7 @@ def main():
     # Full independent portfolio sims per partial_close_pct threshold
     # -------------------------------------------------------------------
     summary_rows = []
+    runs: dict[float, list[dict]] = {}
     for th in thresholds:
         t1 = time.time()
         settings = Settings.from_yaml(args.config)
@@ -206,18 +208,27 @@ def main():
             json.dump(result, f, indent=2)
         log(f"Saved {out_path}")
 
+        runs[th] = result["trades_list"]
         summary_rows.append({
+            "key": th, "label": f"{th:g}%",
             "threshold": th,
             "trades": result["trades"],
             "win_rate": result["win_rate"],
             "total_pnl": result["total_pnl"],
+            "total_R": result["total_R"],
+            "R_per_trade": result["expectancy_R"],
+            "R_ci": result["expectancy_R_ci"],
             "avg_pnl": result["avg_pnl"],
             "total_fees": result["total_fees"],
             "outcomes": outcomes,
         })
 
+    sweep_table(summary_rows, runs,
+                Settings.from_yaml(args.config).trading.partial_close_pct,
+                "порог", emit=log)
+
     with open(out_dir / "summary.json", "w") as f:
-        json.dump(summary_rows, f, indent=2)
+        json.dump(summary_rows, f, indent=2, ensure_ascii=False)
     log(f"Saved {out_dir / 'summary.json'}")
 
     log(f"TOTAL elapsed: {time.time()-t0:.1f}s")

@@ -25,6 +25,13 @@ from datetime import datetime, timedelta
 
 from src.analytics.detector import VOLUME_REVERSAL_STAGES, SetupDetector
 from src.analytics.utils import OI_TREND_BARS, oi_trend_passes, timeframe_to_minutes
+from src.backtest.metrics import summarize
+
+
+# Виртуальный депозит бэктеста. Константа на каждую сделку: компаундинга нет,
+# поэтому «% к депозиту» ниже — это сумма PnL к исходному размеру счёта, а не
+# доходность растущего капитала.
+BACKTEST_VIRTUAL_BALANCE = 1000.0
 
 
 class SimPosition:
@@ -32,10 +39,12 @@ class SimPosition:
         "symbol", "entry_price", "entry_time", "quantity",
         "tp_price", "sl_price", "partial_closed", "partial_pnl",
         "closed", "exit_price", "exit_time", "pnl", "exit_reason", "fee",
+        "risk",
     )
 
     def __init__(self, symbol: str, entry_price: float, entry_time: datetime,
-                 quantity: float, tp_price: float, sl_price: float, fee: float = 0.0):
+                 quantity: float, tp_price: float, sl_price: float, fee: float = 0.0,
+                 risk: float = 0.0):
         self.symbol = symbol
         self.entry_price = entry_price
         self.entry_time = entry_time
@@ -50,6 +59,13 @@ class SimPosition:
         self.pnl = 0.0
         self.exit_reason = ""
         self.fee = fee  # накопленная комиссия по всем "ногам" сделки
+        # Бюджет риска в долларах на момент ВХОДА — знаменатель для R.
+        # Считать R как pnl/(entry_price*quantity) нельзя: quantity уменьшается
+        # при частичном закрытии, и у таких сделок R завышается в
+        # 1/(1-partial_close_qty_pct) раз (на доле 30% это ×1.43).
+        # Хранить обязательно и потому, что risk_budget не константа: его
+        # двигают cb_mult и множитель рыночного режима.
+        self.risk = risk
 
 
 class PendingEntry:
@@ -57,12 +73,12 @@ class PendingEntry:
 
     __slots__ = (
         "symbol", "limit_price", "signal_time", "expires_at",
-        "quantity", "tp_price", "sl_price", "fee",
+        "quantity", "tp_price", "sl_price", "fee", "risk",
     )
 
     def __init__(self, symbol: str, limit_price: float, signal_time: datetime,
                  expires_at: datetime, quantity: float, tp_price: float,
-                 sl_price: float, fee: float):
+                 sl_price: float, fee: float, risk: float = 0.0):
         self.symbol = symbol
         self.limit_price = limit_price
         self.signal_time = signal_time
@@ -71,6 +87,7 @@ class PendingEntry:
         self.tp_price = tp_price
         self.sl_price = sl_price
         self.fee = fee  # комиссия входа, известна заранее (maker, лимит известен)
+        self.risk = risk  # бюджет риска в $ — переносится в SimPosition при исполнении
 
 
 def _bar(rows, idx):
@@ -381,6 +398,7 @@ def simulate(settings, data, has_oi: bool = True, collect_retracement: bool = Tr
                 pos = SimPosition(
                     symbol=pe.symbol, entry_price=pe.limit_price, entry_time=ts,
                     quantity=pe.quantity, tp_price=pe.tp_price, sl_price=pe.sl_price,
+                    risk=pe.risk,
                     fee=pe.fee,
                 )
                 if id(pe) in retr_map:
@@ -526,7 +544,7 @@ def simulate(settings, data, has_oi: bool = True, collect_retracement: bool = Tr
 
             # regime здесь уже не risk_off и не cautious+ST=red (см. блокировку выше),
             # поэтому "cautious" тут всегда соответствует реальному position_size_mult=0.5
-            virtual_balance = 1000.0
+            virtual_balance = BACKTEST_VIRTUAL_BALANCE
             regime_size_mult = 0.5 if regime == "cautious" else 1.0
             risk_budget = (
                 virtual_balance * (cfg.risk_per_trade_pct / 100) * cb_mult * regime_size_mult
@@ -544,7 +562,7 @@ def simulate(settings, data, has_oi: bool = True, collect_retracement: bool = Tr
                 pe = PendingEntry(
                     symbol=sym, limit_price=limit_price, signal_time=ts,
                     expires_at=expires_at, quantity=qty, tp_price=tp, sl_price=sl,
-                    fee=entry_fee,
+                    fee=entry_fee, risk=risk_budget,
                 )
                 if retracement_pct is not None:
                     retr_map[id(pe)] = retracement_pct
@@ -563,6 +581,7 @@ def simulate(settings, data, has_oi: bool = True, collect_retracement: bool = Tr
             pos = SimPosition(
                 symbol=sym, entry_price=entry_price, entry_time=ts,
                 quantity=qty, tp_price=tp, sl_price=sl, fee=entry_fee,
+                risk=risk_budget,
             )
             if retracement_pct is not None:
                 retr_map[id(pos)] = retracement_pct
@@ -607,6 +626,9 @@ def simulate(settings, data, has_oi: bool = True, collect_retracement: bool = Tr
             "entry_time": t.entry_time.isoformat(),
             "exit_time": t.exit_time.isoformat() if t.exit_time else None,
             "pnl": t.pnl,
+            # Бюджет риска на входе — знаменатель R. См. SimPosition.risk:
+            # делить на entry_price*quantity нельзя, quantity уже уменьшен партиалом.
+            "risk": t.risk,
             "exit_reason": t.exit_reason,
             "partial_closed": t.partial_closed,
             "partial_pnl": t.partial_pnl,
@@ -615,7 +637,17 @@ def simulate(settings, data, has_oi: bool = True, collect_retracement: bool = Tr
             "sl_price": t.sl_price,
         })
 
+    # Метрики решения считаются в одном месте на весь проект — см. metrics.py.
+    # Период в сутках нужен для R/день: при max_positions сигналы конкурируют за
+    # слоты, поэтому портфельная отдача в сутки — более честная величина для
+    # сравнения конфигураций, чем E[R] на сигнал.
+    days = None
+    if all_timestamps and len(all_timestamps) > 1:
+        days = (all_timestamps[-1] - all_timestamps[0]).total_seconds() / 86400 or None
+    summary = summarize(trades_out, days=days, deposit=BACKTEST_VIRTUAL_BALANCE)
+
     return {
+        **summary,
         "signals": signals_count,
         "trades": len(closed_trades),
         "wins": wins,

@@ -18,7 +18,7 @@ from datetime import datetime, timedelta
 
 import pytest
 
-from src.backtest.engine import load_data, simulate
+from src.backtest.engine import BACKTEST_VIRTUAL_BALANCE, load_data, simulate
 from src.config import CollectorsConfig, Settings, StrategyConfig, TradingConfig
 
 BASE_TS = datetime(2026, 8, 1, 0, 0, 0)
@@ -527,3 +527,62 @@ def test_be_stop_exit_does_not_feed_circuit_breaker(cb_parity_db):
         f"вторая сделка открыта уменьшенным размером (PnL={second['pnl']:.2f}) — "
         "значит прибыльный б/у-выход ошибочно засчитан в серию убытков"
     )
+
+
+# ---------------------------------------------------------------------------
+# Метрики решения: знаменатель R
+# ---------------------------------------------------------------------------
+#
+# Регресс-ловушка, стоившая неверного вывода при аудите 22.09.2026: и прод, и
+# движок уменьшают quantity при частичном закрытии. Поэтому R, посчитанный как
+# pnl/(entry_price*quantity), завышается в 1/(1-partial_close_qty_pct) раз у
+# КАЖДОЙ сделки, дошедшей до партиала, — а таких около 60%. Единственный верный
+# знаменатель — бюджет риска на момент входа, и движок обязан его сохранять.
+
+
+def test_trades_carry_entry_risk_budget(golden_db):
+    """Каждая закрытая сделка несёт risk — бюджет риска на ВХОДЕ."""
+    settings = _settings()
+    result = simulate(settings, load_data(golden_db), has_oi=True)
+
+    assert result["trades"] >= 1
+    expected = BACKTEST_VIRTUAL_BALANCE * settings.trading.risk_per_trade_pct / 100
+    for t in result["trades_list"]:
+        assert t["risk"] == pytest.approx(expected), t
+
+
+def test_R_is_not_inflated_by_partial_close(golden_db):
+    """R считается от исходного риска, а не от остатка объёма.
+
+    В золотом прогоне сделка доходит до партиала и до TP. Наивный знаменатель
+    `entry_price * quantity` описывал бы уже урезанную позицию и завышал R —
+    проверяем, что движок отдаёт честный.
+    """
+    settings = _settings()
+    result = simulate(settings, load_data(golden_db), has_oi=True)
+    trade = result["trades_list"][0]
+    assert trade["partial_closed"] is True, "фикстура должна доходить до партиала"
+
+    honest_R = trade["pnl"] / trade["risk"]
+    assert result["expectancy_R"] == pytest.approx(honest_R, abs=1e-4)
+
+    # Тот самый наивный расчёт: риск, пересчитанный по ОСТАВШЕМУСЯ объёму.
+    remaining_share = 1 - settings.trading.partial_close_qty_pct / 100
+    naive_R = trade["pnl"] / (trade["risk"] * remaining_share)
+    assert naive_R > honest_R, "иначе тест ничего не ловит"
+    assert naive_R == pytest.approx(honest_R / remaining_share)
+
+
+def test_decision_metrics_are_reported(golden_db):
+    """Движок обязан отдавать набор метрик решения, а не только PnL.
+
+    Доверительный интервал на золотой фикстуре пуст — там одна сделка; сам
+    bootstrap проверяется в tests/test_backtest_metrics.py.
+    """
+    result = simulate(_settings(), load_data(golden_db), has_oi=True)
+
+    for key in ("expectancy_R", "total_R", "profit_factor",
+                "max_drawdown_R", "worst_loss_streak", "return_pct_of_deposit"):
+        assert key in result, key
+    assert result["expectancy_R_ci"] is None, "одна сделка — интервала нет"
+    assert result["expectancy_R_significant"] is False

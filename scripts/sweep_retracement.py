@@ -21,6 +21,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.backtest.engine import load_data, log, simulate  # noqa: E402
+from src.backtest.metrics import sweep_table  # noqa: E402
 from src.config import Settings  # noqa: E402
 
 
@@ -46,6 +47,8 @@ def main():
     data = load_data(args.db, limit_days=args.limit_days, limit_symbols=limit_symbols)
     log(f"Data loaded in {time.time()-t0:.1f}s")
 
+    runs: dict[float, list[dict]] = {}
+    rows: list[dict] = []
     for th in thresholds:
         t1 = time.time()
         settings = Settings.from_yaml(args.config)
@@ -60,10 +63,23 @@ def main():
             f"shift_used={result['shift_used_count']} "
             f"({elapsed:.1f}s)"
         )
+        runs[th] = result["trades_list"]
+        rows.append({
+            "key": th, "label": f"{th:g}%",
+            "trades": result["trades"], "win_rate": result["win_rate"],
+            "total_R": result["total_R"], "R_per_trade": result["expectancy_R"],
+            "R_ci": result["expectancy_R_ci"], "total_pnl": result["total_pnl"],
+        })
         out_path = out_dir / f"retracement_{th}.json"
         with open(out_path, "w") as f:
             json.dump(result, f, indent=2)
         log(f"Saved {out_path}")
+
+    sweep_table(rows, runs,
+                Settings.from_yaml(args.config).strategy.max_window_retracement_pct,
+                "порог", emit=log)
+    with open(out_dir / "summary.json", "w") as f:
+        json.dump(rows, f, indent=2, ensure_ascii=False)
 
     log(f"TOTAL elapsed: {time.time()-t0:.1f}s")
 

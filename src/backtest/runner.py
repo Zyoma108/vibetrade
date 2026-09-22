@@ -38,11 +38,17 @@ def _load_live_stats(db_path: str) -> dict | None:
     except Exception:
         return None
 
-    trades = db.execute(
-        "SELECT symbol, direction, entry_price, exit_price, "
-        "entry_time, exit_time, pnl, status, partial_closed, partial_pnl "
-        "FROM trades WHERE status = 'closed' ORDER BY exit_time"
-    ).fetchall()
+    # Таблицы может не быть вовсе: архив, выгруженный только со свечами и OI,
+    # — законный вход для бэктеста, и падать на нём отчёт не должен.
+    try:
+        trades = db.execute(
+            "SELECT symbol, direction, entry_price, exit_price, "
+            "entry_time, exit_time, pnl, status, partial_closed, partial_pnl "
+            "FROM trades WHERE status = 'closed' ORDER BY exit_time"
+        ).fetchall()
+    except sqlite3.OperationalError:
+        db.close()
+        return None
 
     if not trades:
         db.close()
@@ -196,6 +202,32 @@ def main():
     print(f"  Win rate:          {result['win_rate']}%")
     print(f"  Total PnL:         ${result['total_pnl']:+.2f} (net of fees)")
     print(f"  Средний PnL:       ${result['avg_pnl']:+.2f}")
+
+    # --- Метрики решения ---------------------------------------------------
+    # Winrate и Total PnL сами по себе решения не обосновывают: на выборках в
+    # 40-110 сделок разница в пару долларов между конфигурациями укладывается
+    # в ширину доверительного интервала. Сравнивать конфигурации следует по
+    # E[R], и только когда интервал не накрывает ноль.
+    if result["trades"]:
+        ci = result.get("expectancy_R_ci")
+        verdict = "ЗНАЧИМО" if result.get("expectancy_R_significant") else "не значимо"
+        ci_text = f"[{ci[0]:+.3f}; {ci[1]:+.3f}] — {verdict}" if ci else "— (выборка мала)"
+        print(f"  E[R] на сделку:    {result['expectancy_R']:+.3f}   95% ДИ {ci_text}")
+        print(f"  Сумма R:           {result['total_R']:+.2f}"
+              + (f"   ({result['R_per_day']:+.2f} R/сутки)" if result.get("R_per_day") else ""))
+        if result.get("profit_factor"):
+            print(f"  Profit factor:     {result['profit_factor']:.2f}")
+        print(f"  Макс. просадка:    {result['max_drawdown_R']:.2f} R"
+              f"   худшая серия убытков: {result['worst_loss_streak']}")
+    if result.get("return_pct_per_30d") is not None:
+        print(f"  Доходность:        {result['return_pct_of_deposit']:+.2f}% к депозиту"
+              f"   ({result['return_pct_per_30d']:+.2f}% за 30 суток, без компаундинга)")
+    if result.get("hold_hours_median") is not None:
+        print(f"  Время в позиции:   медиана {result['hold_hours_median']:.1f} ч"
+              f"   p90 {result['hold_hours_p90']:.1f} ч")
+    if result.get("trades_per_day"):
+        print(f"  Частота:           {result['trades_per_day']:.2f} сделок/сутки")
+    print("-" * 60)
     print(f"  Комиссии всего:    ${result['total_fees']:.2f} (сред. ${result['avg_fee']:.4f}/сделку)")
     print(f"  TP: {result['tp_wins']} | SL: {result['sl_losses']} | Time: {result['time_exits']}")
     print(f"  Частичных закрытий: {result['partials']}")

@@ -13,6 +13,12 @@ $2.06 за 12 дней. Здесь механизм разбирается на 
 источник эджа. Поэтому считаем ещё максимальную просадку эквити и худшую серию
 убытков — если CB их не уменьшает, у него нет и защитной функции.
 
+⚠️ ВНИМАНИЕ к прошлым результатам этого свипа (до 22.09.2026). Он нормировал
+PnL на КОНСТАНТНЫЙ риск $10, хотя весь смысл reduce-режима в том, что он вдвое
+урезает бюджет риска. Сделки половинного размера засчитывались с полным весом,
+то есть свип, измерявший Circuit Breaker, систематически завышал варианты с
+частым reduce. Теперь R берётся из движка, где у каждой сделки свой risk.
+
 ⚠️ Свип имеет смысл только на движке с фиксом parity Circuit Breaker
 (08.09.2026): до него движок считал убытком любой выход по стопу, включая
 прибыльный б/у-выход после партиала, и срабатываний CB было вдвое больше
@@ -29,15 +35,14 @@ import argparse
 import json
 import sys
 import time
-from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.backtest.engine import load_data, log, simulate  # noqa: E402
+from src.backtest.metrics import SIGNIFICANCE_LEGEND, fmt, format_delta  # noqa: E402
 from src.config import Settings  # noqa: E402
 
-VIRTUAL_BALANCE = 1000.0
 NEVER = 999  # порог, до которого серия убытков заведомо не дойдёт
 
 # (метка, enabled, reduce, stop, mult%)
@@ -50,30 +55,6 @@ VARIANTS = [
 ]
 
 
-def equity_metrics(trades: list[dict], risk: float) -> dict:
-    """Просадка и серии по эквити, упорядоченной временем ВЫХОДА из сделки."""
-    ordered = sorted(trades, key=lambda t: t["exit_time"] or "")
-    eq = 0.0
-    peak = 0.0
-    max_dd = 0.0
-    streak = 0
-    worst_streak = 0
-    for t in ordered:
-        eq += t["pnl"] / risk
-        peak = max(peak, eq)
-        max_dd = max(max_dd, peak - eq)
-        if t["pnl"] <= 0:
-            streak += 1
-            worst_streak = max(worst_streak, streak)
-        else:
-            streak = 0
-    return {
-        "max_drawdown_R": round(max_dd, 2),
-        "worst_loss_streak": worst_streak,
-        "final_R": round(eq, 2),
-    }
-
-
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--db", default="data/trading_bot.db")
@@ -84,14 +65,13 @@ def main():
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    risk = VIRTUAL_BALANCE * (Settings.from_yaml(args.config).trading.risk_per_trade_pct / 100)
-
     t0 = time.time()
     log(f"Loading {args.db} ...")
     data = load_data(args.db)
     log(f"Data loaded in {time.time() - t0:.1f}s; {len(VARIANTS)} configs")
 
     rows = []
+    runs: dict[str, list[dict]] = {}
     for label, enabled, reduce_n, stop_n, mult in VARIANTS:
         t1 = time.time()
         s = Settings.from_yaml(args.config)
@@ -100,36 +80,43 @@ def main():
         s.trading.circuit_breaker_loss_streak_stop = stop_n
         s.trading.circuit_breaker_reduce_mult_pct = mult
         r = simulate(s, data, has_oi=bool(args.has_oi), collect_retracement=False)
-        m = equity_metrics(r["trades_list"], risk)
-        total_r = r["total_pnl"] / risk
+        # R берём из движка: там у каждой сделки собственный risk, поэтому
+        # половинный размер в reduce-режиме весит ровно столько, сколько стоит.
+        runs[label] = r["trades_list"]
         row = {
             "label": label, "enabled": enabled, "reduce": reduce_n,
             "stop": stop_n, "mult_pct": mult,
             "trades": r["trades"], "win_rate": r["win_rate"],
-            "total_R": round(total_r, 2),
-            "R_per_trade": round(total_r / r["trades"], 4) if r["trades"] else 0.0,
-            **m,
+            "total_R": r["total_R"], "R_per_trade": r["expectancy_R"],
+            "R_ci": r["expectancy_R_ci"],
+            "max_drawdown_R": r["max_drawdown_R"],
+            "worst_loss_streak": r["worst_loss_streak"],
         }
         rows.append(row)
         log(f"{label:16s}: сделок={r['trades']:3d} WR={r['win_rate']:5.1f}% "
-            f"R={total_r:+7.2f} R/сделку={row['R_per_trade']:+.4f} "
-            f"макс.просадка={m['max_drawdown_R']:.2f}R "
-            f"худшая серия={m['worst_loss_streak']} ({time.time() - t1:.0f}s)")
+            f"R={fmt(r['total_R']):>7} R/сделку={fmt(r['expectancy_R'], '+.4f')} "
+            f"макс.просадка={r['max_drawdown_R']:.2f}R "
+            f"худшая серия={r['worst_loss_streak']} ({time.time() - t1:.0f}s)")
         with open(out_dir / f"cb_{label.split()[0]}_{reduce_n}_{stop_n}_{mult:g}.json", "w") as f:
             json.dump(r, f, indent=2, default=str)
 
-    with open(out_dir / "summary.json", "w") as f:
-        json.dump(rows, f, indent=2)
-
-    base = next((r for r in rows if r["label"] == "off"), None)
     log("")
     log(f"{'вариант':17} {'сделок':>7} {'сумма R':>9} {'R/сделку':>10} "
-        f"{'просадка':>9} {'серия':>6} {'Δ R к off':>10}")
+        f"{'просадка':>9} {'серия':>6} {'Δ R к off (95% ДИ)':>28}")
     for r in rows:
-        d = f"{r['total_R'] - base['total_R']:+.2f}" if base else "—"
-        log(f"{r['label']:17} {r['trades']:>7} {r['total_R']:>+9.2f} "
-            f"{r['R_per_trade']:>+10.4f} {r['max_drawdown_R']:>8.2f}R "
-            f"{r['worst_loss_streak']:>6} {d:>10}")
+        delta = "—"
+        if r["label"] != "off" and "off" in runs:
+            # Парно: общие сделки дают ровно ноль и не раздувают интервал.
+            delta, r["vs_off"] = format_delta(runs[r["label"]], runs["off"])
+        log(f"{r['label']:17} {r['trades']:>7} {fmt(r['total_R']):>9} "
+            f"{fmt(r['R_per_trade'], '+.4f'):>10} {r['max_drawdown_R']:>8.2f}R "
+            f"{r['worst_loss_streak']:>6} {delta:>28}")
+    log("")
+    log(SIGNIFICANCE_LEGEND)
+
+    # Дамп после таблицы: к этому моменту у строк есть vs_off.
+    with open(out_dir / "summary.json", "w") as f:
+        json.dump(rows, f, indent=2, ensure_ascii=False)
     log(f"TOTAL elapsed: {time.time() - t0:.1f}s")
 
 

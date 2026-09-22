@@ -36,31 +36,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.backtest.engine import load_data, log, simulate  # noqa: E402
+from src.backtest.metrics import SIGNIFICANCE_LEGEND, fmt, format_delta  # noqa: E402
 from src.config import Settings  # noqa: E402
 
-VIRTUAL_BALANCE = 1000.0
-
 THRESHOLDS = [0, 5000, 7500, 10000, 12500, 15000, 20000, 25000, 35000]
-
-
-def equity_metrics(trades: list[dict], risk: float) -> dict:
-    """Просадка и серии по эквити, упорядоченной временем ВЫХОДА из сделки."""
-    ordered = sorted(trades, key=lambda t: t["exit_time"] or "")
-    eq = 0.0
-    peak = 0.0
-    max_dd = 0.0
-    streak = 0
-    worst_streak = 0
-    for t in ordered:
-        eq += t["pnl"] / risk
-        peak = max(peak, eq)
-        max_dd = max(max_dd, peak - eq)
-        if t["pnl"] <= 0:
-            streak += 1
-            worst_streak = max(worst_streak, streak)
-        else:
-            streak = 0
-    return {"max_drawdown_R": round(max_dd, 2), "worst_loss_streak": worst_streak}
 
 
 def annotate_baseline_usdt(trades: list[dict], data, baseline_bars: int, need_bars: int) -> None:
@@ -89,16 +68,22 @@ def annotate_baseline_usdt(trades: list[dict], data, baseline_bars: int, need_ba
         t["baseline_usdt"] = round(med_vol * med_price, 1)
 
 
-def half_split(trades: list[dict], risk: float, mid_iso: str) -> tuple[float, float, int, int]:
-    """Сумма R в первой и второй половине периода (по времени ВХОДА)."""
+def half_split(trades: list[dict], mid_iso: str) -> tuple[float, float, int, int]:
+    """Сумма R в первой и второй половине периода (по времени ВХОДА).
+
+    Риск берётся из самой сделки, а не общей константой: его двигают Circuit
+    Breaker и множитель рыночного режима, и сделка половинного размера не
+    должна весить как полноразмерная.
+    """
     r1 = r2 = 0.0
     n1 = n2 = 0
     for t in trades:
+        r = t["pnl"] / t["risk"] if t.get("risk") else 0.0
         if t["entry_time"] < mid_iso:
-            r1 += t["pnl"] / risk
+            r1 += r
             n1 += 1
         else:
-            r2 += t["pnl"] / risk
+            r2 += r
             n2 += 1
     return round(r1, 2), round(r2, 2), n1, n2
 
@@ -119,7 +104,6 @@ def main():
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     base_settings = Settings.from_yaml(args.config)
-    risk = VIRTUAL_BALANCE * (base_settings.trading.risk_per_trade_pct / 100)
     baseline_bars = base_settings.strategy.baseline_bars
     need_bars = baseline_bars + base_settings.strategy.sustain_bars
 
@@ -140,14 +124,16 @@ def main():
         f"{len(thresholds)} конфигураций; середина периода {mid_iso}")
 
     rows = []
+    runs: dict[float, list[dict]] = {}
     for th in thresholds:
         t1 = time.time()
         s = Settings.from_yaml(args.config)
         s.strategy.min_baseline_volume_usdt = th
         r = simulate(s, data, has_oi=bool(args.has_oi), collect_retracement=False)
         annotate_baseline_usdt(r["trades_list"], data, baseline_bars, need_bars)
-        total_r = r["total_pnl"] / risk
-        r1, r2, n1, n2 = half_split(r["trades_list"], risk, mid_iso)
+        runs[th] = r["trades_list"]
+        total_r = r["total_R"]
+        r1, r2, n1, n2 = half_split(r["trades_list"], mid_iso)
         liq = [t["baseline_usdt"] for t in r["trades_list"] if t["baseline_usdt"]]
         row = {
             "threshold": th,
@@ -156,25 +142,50 @@ def main():
             "win_rate": r["win_rate"],
             "tp": r["tp_wins"], "sl": r["sl_losses"], "time": r["time_exits"],
             "total_pnl": r["total_pnl"],
-            "total_R": round(total_r, 2),
-            "R_per_trade": round(total_r / r["trades"], 4) if r["trades"] else 0.0,
-            "R_per_day": round(total_r / days, 3),
+            "total_R": total_r,
+            "R_per_trade": r["expectancy_R"],
+            "R_ci": r["expectancy_R_ci"],
+            "R_per_day": r["R_per_day"],
             "symbols": len(set(t["symbol"] for t in r["trades_list"])),
             "median_liq_usdt": round(statistics.median(liq)) if liq else None,
             "R_half1": r1, "R_half2": r2, "n_half1": n1, "n_half2": n2,
-            **equity_metrics(r["trades_list"], risk),
+            "max_drawdown_R": r["max_drawdown_R"],
+            "worst_loss_streak": r["worst_loss_streak"],
         }
         rows.append(row)
         log(f"th={th:>7.0f}: сигналов={r['signals']:4d} сделок={r['trades']:3d} "
-            f"WR={r['win_rate']:5.1f}% R={total_r:+7.2f} R/день={row['R_per_day']:+.3f} "
-            f"R/сделку={row['R_per_trade']:+.4f} монет={row['symbols']:3d} "
+            f"WR={r['win_rate']:5.1f}% R={fmt(total_r):>7} "
+            f"R/день={fmt(row['R_per_day'], '+.3f')} "
+            f"R/сделку={fmt(row['R_per_trade'], '+.4f')} монет={row['symbols']:3d} "
             f"половины={r1:+.2f}/{r2:+.2f} просадка={row['max_drawdown_R']:.2f}R "
             f"({time.time() - t1:.0f}s)")
         with open(out_dir / f"minvol_{th:g}.json", "w") as f:
             json.dump(r, f, indent=2, default=str)
 
+    # Сравнение с боевым порогом — парное: общие сделки дают ровно ноль и не
+    # раздувают интервал. Решающая метрика здесь R/день ПОРТФЕЛЯ, а не R на
+    # сигнал: при max_positions сигналы конкурируют за слоты, и сетап с меньшим
+    # мат. ожиданием всё равно повышает отдачу, если занимает пустой слот.
+    prod_th = base_settings.strategy.min_baseline_volume_usdt
+    log("")
+    if prod_th in runs:
+        log(f"{'порог':>8} {'сделок':>7} {'R/день':>8} {'R/сделку':>10} "
+            f"{'просадка':>9} {'половины':>16} {f'Δ R к {prod_th:g} (95% ДИ)':>30}")
+        for row in rows:
+            th = row["threshold"]
+            delta = "— (боевой)"
+            if th != prod_th:
+                delta, row["vs_prod"] = format_delta(runs[th], runs[prod_th], days=days)
+            log(f"{th:>8.0f} {row['trades']:>7} {fmt(row['R_per_day'], '+.3f'):>8} "
+                f"{fmt(row['R_per_trade'], '+.4f'):>10} {row['max_drawdown_R']:>8.2f}R "
+                f"{row['R_half1']:>+7.2f}/{row['R_half2']:>+7.2f} {delta:>30}")
+        log("")
+        log(SIGNIFICANCE_LEGEND)
+        log("  Половины периода должны улучшаться обе, иначе это подгонка под отрезок.")
+
     with open(out_dir / "summary.json", "w") as f:
-        json.dump({"db": args.db, "days": days, "rows": rows}, f, indent=2)
+        json.dump({"db": args.db, "days": days, "prod_threshold": prod_th, "rows": rows},
+                  f, indent=2, ensure_ascii=False)
     log(f"Готово за {time.time() - t0:.0f}s → {out_dir}/summary.json")
 
 
