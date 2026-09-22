@@ -17,12 +17,25 @@ from src.backtest.metrics import (
 )
 
 
-def _t(pnl: float, risk: float = 10.0, hour: int = 0) -> dict:
+_N = 0
+
+
+def _t(pnl: float, risk: float = 10.0, hour: int = 0, day: int | None = None) -> dict:
+    """Сделка для тестов. День по умолчанию разный у каждой следующей.
+
+    Это существенно, а не косметика: доверительный интервал считается блочным
+    bootstrap'ом по суткам входа, и выборка, целиком уместившаяся в один день,
+    честно считается одним наблюдением — какой бы большой она ни была.
+    """
+    global _N
+    if day is None:
+        _N += 1
+        day = _N % 25 + 1
     return {
         "pnl": pnl,
         "risk": risk,
-        "entry_time": f"2026-09-01T{hour:02d}:00:00",
-        "exit_time": f"2026-09-01T{hour + 1:02d}:00:00",
+        "entry_time": f"2026-09-{day:02d}T{hour:02d}:00:00",
+        "exit_time": f"2026-09-{day:02d}T{hour + 1:02d}:00:00",
     }
 
 
@@ -47,13 +60,15 @@ class TestBootstrapCI:
     def test_noisy_zero_edge_is_not_called_significant(self):
         """Ровно тот случай, ради которого всё затеяно: выборка с нулевым
         мат. ожиданием и большим разбросом не должна проходить как эффект."""
-        trades = [_t(20.0), _t(-20.0)] * 30   # ровно нулевое мат. ожидание
+        trades = [x for _ in range(30) for x in (_t(20.0), _t(-20.0))]  # E[R] = 0
         out = summarize(trades)
         assert out["expectancy_R"] == pytest.approx(0.0)
         assert out["expectancy_R_significant"] is False
 
     def test_clear_edge_is_called_significant(self):
-        trades = [_t(20.0)] * 25 + [_t(-10.0)] * 5
+        # Списковое включение, а не [x] * 25: _t обязан вызваться каждый раз,
+        # иначе все сделки окажутся в одном дне, то есть в одном блоке.
+        trades = [_t(20.0) for _ in range(25)] + [_t(-10.0) for _ in range(5)]
         assert summarize(trades)["expectancy_R_significant"] is True
 
 
@@ -88,7 +103,7 @@ class TestEquity:
         assert m["max_drawdown_R"] == pytest.approx(1.0)
 
     def test_worst_loss_streak(self):
-        trades = [_t(-10.0, hour=h) for h in range(3)] + [_t(20.0, hour=5)]
+        trades = [_t(-10.0, hour=h, day=1) for h in range(3)] + [_t(20.0, hour=5, day=1)]
         assert equity_metrics(trades)["worst_loss_streak"] == 3
 
 
@@ -129,7 +144,7 @@ class TestPairedComparison:
     @staticmethod
     def _common(n: int = 80) -> list[dict]:
         return [
-            {"symbol": f"C{i}", "entry_time": f"2026-09-0{i % 9 + 1}T00:00:00",
+            {"symbol": f"C{i}", "entry_time": f"2026-09-{i % 25 + 1:02d}T00:00:00",
              "pnl": 20.0 if i % 3 else -10.0, "risk": 10.0}
             for i in range(n)
         ]
@@ -148,7 +163,9 @@ class TestPairedComparison:
         """Сделка, которую взяла только одна конфигурация, входит в разницу
         целиком: её R против нуля. Это и есть цена решения «брать или нет»."""
         common = self._common()
-        extra = [{"symbol": f"X{i}", "entry_time": "2026-09-01T00:00:00",
+        # Разнесены по дням: эффект, целиком уместившийся в одни сутки, —
+        # одно наблюдение, и значимым он быть не должен.
+        extra = [{"symbol": f"X{i}", "entry_time": f"2026-09-{i % 25 + 1:02d}T01:00:00",
                   "pnl": -10.0, "risk": 10.0} for i in range(20)]
         out = compare(common + extra, common)
         assert out["only_a"] == 20
@@ -159,7 +176,7 @@ class TestPairedComparison:
     def test_tiny_difference_is_not_called_significant(self):
         """Одна лишняя сделка на фоне восьмидесяти общих — не эффект."""
         common = self._common()
-        extra = [{"symbol": "X", "entry_time": "2026-09-01T00:00:00",
+        extra = [{"symbol": "X", "entry_time": "2026-09-03T01:00:00",
                   "pnl": 20.0, "risk": 10.0}]
         assert compare(common + extra, common)["significant"] is False
 
@@ -193,3 +210,32 @@ class TestEmptyRunIsPrintable:
         assert out["return_pct_per_30d"] == 0.0
         assert out["expectancy_R"] is None, "мат. ожидание не определено"
         assert out["total_R"] == 0.0, "сумма определена и равна нулю"
+
+
+class TestBlockBootstrap:
+    """Блочный bootstrap: сделки не независимы, одно движение рынка даёт
+    несколько сигналов разом.
+
+    Замер 22.09.2026 на боевых данных: из разницы бэктеста с реалом в +15.26R
+    54% пришлось на ОДИН час (девять сделок 16.09 18:00). Обычный bootstrap по
+    сделкам дал [+0.48; +30.10] — «значимо». Блочный по суткам дал
+    [-1.49; +36.32] — «не значимо». Первый ответ был ложноположительным.
+    """
+
+    def test_effect_confined_to_one_day_is_not_significant(self):
+        """Двадцать прекрасных сделок в один день — это одно наблюдение."""
+        base = [_t(-1.0, day=d) for d in range(1, 26)]
+        spike = [_t(50.0, day=7) for _ in range(20)]
+        out = summarize(base + spike)
+        assert out["expectancy_R"] > 0, "точечная оценка положительна"
+        assert out["expectancy_R_significant"] is False, "но держится на одном дне"
+
+    def test_same_effect_spread_over_days_is_significant(self):
+        """Тот же суммарный эффект, разнесённый по дням, значим."""
+        base = [_t(-1.0, day=d) for d in range(1, 26)]
+        spread = [_t(50.0, day=d % 25 + 1) for d in range(20)]
+        assert summarize(base + spread)["expectancy_R_significant"] is True
+
+    def test_single_block_has_no_interval(self):
+        """Все сделки в одном дне — блоков меньше двух, интервала нет."""
+        assert bootstrap_ci([1.0, 2.0, 3.0], blocks=["d1", "d1", "d1"]) is None

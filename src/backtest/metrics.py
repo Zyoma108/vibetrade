@@ -26,11 +26,23 @@ BOOTSTRAP_SEED = 20260922
 BOOTSTRAP_RESAMPLES = 10_000
 
 
-def bootstrap_ci(values, confidence: float = 0.95, resamples: int = BOOTSTRAP_RESAMPLES):
+def bootstrap_ci(values, confidence: float = 0.95, resamples: int = BOOTSTRAP_RESAMPLES,
+                 blocks=None):
     """Перцентильный bootstrap-интервал для СРЕДНЕГО значения.
 
     Именно bootstrap, а не t-интервал: распределение R трёхмодально (стоп -1,
     безубыток около +0.25, полный TP +2R) и на нормальность не похоже.
+
+    `blocks` — параллельный `values` список ключей (обычно дата входа). Задан —
+    ресэмплятся БЛОКИ ЦЕЛИКОМ, а не отдельные сделки.
+
+    Почему это обязательно. Сделки не независимы: одно рыночное движение даёт
+    сразу несколько сигналов по разным монетам в один и тот же момент. Замер
+    22.09.2026: из разницы бэктеста с реалом в +15.26R **54% пришлось на один
+    час** — девять сделок 16.09 18:00, то есть одно событие, а не девять
+    наблюдений. Обычный bootstrap по сделкам дал [+0.48; +30.10] («значимо»),
+    блочный по суткам — [-1.49; +36.32] («не значимо»). Первый ответ был
+    ложноположительным.
     """
     n = len(values)
     if n < 2:
@@ -39,8 +51,23 @@ def bootstrap_ci(values, confidence: float = 0.95, resamples: int = BOOTSTRAP_RE
         # там, где результат на самом деле идентичен.
         return None
     rnd = random.Random(BOOTSTRAP_SEED)
-    pick = rnd.choices
-    means = sorted(st.fmean(pick(values, k=n)) for _ in range(resamples))
+
+    if blocks is None:
+        means = sorted(st.fmean(rnd.choices(values, k=n)) for _ in range(resamples))
+    else:
+        grouped: dict = {}
+        for key, value in zip(blocks, values):
+            grouped.setdefault(key, []).append(value)
+        keys = sorted(grouped)
+        if len(keys) < 2:
+            return None
+        # Среднее на СДЕЛКУ, а не на блок: блоки разного размера, и мы хотим
+        # интервал для той же величины, что и точечная оценка.
+        means = []
+        for _ in range(resamples):
+            picked = [v for k in rnd.choices(keys, k=len(keys)) for v in grouped[k]]
+            means.append(st.fmean(picked))
+        means.sort()
     lo = (1 - confidence) / 2
     return (means[int(lo * resamples)], means[min(int((1 - lo) * resamples), resamples - 1)])
 
@@ -98,11 +125,14 @@ def summarize(trades, days: float | None = None, deposit: float | None = None):
                 empty["return_pct_per_30d"] = 0.0
         return empty
 
-    rs = [t["pnl"] / t["risk"] for t in trades if t.get("risk")]
+    scored = [t for t in trades if t.get("risk")]
+    rs = [t["pnl"] / t["risk"] for t in scored]
+    # Блок = сутки входа: сделки одного дня тянутся за общим движением рынка.
+    blocks = [str(t.get("entry_time") or "")[:10] for t in scored]
     pnls = [t["pnl"] for t in trades]
     gross_win = sum(p for p in pnls if p > 0)
     gross_loss = -sum(p for p in pnls if p < 0)
-    ci = bootstrap_ci(rs) if rs else None
+    ci = bootstrap_ci(rs, blocks=blocks) if rs else None
 
     holds = []
     for t in trades:
@@ -184,7 +214,9 @@ def compare(trades_a, trades_b, days: float | None = None):
                 "delta_R_ci": None, "significant": False}
 
     diffs = [ra.get(k, 0.0) - rb.get(k, 0.0) for k in keys]
-    ci_mean = bootstrap_ci(diffs)
+    # Блок = сутки входа, см. bootstrap_ci: одно движение рынка даёт несколько
+    # сигналов разом, и считать их независимыми — ложноположительный ответ.
+    ci_mean = bootstrap_ci(diffs, blocks=[k[1][:10] for k in keys])
     n = len(diffs)
     out = {
         "shared": len(set(ra) & set(rb)),
