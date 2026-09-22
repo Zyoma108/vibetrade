@@ -12,6 +12,11 @@ from src.connectors.exchange import SCAN_PHASE_TIMEOUT_SEC, ExchangeConnector
 from src.storage.database import async_session
 from src.storage.models import Candle, OpenInterest, Ticker
 
+# Нижняя граница паузы между циклами при включённом target_cycle_seconds.
+# Быстрый цикл не должен превращаться в горячий опрос биржи: у публичных API
+# есть лимиты, а частые fsync'и дороги на двухъядерном VPS.
+MIN_PAUSE_SEC = 5.0
+
 logger = logging.getLogger(__name__)
 
 
@@ -85,6 +90,7 @@ class MarketDataCollector:
         exclude_coins: list[str],
         min_volume_usdt: float,
         interval_seconds: int = 60,
+        target_cycle_seconds: int = 0,
         timeframe: str = "5m",
         on_cycle_done: Callable[[AsyncSession], Coroutine] | None = None,
         retention_days: int = 0,
@@ -93,6 +99,7 @@ class MarketDataCollector:
         self._exclude_coins = set(name.upper() for name in exclude_coins)
         self._min_volume = min_volume_usdt
         self._interval = interval_seconds
+        self._target_cycle = target_cycle_seconds
         self._timeframe = timeframe
         self._on_cycle_done = on_cycle_done
         self._running = False
@@ -119,6 +126,7 @@ class MarketDataCollector:
 
     async def _loop(self) -> None:
         while self._running:
+            started = time.monotonic()
             try:
                 await self._collect_cycle()
             except asyncio.CancelledError:
@@ -131,7 +139,30 @@ class MarketDataCollector:
                 break
             except Exception:
                 logger.exception("Ошибка чистки старых данных")
-            await asyncio.sleep(self._interval)
+            await asyncio.sleep(self._pause_after(time.monotonic() - started))
+
+    def _pause_after(self, elapsed: float) -> float:
+        """Сколько спать после цикла, отработавшего `elapsed` секунд.
+
+        При `target_cycle_seconds > 0` целимся в КАДАНС, а не в промежуток:
+        пауза = цель минус фактическая работа. Иначе каданс плавает вместе с
+        длительностью цикла — а правило 4 AGENTS.md объявляет его частью
+        стратегии. Замер боевой БД 27.08-22.09.2026: медиана 91 с при разбросе
+        65-141 с, то есть от 2.8 до 1.3 скана на 3-минутный бар.
+
+        Нижняя граница MIN_PAUSE_SEC: быстрый цикл не должен превращаться в
+        горячий опрос биржи, а слишком частые fsync'и дороги на VPS.
+        """
+        if self._target_cycle <= 0:
+            return self._interval
+        pause = self._target_cycle - elapsed
+        if pause < MIN_PAUSE_SEC:
+            logger.info(
+                f"Цикл занял {elapsed:.0f} с при цели {self._target_cycle} с — "
+                f"пауза срезана до минимума {MIN_PAUSE_SEC} с"
+            )
+            return MIN_PAUSE_SEC
+        return pause
 
     async def _cleanup_old_data(self) -> None:
         """Удалить свечи и OI старше `retention_days`. Раз в сутки, порциями.

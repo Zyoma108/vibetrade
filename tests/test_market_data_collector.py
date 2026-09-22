@@ -20,7 +20,7 @@ import pytest_asyncio
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from src.collectors.market_data import MarketDataCollector
+from src.collectors.market_data import MIN_PAUSE_SEC, MarketDataCollector
 from src.storage.models import Base, Candle, OpenInterest, Ticker
 
 # Naive datetimes: SQLite drops tzinfo on round-trip, so tz-aware timestamps
@@ -617,3 +617,38 @@ async def test_real_errors_are_still_logged_per_coin(caplog):
     msgs = [r.getMessage() for r in caplog.records if r.levelno >= _logging.WARNING]
     assert len(msgs) == 2, msgs
     assert all("биржа вернула мусор" in m for m in msgs), msgs
+
+
+class TestCyclePacing:
+    """Каданс скана — часть стратегии (правило 4 AGENTS.md), но код до
+    22.09.2026 реализовывал фиксированный ПРОМЕЖУТОК после работы, а не каданс.
+
+    Замер боевой БД 27.08-22.09.2026: медиана кадансa 91 с при разбросе от 65 с
+    (01.09) до 141 с (29.08) — то есть от 2.8 до 1.3 скана на 3-минутный бар,
+    и 1.5% циклов длиннее бара вовсе.
+    """
+
+    @staticmethod
+    def _collector(**over):
+        return MarketDataCollector(
+            connectors=[], exclude_coins=[], min_volume_usdt=0,
+            on_cycle_done=None, **over,
+        )
+
+    def test_fixed_interval_by_default(self):
+        """Ноль — прежнее поведение: пауза не зависит от длительности цикла."""
+        c = self._collector(interval_seconds=45)
+        assert c._pause_after(elapsed=5) == 45
+        assert c._pause_after(elapsed=60) == 45
+
+    def test_target_cadence_absorbs_cycle_duration(self):
+        """С целью пауза сокращается ровно на то, что заняла работа."""
+        c = self._collector(interval_seconds=45, target_cycle_seconds=90)
+        assert c._pause_after(elapsed=20) == 70
+        assert c._pause_after(elapsed=60) == 30
+
+    def test_slow_cycle_falls_back_to_minimum_pause(self):
+        """Цикл дольше цели — паузу не уводим в ноль и тем более в минус."""
+        c = self._collector(interval_seconds=45, target_cycle_seconds=90)
+        assert c._pause_after(elapsed=200) == MIN_PAUSE_SEC
+        assert c._pause_after(elapsed=90) == MIN_PAUSE_SEC
