@@ -233,6 +233,15 @@ class TradingConfig(BaseModel):
     circuit_breaker_reduce_mult_pct: float = Field(default=50.0, ge=10.0, le=90.0, description="Множитель размера позиции при срабатывании, %")
     circuit_breaker_loss_streak_stop: int = Field(default=5, ge=1, le=50, description="После скольких убытков подряд полностью остановить торговлю")
     circuit_breaker_stop_minutes: int = Field(default=60, ge=10, le=1440, description="На сколько минут остановить торговлю при полном срабатывании")
+    backtest_deposit_usdt: float = Field(
+        default=1000.0, gt=0,
+        description="Размер депозита, на котором СЧИТАЕТ БЭКТЕСТ (боевой берётся с биржи). "
+        "Влияет только через шаг лота: объём позиции = риск/расстояние до стопа, и чем меньше "
+        "депозит, тем большую долю съедает округление вниз. Замер 22.09.2026 на 778 перпах "
+        "ByBit: при нотионале $200 (депозит $1000) средняя потеря размера 0.22%, при $11 "
+        "(депозит $55) — 3.2%, и 6 монет недоступны вовсе. Ставить равным реальному депозиту, "
+        "иначе модель шага лота работает вхолостую"
+    )
     taker_fee_pct: float = Field(default=0.055, ge=0.0, le=1.0, description="Комиссия тейкера (market-ордер), % от notional (Bybit VIP0 по умолчанию)")
     maker_fee_pct: float = Field(default=0.02, ge=0.0, le=1.0, description="Комиссия мейкера (лимитный reduce-only ордер), % от notional (Bybit VIP0 по умолчанию)")
     backtest_slippage_pct: float = Field(default=0.3, ge=0.0, le=5.0, description="Допущение на проскальзывание входа в бэктесте, % (0 = выкл). Бэктест иначе входит по цене закрытия свечи, что оптимистичнее реального market-ордера")

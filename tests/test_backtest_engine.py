@@ -812,3 +812,40 @@ def test_undersized_flag_reaches_the_engine(golden_db):
     # На золотой фикстуре сетап проходит без сдвига, поэтому результат один и
     # тот же; важно, что прогон с флагом не падает и флаг доезжает до детектора.
     assert simulate(on, data, has_oi=True)["trades"] == simulate(off, data, has_oi=True)["trades"]
+
+
+def test_deposit_scales_result_without_lot_metadata(golden_db):
+    """Без метаданных инструментов депозит — чистый масштаб: R не меняется."""
+    data = load_data(golden_db)
+    small = _settings()
+    small.trading.backtest_deposit_usdt = 55.0
+    big = _settings()
+    big.trading.backtest_deposit_usdt = 1000.0
+
+    rs, rb = simulate(small, data, has_oi=True), simulate(big, data, has_oi=True)
+    assert rs["expectancy_R"] == pytest.approx(rb["expectancy_R"])
+    # abs=0.01: total_pnl округляется до цента, точнее сравнивать нечего.
+    assert rs["total_pnl"] == pytest.approx(rb["total_pnl"] * 55.0 / 1000.0, abs=0.01)
+
+
+def test_small_deposit_feels_the_lot_step(golden_db):
+    """С метаданными депозит перестаёт быть масштабом: чем он меньше, тем
+    большую долю объёма съедает округление вниз.
+
+    Ровно поэтому прогон на виртуальном $1000 при реальном счёте $55
+    недооценивает шаг лота — замер 22.09.2026 дал 0.22% против 3.2%.
+    """
+    data = load_data(golden_db)
+    trade = simulate(_settings(), data, has_oi=True)["trades_list"][0]
+    qty_at_1000 = trade["risk"] / (trade["entry_price"] * 5.0 / 100)
+    # Шаг лота крупный относительно объёма на маленьком депозите и мелкий на большом.
+    markets = {SYMBOL: {"step": qty_at_1000 * 55.0 / 1000.0 * 0.4, "min_amount": 0.0}}
+
+    small = _settings()
+    small.trading.backtest_deposit_usdt = 55.0
+    big = _settings()
+    big.trading.backtest_deposit_usdt = 1000.0
+
+    rs = simulate(small, data, has_oi=True, markets=markets)
+    rb = simulate(big, data, has_oi=True, markets=markets)
+    assert rs["expectancy_R"] < rb["expectancy_R"], (rs["expectancy_R"], rb["expectancy_R"])

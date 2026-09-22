@@ -31,9 +31,9 @@ from src.analytics.utils import OI_TREND_BARS, oi_trend_passes, timeframe_to_min
 from src.backtest.metrics import summarize
 
 
-# Виртуальный депозит бэктеста. Константа на каждую сделку: компаундинга нет,
-# поэтому «% к депозиту» ниже — это сумма PnL к исходному размеру счёта, а не
-# доходность растущего капитала.
+# Депозит бэктеста по умолчанию; переопределяется trading.backtest_deposit_usdt.
+# Константа на каждую сделку: компаундинга нет, поэтому «% к депозиту» ниже —
+# это сумма PnL к исходному размеру счёта, а не доходность растущего капитала.
 BACKTEST_VIRTUAL_BALANCE = 1000.0
 
 
@@ -424,6 +424,9 @@ def simulate(settings, data, has_oi: bool = True, collect_retracement: bool = Tr
     sustain = detector.config.sustain_bars
 
     gate_mask = build_volume_gate_mask(symbols, detector.config) if prefilter else None
+    # Депозит влияет на результат ТОЛЬКО через шаг лота: без метаданных
+    # инструментов прогон на $55 и на $1000 отличается лишь масштабом.
+    deposit = getattr(cfg, "backtest_deposit_usdt", None) or BACKTEST_VIRTUAL_BALANCE
 
     # Каданс поиска новых сигналов синхронизирован с реальной скоростью коллектора
     # (settings.collectors.scan_cycle_seconds), а не захардкожен — см. runner.py
@@ -696,7 +699,7 @@ def simulate(settings, data, has_oi: bool = True, collect_retracement: bool = Tr
 
             # regime здесь уже не risk_off и не cautious+ST=red (см. блокировку выше),
             # поэтому "cautious" тут всегда соответствует реальному position_size_mult=0.5
-            virtual_balance = BACKTEST_VIRTUAL_BALANCE
+            virtual_balance = deposit
             regime_size_mult = 0.5 if regime == "cautious" else 1.0
             risk_budget = (
                 virtual_balance * (cfg.risk_per_trade_pct / 100) * cb_mult * regime_size_mult
@@ -811,7 +814,7 @@ def simulate(settings, data, has_oi: bool = True, collect_retracement: bool = Tr
     days = None
     if all_timestamps and len(all_timestamps) > 1:
         days = (all_timestamps[-1] - all_timestamps[0]).total_seconds() / 86400 or None
-    summary = summarize(trades_out, days=days, deposit=BACKTEST_VIRTUAL_BALANCE)
+    summary = summarize(trades_out, days=days, deposit=deposit)
 
     return {
         **summary,
