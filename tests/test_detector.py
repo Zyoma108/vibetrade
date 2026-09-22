@@ -1108,3 +1108,73 @@ class TestLastBarAge:
         assert d._last_bar_age_sec(None) is None
         future = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(seconds=30)
         assert d._last_bar_age_sec(future) == 0
+
+
+# ---------------------------------------------------------------------------
+# Shift-ретрай: «свеча слишком маленькая» против «свеча слишком большая»
+# ---------------------------------------------------------------------------
+
+
+class TestShiftRetryOnUndersizedBar:
+    """Последняя свеча окна в проде — формирующаяся, её объём неполон ПО
+    ПОСТРОЕНИЮ. Поэтому отказ «объём угасает / снижается» выносится по
+    недособранным данным, а отказ «спайк / выброс» — нет: неполная свеча
+    может только вырасти.
+
+    Замер 22.09.2026 (боевая БД 27.08-21.09 против бэктеста на ней же): из 13
+    сигналов, которых бот не увидел вовсе, 6 зарезал volume_fading и 2 —
+    volume_declining; пять из них в один момент, все дошли до полного TP.
+    """
+
+    @staticmethod
+    def _d(**over):
+        return _detector(baseline_bars=5, sustain_bars=4, volume_surge_mult=3.0,
+                         dump_volume_mult=0.0, **over)
+
+    @staticmethod
+    def _fading_window():
+        """Окно, где всплеск есть, но последняя свеча «угасает».
+
+        Все четыре sustain-свечи выше порога, но объём последней заметно ниже
+        среднего предыдущих — ровно то, как выглядит ещё не набравшая объём
+        формирующаяся свеча. Без неё (сдвиг -1) окно проходит.
+        """
+        return _candles(10, volume=[100.0] * 5 + [500.0, 900.0, 900.0, 900.0, 400.0],
+                        price=1.0)
+
+    def test_fading_blocks_shift_by_default(self):
+        """Поведение до 22.09.2026 сохранено: флаг выключен — сдвига нет."""
+        d = self._d()
+        ctx: dict = {}
+        assert d._match_volume_window(self._fading_window(), min_bars=9, context=ctx) is None
+        assert ctx.get("stage") == "volume_fading"
+
+    def test_fading_allows_shift_when_enabled(self):
+        """С флагом сдвиг делается и окно находится — уже без формирующейся свечи."""
+        d = self._d(shift_retry_on_undersized_bar=True)
+        candles = self._fading_window()
+        window = d._match_volume_window(candles, min_bars=9, context={})
+        assert window is not None, "окно без последней свечи обязано пройти гейт"
+        assert len(window) == len(candles) - 1
+        assert window == candles[:-1]
+
+    def test_oversized_bar_blocks_shift_even_when_enabled(self):
+        """«Свеча слишком большая» блокирует сдвиг в любом случае: неполная
+        свеча может только вырасти, значит вердикт уже окончателен."""
+        spike = _candles(9, volume=[100.0] * 5 + [300.0, 300.0, 300.0, 9_000.0],
+                         price=1.0)
+        for enabled in (False, True):
+            d = self._d(shift_retry_on_undersized_bar=enabled, smooth_max_ratio=5.0)
+            ctx: dict = {}
+            assert d._match_volume_window(spike, min_bars=9, context=ctx) is None, enabled
+            assert ctx.get("stage") == "volume_spike", (enabled, ctx)
+
+    def test_silent_rejection_still_retries_in_both_modes(self):
+        """«Тихий» отказ (порог всплеска ещё не достигнут) ретраился всегда —
+        флаг на это поведение не влияет."""
+        candles = _candles(10, volume=[100.0] * 5 + [500.0, 500.0, 500.0, 500.0, 50.0],
+                           price=1.0)
+        for enabled in (False, True):
+            d = self._d(shift_retry_on_undersized_bar=enabled)
+            window = d._match_volume_window(candles, min_bars=9, context={})
+            assert window == candles[:-1], enabled

@@ -26,7 +26,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 
-from src.analytics.detector import VOLUME_REVERSAL_STAGES, SetupDetector
+from src.analytics.detector import SetupDetector
 from src.analytics.utils import OI_TREND_BARS, oi_trend_passes, timeframe_to_minutes
 from src.backtest.metrics import summarize
 
@@ -634,21 +634,17 @@ def simulate(settings, data, has_oi: bool = True, collect_retracement: bool = Tr
             if len(candle_slice) < need_bars:
                 continue
 
-            # Volume pattern с тем же shift-ретраем, что и в SetupDetector.analyze()
-            # (см. src/analytics/detector.py) — воспроизведено 1:1, чтобы можно было
-            # свипом измерить реальный вклад сдвига в сигналы/PnL, а не гадать вслепую.
-            vol_window = None
+            # Гейт объёма вместе с shift-ретраем — ЗОВЁМ общий метод детектора,
+            # а не повторяем его условия (правило 2 AGENTS.md). Здесь до
+            # 22.09.2026 лежала копия: она совпадала с оригиналом построчно, но
+            # ровно из-за этого не знала про shift_retry_on_undersized_bar и
+            # молча игнорировала бы новый флаг стратегии.
             vol_ctx: dict = {}
-            if detector.check_volume_pattern(candle_slice, vol_ctx):
-                vol_window = candle_slice
-            elif vol_ctx.get("stage") not in VOLUME_REVERSAL_STAGES:
-                shifted = candle_slice[:-1]
-                shift_ctx: dict = {}
-                if len(shifted) >= need_bars and detector.check_volume_pattern(shifted, shift_ctx):
-                    vol_window = shifted
-                    shift_used_count += 1
-                elif shift_ctx:
-                    vol_ctx = shift_ctx
+            vol_window = detector._match_volume_window(
+                candle_slice, min_bars=need_bars, context=vol_ctx
+            )
+            if vol_window is not None and len(vol_window) < len(candle_slice):
+                shift_used_count += 1
 
             if vol_window is None:
                 if vol_ctx.get("stage"):

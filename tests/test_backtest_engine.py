@@ -778,3 +778,37 @@ class TestVolumeGatePrefilter:
                         assert mask[sym][i], f"{sym} бар {i}: маска съела кандидата"
                         break
         assert checked > 0 and accepted > 0, (checked, accepted)
+
+
+def test_engine_calls_detector_shift_retry_instead_of_copying_it(golden_db, monkeypatch):
+    """Движок обязан ЗВАТЬ SetupDetector._match_volume_window, а не повторять его.
+
+    До 22.09.2026 в движке лежала копия shift-ретрая, совпадавшая с оригиналом
+    построчно. Именно поэтому она не узнала бы про новый флаг стратегии
+    shift_retry_on_undersized_bar и молча считала бы по-старому — ровно тот
+    класс расхождений, ради которого написано правило 2 AGENTS.md.
+    """
+    calls = []
+    original = SetupDetector._match_volume_window
+
+    def spy(self, candles, min_bars, context, symbol=None):
+        calls.append(len(candles))
+        return original(self, candles, min_bars, context, symbol)
+
+    monkeypatch.setattr(SetupDetector, "_match_volume_window", spy)
+    result = simulate(_settings(), load_data(golden_db), has_oi=True, prefilter=False)
+
+    assert calls, "движок не позвал общий метод детектора"
+    assert result["trades"] == 1, "поведение при этом не изменилось"
+
+
+def test_undersized_flag_reaches_the_engine(golden_db):
+    """Флаг стратегии обязан доходить до движка — копия его не видела."""
+    data = load_data(golden_db)
+    off = _settings()
+    on = _settings()
+    on.strategy.shift_retry_on_undersized_bar = True
+
+    # На золотой фикстуре сетап проходит без сдвига, поэтому результат один и
+    # тот же; важно, что прогон с флагом не падает и флаг доезжает до детектора.
+    assert simulate(on, data, has_oi=True)["trades"] == simulate(off, data, has_oi=True)["trades"]

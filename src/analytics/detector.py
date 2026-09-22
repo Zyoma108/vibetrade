@@ -15,11 +15,28 @@ logger = logging.getLogger(__name__)
 # всплеска, но её форма говорит о развороте/иссякании (не "ещё не доросла").
 # Ретраить сдвигом здесь нельзя — это выбросило бы из окна ровно ту свечу,
 # которую эти же проверки (и retracement/exhaustion-фильтры ниже, считающиеся
-# на том же окне) должны ловить. См. анализ в памяти
-# shift-compensation-narrowing (детектор-vs-бэктест).
-VOLUME_REVERSAL_STAGES = frozenset({
-    "volume_spike", "volume_dump", "volume_fading", "volume_declining",
-})
+# на том же окне) должны ловить.
+#
+# Группы разделены 22.09.2026, потому что довод выше верен только для одной
+# из них. Последняя свеча окна в проде — ФОРМИРУЮЩАЯСЯ, её объём механически
+# неполон (коллектор обновляет её по мере набора, interval_seconds << timeframe):
+#
+#   OVERSIZED — свеча слишком БОЛЬШАЯ (спайк, выброс). Неполная свеча может
+#   только вырасти, поэтому вердикт «слишком большая» на ней уже окончателен.
+#   Сдвигать нельзя: выбросили бы ровно ту свечу, ради которой фильтр и нужен.
+#
+#   UNDERSIZED — свеча слишком МАЛЕНЬКАЯ относительно соседних (объём угасает,
+#   снижается). Но неполная свеча маленькая ПО ПОСТРОЕНИЮ, а не потому, что
+#   памп иссяк. Здесь довод разворачивается, и запрет на сдвиг означает отказ
+#   от сигнала по недособранным данным.
+#
+# Замер 22.09.2026 (боевая БД 27.08-21.09 против бэктеста на ней же): из 13
+# сигналов, которых бот не увидел вовсе, 6 зарезал volume_fading и 2 —
+# volume_declining; пять из них в один момент 16.09 18:06, все дошли до
+# полного TP. Управляется strategy.shift_retry_on_undersized_bar.
+VOLUME_OVERSIZED_STAGES = frozenset({"volume_spike", "volume_dump"})
+VOLUME_UNDERSIZED_STAGES = frozenset({"volume_fading", "volume_declining"})
+VOLUME_REVERSAL_STAGES = VOLUME_OVERSIZED_STAGES | VOLUME_UNDERSIZED_STAGES
 
 
 class SetupDetector(BaseDetector):
@@ -173,6 +190,8 @@ class SetupDetector(BaseDetector):
         порог и её форма говорит о развороте — сдвиг тогда выбросил бы из
         окна ровно ту свечу, которую эти же проверки (и retracement/
         exhaustion-фильтры ниже, считающиеся на том же окне) должны ловить.
+        При ``shift_retry_on_undersized_bar`` блокируют сдвиг только вердикты
+        «свеча слишком большая» — разбор групп см. у VOLUME_UNDERSIZED_STAGES.
 
         Вынесено из ``analyze()`` отдельным методом, потому что этот же поток
         нужен ``_closed_bar_verdict()`` на окне без формирующегося бара.
@@ -183,7 +202,12 @@ class SetupDetector(BaseDetector):
         """
         if self.check_volume_pattern(candles, context):
             return candles
-        if context.get("stage") in VOLUME_REVERSAL_STAGES:
+        blocking = VOLUME_REVERSAL_STAGES
+        if self.config.shift_retry_on_undersized_bar:
+            # «Свеча слишком маленькая» на ещё не закрытой свече — вердикт по
+            # недособранным данным, см. VOLUME_UNDERSIZED_STAGES.
+            blocking = VOLUME_OVERSIZED_STAGES
+        if context.get("stage") in blocking:
             return None
 
         for shift in range(1, 2):  # -1 свеча
