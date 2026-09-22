@@ -35,7 +35,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src.backtest.engine import load_data, log, simulate  # noqa: E402
+from src.backtest.engine import DEFAULT_MARKETS_PATH, load_data, load_markets, log, simulate  # noqa: E402
 from src.backtest.metrics import SIGNIFICANCE_LEGEND, fmt, format_delta  # noqa: E402
 from src.config import Settings  # noqa: E402
 
@@ -85,7 +85,12 @@ def main():
                     help="выключить Circuit Breaker — изолирует эффект правила выхода "
                          "от обратной связи через серию убытков (при qty=0 безубыток "
                          "становится микро-убытком и кормит счётчик)")
+    ap.add_argument(
+        "--markets", default=DEFAULT_MARKETS_PATH,
+        help="метаданные инструментов для модели шага лота; пустая строка — выключить",
+    )
     args = ap.parse_args()
+    markets = load_markets(args.markets or None)
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -110,7 +115,7 @@ def main():
             s.trading.partial_close_qty_pct = qty
             if args.no_cb:
                 s.trading.circuit_breaker_enabled = False
-            r = simulate(s, data, has_oi=bool(args.has_oi), collect_retracement=False)
+            r = simulate(s, data, markets=markets, has_oi=bool(args.has_oi), collect_retracement=False)
             outcomes = by_outcome(r["trades_list"])
             runs[(trig, qty)] = r["trades_list"]
             total_r = r["total_R"]

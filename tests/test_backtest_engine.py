@@ -18,7 +18,12 @@ from datetime import datetime, timedelta
 
 import pytest
 
-from src.backtest.engine import BACKTEST_VIRTUAL_BALANCE, load_data, simulate
+from src.backtest.engine import (
+    BACKTEST_VIRTUAL_BALANCE,
+    _round_to_lot,
+    load_data,
+    simulate,
+)
 from src.config import CollectorsConfig, Settings, StrategyConfig, TradingConfig
 
 BASE_TS = datetime(2026, 8, 1, 0, 0, 0)
@@ -586,3 +591,76 @@ def test_decision_metrics_are_reported(golden_db):
         assert key in result, key
     assert result["expectancy_R_ci"] is None, "одна сделка — интервала нет"
     assert result["expectancy_R_significant"] is False
+
+
+# ---------------------------------------------------------------------------
+# Шаг лота биржи
+# ---------------------------------------------------------------------------
+#
+# Боевой путь округляет объём ВНИЗ (ccxt TRUNCATE) и отказывается от сделки,
+# если после округления остался ноль или объём меньше минимального лота
+# (PositionManager._place_market_entry → ExchangeConnector.amount_to_precision;
+# 4 отказа "amount_too_small" по ZEC в боевой БД 27.08-21.09.2026). Движок до
+# 22.09.2026 считал объём дробным, то есть систематически завышал размер.
+
+
+class TestLotStep:
+    def test_rounds_down_never_up(self):
+        assert _round_to_lot(15.7, {"step": 10.0, "min_amount": 10.0}) == 10.0
+        assert _round_to_lot(19.99, {"step": 10.0, "min_amount": 10.0}) == 10.0
+
+    def test_below_min_amount_is_impossible(self):
+        """Ровно случай ZEC: qty=0.0059 при минимуме 0.01 — сделки нет."""
+        assert _round_to_lot(0.0059, {"step": 0.001, "min_amount": 0.01}) == 0.0
+
+    def test_no_metadata_keeps_fractional_quantity(self):
+        """Без метаданных поведение прежнее — иначе старые прогоны молча
+        перестали бы сравниваться с новыми."""
+        assert _round_to_lot(15.7, None) == 15.7
+
+    def test_engine_skips_signal_when_lot_step_too_coarse(self, golden_db):
+        """Шаг лота крупнее расчётного объёма → сделки нет, и это видно в
+        отчёте отдельным счётчиком, а не молча."""
+        data = load_data(golden_db)
+        settings = _settings()
+
+        without = simulate(settings, data, has_oi=True)
+        assert without["trades"] == 1
+        assert without["amount_too_small"] == 0
+
+        coarse = {SYMBOL: {"step": 10.0 ** 9, "min_amount": 10.0 ** 9}}
+        with_meta = simulate(settings, data, has_oi=True, markets=coarse)
+        assert with_meta["trades"] == 0
+        assert with_meta["amount_too_small"] == 1
+
+    def test_engine_truncates_quantity_to_step(self, golden_db):
+        """При проходимом шаге сделка остаётся, но объём урезан вниз, значит и
+        PnL меньше — округление всегда против нас."""
+        data = load_data(golden_db)
+        settings = _settings()
+        free = simulate(settings, data, has_oi=True)
+        trade = free["trades_list"][0]
+
+        # Объём, который посчитал движок без округления.
+        qty = trade["risk"] / (trade["entry_price"] * settings.trading.stop_loss_pct / 100)
+        # Шаг чуть меньше половины объёма: сделка остаётся возможной, но теряет
+        # заметную долю размера.
+        step = {SYMBOL: {"step": qty * 0.4, "min_amount": 0.0}}
+        stepped = simulate(settings, data, has_oi=True, markets=step)
+
+        assert stepped["trades"] == 1
+        assert 0 < stepped["trades_list"][0]["pnl"] < trade["pnl"]
+        # 2 шага из 2.5 → примерно 80% исходного размера.
+        assert stepped["trades_list"][0]["pnl"] == pytest.approx(trade["pnl"] * 0.8, rel=0.05)
+
+
+def test_symbol_missing_from_lot_metadata_is_reported(golden_db):
+    """Монета, которой нет в метаданных, торгуется дробным объёмом — но это
+    попадает в отчёт. Устаревший файл метаданных иначе молча вернул бы
+    поведение до 22.09.2026."""
+    data = load_data(golden_db)
+    result = simulate(_settings(), data, has_oi=True,
+                      markets={"ДРУГАЯ/USDT:USDT": {"step": 1.0, "min_amount": 1.0}})
+
+    assert result["trades"] == 1, "сделка состоялась, объём не округлялся"
+    assert result["symbols_without_lot_meta"] == [SYMBOL]

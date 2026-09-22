@@ -27,7 +27,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src.backtest.engine import load_data, log, simulate  # noqa: E402
+from src.backtest.engine import DEFAULT_MARKETS_PATH, load_data, load_markets, log, simulate  # noqa: E402
 from src.backtest.metrics import sweep_table  # noqa: E402
 from src.config import Settings  # noqa: E402
 
@@ -82,7 +82,12 @@ def main():
     ap.add_argument("--limit-days", type=float, default=None)
     ap.add_argument("--limit-symbols", default=None, help="comma-separated")
     ap.add_argument("--has-oi", type=int, default=1)
+    ap.add_argument(
+        "--markets", default=DEFAULT_MARKETS_PATH,
+        help="метаданные инструментов для модели шага лота; пустая строка — выключить",
+    )
     args = ap.parse_args()
+    markets = load_markets(args.markets or None)
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -102,7 +107,7 @@ def main():
         settings = Settings.from_yaml(args.config)
         settings.trading.partial_close_qty_pct = th
         log(f"Running simulation for partial_close_qty_pct={th} (partial_close_pct={settings.trading.partial_close_pct} unchanged) ...")
-        result = simulate(settings, data, has_oi=bool(args.has_oi), collect_retracement=False)
+        result = simulate(settings, data, markets=markets, has_oi=bool(args.has_oi), collect_retracement=False)
         elapsed = time.time() - t1
 
         outcomes = summarize_outcomes(result["trades_list"])

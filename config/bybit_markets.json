@@ -1,0 +1,3114 @@
+{
+ "0G/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "1000000BABYDOGE/USDT:USDT": {
+  "min_amount": 100.0,
+  "step": 100.0
+ },
+ "1000000MOG/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "10000NEX/USDT:USDT": {
+  "min_amount": 10.0,
+  "step": 10.0
+ },
+ "10000SATS/USDT:USDT": {
+  "min_amount": 100.0,
+  "step": 100.0
+ },
+ "1000BONK/USDT:USDT": {
+  "min_amount": 100.0,
+  "step": 100.0
+ },
+ "1000BTT/USDT:USDT": {
+  "min_amount": 100.0,
+  "step": 100.0
+ },
+ "1000CAT/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "1000FLOKI/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "1000LUNC/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "1000NEIROCTO/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "1000PEPE/USDT:USDT": {
+  "min_amount": 100.0,
+  "step": 100.0
+ },
+ "1000RATS/USDT:USDT": {
+  "min_amount": 10.0,
+  "step": 10.0
+ },
+ "1000TAG/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "1000TOSHI/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "1000TURBO/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "1000XEC/USDT:USDT": {
+  "min_amount": 10.0,
+  "step": 10.0
+ },
+ "1INCH/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "2Z/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "4/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "4STOCK/USDT:USDT": {
+  "min_amount": 10.0,
+  "step": 10.0
+ },
+ "A/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "AAL/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "AAOI/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "AAPL/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "AAVE/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "ACE/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "ACH/USDT:USDT": {
+  "min_amount": 10.0,
+  "step": 10.0
+ },
+ "ACT/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "ACU/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "ADA/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "ADBE/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "ADI/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "AEHR/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "AEON/USDT:USDT": {
+  "min_amount": 10.0,
+  "step": 10.0
+ },
+ "AERO/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "AEVO/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "AGI/USDT:USDT": {
+  "min_amount": 10.0,
+  "step": 10.0
+ },
+ "AGLD/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "AIGENSYN/USDT:USDT": {
+  "min_amount": 10.0,
+  "step": 10.0
+ },
+ "AIO/USDT:USDT": {
+  "min_amount": 10.0,
+  "step": 10.0
+ },
+ "AIOZ/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "AIXBT/USDT:USDT": {
+  "min_amount": 10.0,
+  "step": 10.0
+ },
+ "AKE/USDT:USDT": {
+  "min_amount": 100.0,
+  "step": 100.0
+ },
+ "AKT/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "ALAB/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "ALCH/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "ALGO/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "ALICE/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "ALLO/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "ALPINE/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "ALT/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "AMAT/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "AMC/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "AMDSTOCK/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "AMGN/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "AMZN/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "AMZU/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "ANET/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "ANIME/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "ANKR/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "ANTHROPIC/USDT:USDT": {
+  "min_amount": 0.001,
+  "step": 0.001
+ },
+ "APE/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "APEX/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "API3/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "APLD/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "APPSTOCK/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "APR/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "APT/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "AR/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "ARB/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "ARC/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "ARIA/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "ARK/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "ARKK/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "ARKM/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "ARM/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "ARPA/USDT:USDT": {
+  "min_amount": 10.0,
+  "step": 10.0
+ },
+ "ARX/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "ASML/USDT:USDT": {
+  "min_amount": 0.001,
+  "step": 0.001
+ },
+ "ASR/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "ASTER/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "ASTR/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "ASTS/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "AT/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "ATH/USDT:USDT": {
+  "min_amount": 10.0,
+  "step": 10.0
+ },
+ "ATOM/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "AUCTION/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "AVA/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "AVAAI/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "AVAX/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "AVGO/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "AVNT/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "AWE/USDT:USDT": {
+  "min_amount": 10.0,
+  "step": 10.0
+ },
+ "AXL/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "AXS/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "AXTI/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "AZTEC/USDT:USDT": {
+  "min_amount": 10.0,
+  "step": 10.0
+ },
+ "B/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "B2/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "B3/USDT:USDT": {
+  "min_amount": 100.0,
+  "step": 100.0
+ },
+ "BABA/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "BABY/USDT:USDT": {
+  "min_amount": 10.0,
+  "step": 10.0
+ },
+ "BAC/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "BAN/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "BANANA/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "BANANAS31/USDT:USDT": {
+  "min_amount": 100.0,
+  "step": 100.0
+ },
+ "BAND/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "BANK/USDT:USDT": {
+  "min_amount": 10.0,
+  "step": 10.0
+ },
+ "BARD/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "BASED/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "BAT/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "BB/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "BBX/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "BCH/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "BE/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "BEAM/USDT:USDT": {
+  "min_amount": 100.0,
+  "step": 100.0
+ },
+ "BEAT/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "BEL/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "BERA/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "BICO/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "BIGTIME/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "BIIB/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "BILL/USDT:USDT": {
+  "min_amount": 10.0,
+  "step": 10.0
+ },
+ "BIO/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "BIRB/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "BITO/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "BLAST/USDT:USDT": {
+  "min_amount": 10.0,
+  "step": 10.0
+ },
+ "BLEND/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "BLESS/USDT:USDT": {
+  "min_amount": 10.0,
+  "step": 10.0
+ },
+ "BLUAI/USDT:USDT": {
+  "min_amount": 10.0,
+  "step": 10.0
+ },
+ "BLUR/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "BMNR/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "BMT/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "BNB/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "BNC/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "BNT/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "BOBA/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "BOME/USDT:USDT": {
+  "min_amount": 100.0,
+  "step": 100.0
+ },
+ "BOT/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "BP/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "BR/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "BRETT/USDT:USDT": {
+  "min_amount": 10.0,
+  "step": 10.0
+ },
+ "BREV/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "BRKB/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "BROCCOLI/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "BSB/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "BSP/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "BSV/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "BTC/USDT:USDT": {
+  "min_amount": 0.001,
+  "step": 0.001
+ },
+ "BTDR/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "BTR/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "BTW/USDT:USDT": {
+  "min_amount": 10.0,
+  "step": 10.0
+ },
+ "BX/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "BYD/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "BZ/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "C/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "C98/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "CAKE/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "CAP/USDT:USDT": {
+  "min_amount": 10.0,
+  "step": 10.0
+ },
+ "CARV/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "CASHCAT/USDT:USDT": {
+  "min_amount": 10.0,
+  "step": 10.0
+ },
+ "CATI/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "CATSTOCK/USDT:USDT": {
+  "min_amount": 0.001,
+  "step": 0.001
+ },
+ "CBRS/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "CC/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "CELO/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "CETUS/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "CFG/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "CFX/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "CGNX/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "CGPT/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "CHILLGUY/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "CHIP/USDT:USDT": {
+  "min_amount": 10.0,
+  "step": 10.0
+ },
+ "CHR/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "CHZ/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "CIEN/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "CIFR/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "CKB/USDT:USDT": {
+  "min_amount": 10.0,
+  "step": 10.0
+ },
+ "CL/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "CLANKER/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "CLO/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "CLSK/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "COAI/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "COHR/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "COIN/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "COMP/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "CONL/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "COOKIE/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "CORE/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "CORZ/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "COST/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "COTI/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "COW/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "CP/USDT:USDT": {
+  "min_amount": 10.0,
+  "step": 10.0
+ },
+ "CRCL/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "CRDO/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "CRM/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "CRO/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "CROSS/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "CRV/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "CRWD/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "CRWV/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "CSCO/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "CSOPSAMSUNG2L/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "CSOPSKHYNIX2L/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "CTC/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "CTR/USDT:USDT": {
+  "min_amount": 10.0,
+  "step": 10.0
+ },
+ "CVC/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "CVX/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "CVXSTOCK/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "CXMT/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "CYBER/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "CYPH/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "CYS/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "DASH/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "DATA/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "DBR/USDT:USDT": {
+  "min_amount": 10.0,
+  "step": 10.0
+ },
+ "DDOG/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "DEEP/USDT:USDT": {
+  "min_amount": 10.0,
+  "step": 10.0
+ },
+ "DELL/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "DEXE/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "DGAI/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "DIA/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "DJT/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "DKNG/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "DOGE/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "DOLO/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "DOOD/USDT:USDT": {
+  "min_amount": 10.0,
+  "step": 10.0
+ },
+ "DOS/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "DOT/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "DRAM/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "DRIFT/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "DUSK/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "DYDX/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "DYM/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "EBAY/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "EDEN/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "EDGE/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "EDU/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "EGLD/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "EIGEN/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "ELSA/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "ENA/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "ENJ/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "ENS/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "ENSO/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "EPIC/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "ERA/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "ESP/USDT:USDT": {
+  "min_amount": 10.0,
+  "step": 10.0
+ },
+ "ESPORTS/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "ETC/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "ETH/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "ETHBTC/USDT:USDT": {
+  "min_amount": 10.0,
+  "step": 10.0
+ },
+ "ETHFI/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "EUL/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "EURUSD/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "EVAA/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "EWJ/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "EWT/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "EWY/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "EWZ/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "F/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "FARTCOIN/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "FF/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "FHE/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "FIDA/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "FIGHT/USDT:USDT": {
+  "min_amount": 10.0,
+  "step": 10.0
+ },
+ "FIL/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "FLEX/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "FLNC/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "FLOCK/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "FLOW/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "FLR/USDT:USDT": {
+  "min_amount": 10.0,
+  "step": 10.0
+ },
+ "FLUID/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "FLUX/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "FLY/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "FOGO/USDT:USDT": {
+  "min_amount": 10.0,
+  "step": 10.0
+ },
+ "FOLKS/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "FORM/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "FORMSTOCK/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "FUTU/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "FWDI/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "GALA/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "GAS/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "GBPUSD/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "GDX/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "GE/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "GENIUS/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "GEV/USDT:USDT": {
+  "min_amount": 0.001,
+  "step": 0.001
+ },
+ "GIGADEVICE/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "GIGGLE/USDT:USDT": {
+  "min_amount": 0.001,
+  "step": 0.001
+ },
+ "GILD/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "GLM/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "GLW/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "GMESTOCK/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "GMT/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "GMX/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "GOAT/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "GOOGL/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "GPRO/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "GPS/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "GRAM/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "GRASS/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "GRIFFAIN/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "GRT/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "GRVT/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "GS/USDT:USDT": {
+  "min_amount": 0.001,
+  "step": 0.001
+ },
+ "GTLB/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "GUN/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "GWEI/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "H/USDT:USDT": {
+  "min_amount": 10.0,
+  "step": 10.0
+ },
+ "HAEDAL/USDT:USDT": {
+  "min_amount": 10.0,
+  "step": 10.0
+ },
+ "HAJIMI/USDT:USDT": {
+  "min_amount": 10.0,
+  "step": 10.0
+ },
+ "HANA/USDT:USDT": {
+  "min_amount": 10.0,
+  "step": 10.0
+ },
+ "HANMI/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "HBAR/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "HD/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "HEI/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "HEMI/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "HIMS/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "HIVE/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "HMSTR/USDT:USDT": {
+  "min_amount": 10.0,
+  "step": 10.0
+ },
+ "HNT/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "HOLO/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "HOME/USDT:USDT": {
+  "min_amount": 10.0,
+  "step": 10.0
+ },
+ "HOOD/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "HORIZON/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "HPE/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "HUAHONG/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "HUMA/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "HUT/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "HYPE/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "HYPER/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "HYUNDAI/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "IBIT/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "IBM/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "ICNT/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "ICP/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "ID/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "ILV/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "IMX/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "IN/USDT:USDT": {
+  "min_amount": 10.0,
+  "step": 10.0
+ },
+ "INFQ/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "INIT/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "INJ/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "INTC/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "INTU/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "INTW/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "INX/USDT:USDT": {
+  "min_amount": 10.0,
+  "step": 10.0
+ },
+ "IO/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "IONQ/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "IOST/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "IOTA/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "IOTX/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "IREN/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "IRYS/USDT:USDT": {
+  "min_amount": 10.0,
+  "step": 10.0
+ },
+ "ISRG/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "IWM/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "JASMY/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "JCT/USDT:USDT": {
+  "min_amount": 100.0,
+  "step": 100.0
+ },
+ "JD/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "JELLYJELLY/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "JNJ/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "JPM/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "JST/USDT:USDT": {
+  "min_amount": 10.0,
+  "step": 10.0
+ },
+ "JTO/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "JUP/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "KAIA/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "KAITO/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "KAS/USDT:USDT": {
+  "min_amount": 10.0,
+  "step": 10.0
+ },
+ "KAT/USDT:USDT": {
+  "min_amount": 10.0,
+  "step": 10.0
+ },
+ "KAVA/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "KERNEL/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "KGEN/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "KITE/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "KLAC/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "KMNO/USDT:USDT": {
+  "min_amount": 10.0,
+  "step": 10.0
+ },
+ "KNC/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "KO/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "KODEX200/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "KORU/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "KSM/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "KSTR/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "KUAISHOU/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "LA/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "LAB/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "LAOPU/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "LDO/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "LENOVO/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "LGELECTRONICS/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "LIGHT/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "LINEA/USDT:USDT": {
+  "min_amount": 10.0,
+  "step": 10.0
+ },
+ "LINK/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "LIT/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "LITE/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "LLY/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "LONGXIA/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "LPT/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "LQTY/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "LRC/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "LRCX/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "LSK/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "LTC/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "LUMIA/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "LUNA2/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "LYN/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "LYTE/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "M/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "MA/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "MAGIC/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "MAGMA/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "MAGS/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "MANA/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "MANTA/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "MARA/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "MARSCOIN/USDT:USDT": {
+  "min_amount": 10.0,
+  "step": 10.0
+ },
+ "MASK/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "MAV/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "MAVIA/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "MCD/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "MDB/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "ME/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "MEGA/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "MEITU/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "MEITUAN/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "MELANIA/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "MEME/USDT:USDT": {
+  "min_amount": 10.0,
+  "step": 10.0
+ },
+ "MERL/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "MET/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "META/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "METIS/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "MEW/USDT:USDT": {
+  "min_amount": 100.0,
+  "step": 100.0
+ },
+ "MINA/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "MINIMAX/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "MIRA/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "MITO/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "MMT/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "MNST/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "MNT/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "MO/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "MOCA/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "MON/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "MOODENG/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "MOONSHOT/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "MORPHO/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "MOVE/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "MOVR/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "MRK/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "MRNA/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "MRVL/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "MSFT/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "MSFU/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "MSTR/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "MSTU/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "MTL/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "MU/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "MUBARAK/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "MUU/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "MVLL/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "MYX/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "NAORIS/USDT:USDT": {
+  "min_amount": 10.0,
+  "step": 10.0
+ },
+ "NAVER/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "NBIS/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "NCLD/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "NEAR/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "NEO/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "NESA/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "NET/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "NEWT/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "NFLX/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "NIGHT/USDT:USDT": {
+  "min_amount": 10.0,
+  "step": 10.0
+ },
+ "NIL/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "NIULAI/USDT:USDT": {
+  "min_amount": 10.0,
+  "step": 10.0
+ },
+ "NMR/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "NOKIA/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "NOM/USDT:USDT": {
+  "min_amount": 10.0,
+  "step": 10.0
+ },
+ "NOT/USDT:USDT": {
+  "min_amount": 10.0,
+  "step": 10.0
+ },
+ "NOW/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "NVDA/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "NVDL/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "NVO/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "NXPC/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "O/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "OG/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "OGN/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "OKB/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "OKTA/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "ON/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "ONDO/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "ONDS/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "ONG/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "ONT/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "OP/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "OPEN/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "OPENAI/USDT:USDT": {
+  "min_amount": 0.001,
+  "step": 0.001
+ },
+ "OPG/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "OPN/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "ORCA/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "ORCL/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "ORDER/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "ORDI/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "OUST/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "PANW/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "PARTI/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "PATH/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "PAXG/USDT:USDT": {
+  "min_amount": 0.001,
+  "step": 0.001
+ },
+ "PDD/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "PEAQ/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "PENDLE/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "PENGSTOCK/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "PENGU/USDT:USDT": {
+  "min_amount": 10.0,
+  "step": 10.0
+ },
+ "PEOPLE/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "PEP/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "PHA/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "PHAROS/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "PIEVERSE/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "PIPPIN/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "PIXEL/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "PLAYSOUT/USDT:USDT": {
+  "min_amount": 10.0,
+  "step": 10.0
+ },
+ "PLTR/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "PLUME/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "PNUT/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "POET/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "POL/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "POLYX/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "PONS/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "POPCAT/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "POPMART/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "PORTAL/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "POWER/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "POWR/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "PRL/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "PROMPT/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "PROVE/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "PTB/USDT:USDT": {
+  "min_amount": 10.0,
+  "step": 10.0
+ },
+ "PUFFER/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "PUMPFUN/USDT:USDT": {
+  "min_amount": 100.0,
+  "step": 100.0
+ },
+ "PUNDIX/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "PURR/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "PYPL/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "PYTH/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "Q/USDT:USDT": {
+  "min_amount": 10.0,
+  "step": 10.0
+ },
+ "QCOM/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "QNT/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "QNTX/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "QQQ/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "QTUM/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "RAM/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "RARE/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "RAVE/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "RAYDIUM/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "RDDT/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "RDW/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "RE/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "RECALL/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "RED/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "REGN/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "RENDER/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "RESOLV/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "REZ/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "RIOT/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "RIVER/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "RIVN/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "RKLB/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "RLC/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "RLUSD/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "ROBO/USDT:USDT": {
+  "min_amount": 10.0,
+  "step": 10.0
+ },
+ "RONIN/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "ROSE/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "RPL/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "RSR/USDT:USDT": {
+  "min_amount": 10.0,
+  "step": 10.0
+ },
+ "RUNE/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "RVN/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "S/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "SAFE/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "SAGA/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "SAHARA/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "SAMSUNG/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "SAMSUNGEM/USDT:USDT": {
+  "min_amount": 0.001,
+  "step": 0.001
+ },
+ "SAND/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "SAPIEN/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "SECZ/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "SEI/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "SENSETIME/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "SENT/USDT:USDT": {
+  "min_amount": 10.0,
+  "step": 10.0
+ },
+ "SHAZ/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "SHEIN/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "SHELL/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "SHIB1000/USDT:USDT": {
+  "min_amount": 10.0,
+  "step": 10.0
+ },
+ "SHOP/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "SIGN/USDT:USDT": {
+  "min_amount": 10.0,
+  "step": 10.0
+ },
+ "SIREN/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "SKDD/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "SKHY/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "SKHYNIX/USDT:USDT": {
+  "min_amount": 0.001,
+  "step": 0.001
+ },
+ "SKL/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "SKR/USDT:USDT": {
+  "min_amount": 10.0,
+  "step": 10.0
+ },
+ "SKUU/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "SKY/USDT:USDT": {
+  "min_amount": 10.0,
+  "step": 10.0
+ },
+ "SKYAI1/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "SLP/USDT:USDT": {
+  "min_amount": 10.0,
+  "step": 10.0
+ },
+ "SLX/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "SMCI/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "SMH/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "SMIC/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "SNDK/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "SNOW/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "SNT/USDT:USDT": {
+  "min_amount": 10.0,
+  "step": 10.0
+ },
+ "SNX/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "SNXX/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "SOFI/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "SOL/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "SOLAYER/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "SOMI/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "SONIC/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "SONY/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "SOON/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "SOPH/USDT:USDT": {
+  "min_amount": 10.0,
+  "step": 10.0
+ },
+ "SOSO/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "SOXL/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "SOXS/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "SOXX/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "SPACE/USDT:USDT": {
+  "min_amount": 10.0,
+  "step": 10.0
+ },
+ "SPCH/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "SPCX/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "SPK/USDT:USDT": {
+  "min_amount": 10.0,
+  "step": 10.0
+ },
+ "SPORTFUN/USDT:USDT": {
+  "min_amount": 10.0,
+  "step": 10.0
+ },
+ "SPOT/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "SPX/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "SPXL/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "SPY/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "SQD/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "SQQQ/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "SSPC/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "SSV/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "STABLE/USDT:USDT": {
+  "min_amount": 10.0,
+  "step": 10.0
+ },
+ "STBL/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "STEEM/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "STG/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "STO/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "STONK/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "STORJ/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "STRK/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "STX/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "STXX/USDT:USDT": {
+  "min_amount": 0.001,
+  "step": 0.001
+ },
+ "SUI/USDT:USDT": {
+  "min_amount": 10.0,
+  "step": 10.0
+ },
+ "SUN/USDT:USDT": {
+  "min_amount": 10.0,
+  "step": 10.0
+ },
+ "SUPER/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "SUSHI/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "SXT/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "SYRUP/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "T/USDT:USDT": {
+  "min_amount": 10.0,
+  "step": 10.0
+ },
+ "TA/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "TAC/USDT:USDT": {
+  "min_amount": 10.0,
+  "step": 10.0
+ },
+ "TAIKO/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "TAO/USDT:USDT": {
+  "min_amount": 0.001,
+  "step": 0.001
+ },
+ "TBT/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "TEAM/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "TEM/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "TENCENT/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "TER/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "THE/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "THETA/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "TIA/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "TLM/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "TLT/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "TMF/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "TMX/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "TNSR/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "TOWNS/USDT:USDT": {
+  "min_amount": 10.0,
+  "step": 10.0
+ },
+ "TQQQ/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "TRB/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "TREE/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "TRIA/USDT:USDT": {
+  "min_amount": 10.0,
+  "step": 10.0
+ },
+ "TRUMP/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "TRUST/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "TRUTH/USDT:USDT": {
+  "min_amount": 10.0,
+  "step": 10.0
+ },
+ "TRX/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "TSEM/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "TSLA/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "TSLL/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "TSM/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "TTWO/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "TURTLE/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "TUT/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "TWT/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "TXN/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "TZA/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "UAI/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "UB/USDT:USDT": {
+  "min_amount": 10.0,
+  "step": 10.0
+ },
+ "UBER/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "UMA/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "UNH/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "UNI/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "UNITREE/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "US/USDT:USDT": {
+  "min_amount": 10.0,
+  "step": 10.0
+ },
+ "USAR/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "USD1/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "USDC/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "USDE/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "USDJPY/USDT:USDT": {
+  "min_amount": 0.001,
+  "step": 0.001
+ },
+ "USELESS/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "USTC/USDT:USDT": {
+  "min_amount": 10.0,
+  "step": 10.0
+ },
+ "USUAL/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "UVXY/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "V/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "VANA/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "VELO/USDT:USDT": {
+  "min_amount": 10.0,
+  "step": 10.0
+ },
+ "VELODROME/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "VELVET/USDT:USDT": {
+  "min_amount": 10.0,
+  "step": 10.0
+ },
+ "VET/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "VIRTUAL/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "VRT/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "VRTXSTOCK/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "VST/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "VVV/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "W/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "WAL/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "WAVES/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "WAXP/USDT:USDT": {
+  "min_amount": 10.0,
+  "step": 10.0
+ },
+ "WCT/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "WDC/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "WENSTOCK/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "WET/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "WIF/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "WLD/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "WLFI/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "WMT/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "WOO/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "XAG/USDT:USDT": {
+  "min_amount": 0.001,
+  "step": 0.001
+ },
+ "XAI/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "XAN/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "XAU/USDT:USDT": {
+  "min_amount": 0.001,
+  "step": 0.001
+ },
+ "XAUT/USDT:USDT": {
+  "min_amount": 0.001,
+  "step": 0.001
+ },
+ "XBI/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "XCN/USDT:USDT": {
+  "min_amount": 10.0,
+  "step": 10.0
+ },
+ "XDC/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "XIAOMI/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "XLE/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "XLF/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "XLK/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "XLM/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "XLP/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "XLU/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "XLV/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "XMR/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "XNY/USDT:USDT": {
+  "min_amount": 10.0,
+  "step": 10.0
+ },
+ "XOM/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "XPIN/USDT:USDT": {
+  "min_amount": 100.0,
+  "step": 100.0
+ },
+ "XPL/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "XRP/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "XTZ/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "XVG/USDT:USDT": {
+  "min_amount": 100.0,
+  "step": 100.0
+ },
+ "XVS/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "YB/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "YFI/USDT:USDT": {
+  "min_amount": 0.0001,
+  "step": 0.0001
+ },
+ "YGG/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "YOFC/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "ZAMA/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "ZBCN/USDT:USDT": {
+  "min_amount": 100.0,
+  "step": 100.0
+ },
+ "ZBT/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "ZEC/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "ZEN/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "ZEREBRO/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "ZEST/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "ZETA/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "ZHIPU/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "ZHONGJI/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "ZIL/USDT:USDT": {
+  "min_amount": 10.0,
+  "step": 10.0
+ },
+ "ZK/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "ZKC/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "ZKP/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "ZM/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ },
+ "ZORA/USDT:USDT": {
+  "min_amount": 10.0,
+  "step": 10.0
+ },
+ "ZRO/USDT:USDT": {
+  "min_amount": 0.1,
+  "step": 0.1
+ },
+ "ZRX/USDT:USDT": {
+  "min_amount": 1.0,
+  "step": 1.0
+ },
+ "ZS/USDT:USDT": {
+  "min_amount": 0.01,
+  "step": 0.01
+ }
+}

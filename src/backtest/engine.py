@@ -18,9 +18,12 @@ partial-close и retracement, и это выяснилось сильно поз
 """
 
 import bisect
+import json
+import math
 import sqlite3
 import time
 from datetime import datetime, timedelta
+from pathlib import Path
 
 
 from src.analytics.detector import VOLUME_REVERSAL_STAGES, SetupDetector
@@ -88,6 +91,47 @@ class PendingEntry:
         self.sl_price = sl_price
         self.fee = fee  # комиссия входа, известна заранее (maker, лимит известен)
         self.risk = risk  # бюджет риска в $ — переносится в SimPosition при исполнении
+
+
+DEFAULT_MARKETS_PATH = "config/bybit_markets.json"
+
+
+def load_markets(path: str | None = DEFAULT_MARKETS_PATH) -> dict | None:
+    """Метаданные инструментов (шаг лота, минимальный объём) или None.
+
+    Файл готовит scripts/fetch_market_meta.py. Отсутствует — движок считает
+    объём дробным, как до 22.09.2026; это честно сообщается в отчёте, чтобы
+    разница между прогонами не оказалась незамеченной.
+    """
+    if not path:
+        return None
+    p = Path(path)
+    if not p.exists():
+        return None
+    with open(p) as f:
+        return json.load(f)
+
+
+def _round_to_lot(qty: float, meta: dict | None) -> float:
+    """Объём, округлённый ВНИЗ до шага лота. 0.0 — сделка невозможна.
+
+    Боевой путь делает ровно это (`ExchangeConnector.amount_to_precision`,
+    ccxt TRUNCATE) и отказывается от сделки, если после округления остался
+    ноль или объём меньше минимального лота. Бэктест до 22.09.2026 считал
+    объём дробным числом, то есть систематически завышал размер позиции.
+
+    Величина поправки зависит от депозита: при нотионале $11 (депозит ~$55)
+    средняя потеря 3.2%, при $200 — 0.22%. Направление всегда одно — вниз.
+    """
+    if not meta:
+        return qty
+    step = meta.get("step") or 0.0
+    if step > 0:
+        qty = math.floor(qty / step) * step
+    min_amount = meta.get("min_amount") or 0.0
+    if qty <= 0 or (min_amount and qty < min_amount):
+        return 0.0
+    return qty
 
 
 def _bar(rows, idx):
@@ -245,7 +289,15 @@ def compute_retracement_pct(candle_slice, sustain):
     return (window_high - candle_slice[-1]["close"]) / window_high * 100
 
 
-def simulate(settings, data, has_oi: bool = True, collect_retracement: bool = True):
+def simulate(settings, data, has_oi: bool = True, collect_retracement: bool = True,
+             markets: dict | None = None):
+    """Цикл симуляции.
+
+    `markets` — метаданные инструментов биржи (symbol → {step, min_amount}) из
+    scripts/fetch_market_meta.py. Переданы — объём округляется вниз до шага
+    лота и сделка отбрасывается, если после округления остался ноль, ровно как
+    в бою. Не переданы — объём дробный, как было до 22.09.2026.
+    """
     cfg = settings.trading
     detector = SetupDetector(settings.strategy, timeframe=settings.collectors.timeframe)
 
@@ -260,6 +312,11 @@ def simulate(settings, data, has_oi: bool = True, collect_retracement: bool = Tr
     pending: list[PendingEntry] = []
     closed_trades: list[SimPosition] = []
     signals_count = 0
+    amount_too_small = 0
+    # Монеты, которых нет в метаданных биржи: они торгуются дробным объёмом,
+    # то есть по старой модели. Молча это делать нельзя — устаревший файл
+    # метаданных иначе вернул бы прежнее поведение незаметно.
+    symbols_without_meta: set[str] = set()
     pending_filled = 0
     pending_expired = 0
 
@@ -554,7 +611,13 @@ def simulate(settings, data, has_oi: bool = True, collect_retracement: bool = Tr
                 limit_price = signal_price * (1 - cfg.pending_entry_pullback_pct / 100)
                 sl_distance = limit_price * (cfg.stop_loss_pct / 100)
                 tp_distance = sl_distance * cfg.risk_reward_ratio
-                qty = risk_budget / sl_distance
+                meta = markets.get(sym) if markets else None
+                if markets and meta is None:
+                    symbols_without_meta.add(sym)
+                qty = _round_to_lot(risk_budget / sl_distance, meta)
+                if qty <= 0:
+                    amount_too_small += 1
+                    continue
                 tp = limit_price + tp_distance
                 sl = limit_price - sl_distance
                 entry_fee = _fee(cfg, qty * limit_price, taker=False)
@@ -573,7 +636,16 @@ def simulate(settings, data, has_oi: bool = True, collect_retracement: bool = Tr
             entry_price = signal_price * (1 + cfg.backtest_slippage_pct / 100)
             sl_distance = entry_price * (cfg.stop_loss_pct / 100)
             tp_distance = sl_distance * cfg.risk_reward_ratio
-            qty = risk_budget / sl_distance
+            meta = markets.get(sym) if markets else None
+            if markets and meta is None:
+                symbols_without_meta.add(sym)
+            qty = _round_to_lot(risk_budget / sl_distance, meta)
+            if qty <= 0:
+                # Депозит мал для этой монеты по текущей цене — в бою это отказ
+                # "amount_too_small" ещё до отправки ордера. Слот остаётся
+                # свободным, поэтому просто идём дальше.
+                amount_too_small += 1
+                continue
             tp = entry_price + tp_distance
             sl = entry_price - sl_distance
             entry_fee = _fee(cfg, qty * entry_price, taker=True)
@@ -667,6 +739,8 @@ def simulate(settings, data, has_oi: bool = True, collect_retracement: bool = Tr
         "price_stage_counts": price_stage_counts,
         "vol_stage_counts": vol_stage_counts,
         "shift_used_count": shift_used_count,
+        "amount_too_small": amount_too_small,
+        "symbols_without_lot_meta": sorted(symbols_without_meta),
         "trades_list": trades_out,
         "period": f"{all_timestamps[0]} -> {all_timestamps[-1]}" if all_timestamps else "",
         # Ниже — то, что нужно отчёту runner.py; свипы этим не пользуются.

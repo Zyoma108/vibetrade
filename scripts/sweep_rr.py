@@ -20,7 +20,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src.backtest.engine import load_data, log, simulate  # noqa: E402
+from src.backtest.engine import DEFAULT_MARKETS_PATH, load_data, load_markets, log, simulate  # noqa: E402
 from src.backtest.metrics import sweep_table  # noqa: E402
 from src.config import Settings  # noqa: E402
 
@@ -73,7 +73,12 @@ def main():
     ap.add_argument("--thresholds", default="2.0,2.5,3.0,3.5,4.0")
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--has-oi", type=int, default=1)
+    ap.add_argument(
+        "--markets", default=DEFAULT_MARKETS_PATH,
+        help="метаданные инструментов для модели шага лота; пустая строка — выключить",
+    )
     args = ap.parse_args()
+    markets = load_markets(args.markets or None)
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -92,7 +97,7 @@ def main():
         settings.trading.risk_reward_ratio = th
         tp_pct = settings.trading.stop_loss_pct * th
         log(f"Running simulation for risk_reward_ratio={th} (TP={tp_pct:.1f}%, SL={settings.trading.stop_loss_pct}%) ...")
-        result = simulate(settings, data, has_oi=bool(args.has_oi), collect_retracement=False)
+        result = simulate(settings, data, markets=markets, has_oi=bool(args.has_oi), collect_retracement=False)
         elapsed = time.time() - t1
 
         outcomes = summarize_outcomes(result["trades_list"])

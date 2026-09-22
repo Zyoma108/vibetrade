@@ -14,19 +14,25 @@ import argparse
 import logging
 from pathlib import Path
 
-from src.backtest.engine import load_data, simulate
+from src.backtest.engine import DEFAULT_MARKETS_PATH, load_data, load_markets, simulate
 from src.config import Settings
 
 logger = logging.getLogger(__name__)
 
 
-def run_backtest(config_path: str, db_path: str, has_oi: bool = True) -> dict | None:
-    """Загрузить БД и прогнать симуляцию. Тонкая обёртка над движком."""
+def run_backtest(config_path: str, db_path: str, has_oi: bool = True,
+                 markets_path: str | None = DEFAULT_MARKETS_PATH) -> dict | None:
+    """Загрузить БД и прогнать симуляцию. Тонкая обёртка над движком.
+
+    `markets_path` — метаданные инструментов для модели шага лота. По
+    умолчанию config/bybit_markets.json, если файл есть; None отключает
+    округление и возвращает прежнее (до 22.09.2026) поведение.
+    """
     settings = Settings.from_yaml(config_path)
     data = load_data(db_path)
     if not data["all_timestamps"]:
         return None
-    return simulate(settings, data, has_oi=has_oi)
+    return simulate(settings, data, has_oi=has_oi, markets=load_markets(markets_path))
 
 
 def _load_live_stats(db_path: str) -> dict | None:
@@ -166,6 +172,10 @@ def main():
     parser.add_argument("--config", type=str, default="config/config.yaml")
     parser.add_argument("--db", type=str, default="data/backtest.db")
     parser.add_argument("--has_oi", type=bool, default=True)
+    parser.add_argument(
+        "--markets", type=str, default=DEFAULT_MARKETS_PATH,
+        help="метаданные инструментов для модели шага лота; пустая строка — выключить",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -180,7 +190,7 @@ def main():
         print(f"Файл БД не найден: {args.db}")
         return
 
-    result = run_backtest(args.config, args.db, args.has_oi)
+    result = run_backtest(args.config, args.db, args.has_oi, args.markets or None)
 
     if not result:
         print("Нет данных")
@@ -195,6 +205,20 @@ def main():
     print("=" * 60)
     print(f"  OI проверка:        {'✅ Да' if result['has_oi'] else '❌ Нет'}")
     print(f"  MarketContext:      {'✅ Да' if result.get('has_mc', False) else '❌ Нет'}")
+    # Шаг лота меняет размер позиции, поэтому прогоны с ним и без него не
+    # сопоставимы напрямую — отмечаем явно.
+    lot = result.get("amount_too_small")
+    if args.markets and lot is not None:
+        no_meta = result.get("symbols_without_lot_meta") or []
+        note = f"✅ Да (отказов по мин. лоту: {lot}"
+        if no_meta:
+            note += f"; БЕЗ метаданных, дробный объём: {len(no_meta)} монет"
+        print(f"  Шаг лота биржи:     {note})")
+        if no_meta:
+            print(f"      {', '.join(no_meta[:8])}"
+                  + (f" и ещё {len(no_meta) - 8}" if len(no_meta) > 8 else ""))
+    else:
+        print("  Шаг лота биржи:     ❌ Нет — объём дробный")
     print(f"  Период:            {result['period']}")
     print(f"  Сигналов:          {result['signals']}")
     print(f"  Сделок:            {result['trades']}")

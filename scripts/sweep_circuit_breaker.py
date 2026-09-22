@@ -39,7 +39,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src.backtest.engine import load_data, log, simulate  # noqa: E402
+from src.backtest.engine import DEFAULT_MARKETS_PATH, load_data, load_markets, log, simulate  # noqa: E402
 from src.backtest.metrics import SIGNIFICANCE_LEGEND, fmt, format_delta  # noqa: E402
 from src.config import Settings  # noqa: E402
 
@@ -61,7 +61,12 @@ def main():
     ap.add_argument("--config", default="config/config.yaml")
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--has-oi", type=int, default=1)
+    ap.add_argument(
+        "--markets", default=DEFAULT_MARKETS_PATH,
+        help="метаданные инструментов для модели шага лота; пустая строка — выключить",
+    )
     args = ap.parse_args()
+    markets = load_markets(args.markets or None)
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -79,7 +84,7 @@ def main():
         s.trading.circuit_breaker_loss_streak_reduce = reduce_n
         s.trading.circuit_breaker_loss_streak_stop = stop_n
         s.trading.circuit_breaker_reduce_mult_pct = mult
-        r = simulate(s, data, has_oi=bool(args.has_oi), collect_retracement=False)
+        r = simulate(s, data, markets=markets, has_oi=bool(args.has_oi), collect_retracement=False)
         # R берём из движка: там у каждой сделки собственный risk, поэтому
         # половинный размер в reduce-режиме весит ровно столько, сколько стоит.
         runs[label] = r["trades_list"]

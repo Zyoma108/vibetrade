@@ -35,7 +35,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src.backtest.engine import load_data, log, simulate  # noqa: E402
+from src.backtest.engine import DEFAULT_MARKETS_PATH, load_data, load_markets, log, simulate  # noqa: E402
 from src.backtest.metrics import SIGNIFICANCE_LEGEND, fmt, format_delta  # noqa: E402
 from src.config import Settings  # noqa: E402
 
@@ -95,7 +95,12 @@ def main():
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--has-oi", type=int, default=1)
     ap.add_argument("--thresholds", default="")
+    ap.add_argument(
+        "--markets", default=DEFAULT_MARKETS_PATH,
+        help="метаданные инструментов для модели шага лота; пустая строка — выключить",
+    )
     args = ap.parse_args()
+    markets = load_markets(args.markets or None)
 
     thresholds = (
         [float(x) for x in args.thresholds.split(",")] if args.thresholds else THRESHOLDS
@@ -129,7 +134,7 @@ def main():
         t1 = time.time()
         s = Settings.from_yaml(args.config)
         s.strategy.min_baseline_volume_usdt = th
-        r = simulate(s, data, has_oi=bool(args.has_oi), collect_retracement=False)
+        r = simulate(s, data, markets=markets, has_oi=bool(args.has_oi), collect_retracement=False)
         annotate_baseline_usdt(r["trades_list"], data, baseline_bars, need_bars)
         runs[th] = r["trades_list"]
         total_r = r["total_R"]
