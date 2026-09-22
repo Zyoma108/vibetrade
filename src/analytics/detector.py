@@ -109,9 +109,17 @@ class SetupDetector(BaseDetector):
                 if len(candles) < min_bars:
                     continue
 
+                # Возраст последнего бара нужен ДО объёмного гейта: от него
+                # зависит, верить ли вердикту «свеча слишком маленькая».
+                # Значение берётся из персистентного кеша и отдельного запроса
+                # не стоит (см. DataProvider.get_last_candle_ts).
+                last_ts = await self._dp.get_last_candle_ts(session, exchange, symbol)
+                age_sec = self._last_bar_age_sec(last_ts)
+
                 vol_ctx: dict = {}
                 vol_window = self._match_volume_window(
-                    candles, min_bars, vol_ctx, symbol=symbol
+                    candles, min_bars, vol_ctx, symbol=symbol,
+                    last_bar_age_sec=age_sec,
                 )
 
                 if vol_window is None:
@@ -137,7 +145,8 @@ class SetupDetector(BaseDetector):
 
                 signal = self._build_signal(symbol, direction, vol_window)
                 await self._annotate_closed_bar(
-                    session, exchange, symbol, candles, vol_window, min_bars, signal
+                    session, exchange, symbol, candles, vol_window, min_bars, signal,
+                    age_sec=age_sec,
                 )
                 signals.append(signal)
                 logger.info(f"Сетап найден: {symbol} {direction} ({exchange})")
@@ -175,6 +184,7 @@ class SetupDetector(BaseDetector):
         min_bars: int,
         context: dict,
         symbol: str | None = None,
+        last_bar_age_sec: int | None = None,
     ) -> list[dict] | None:
         """Окно, на котором сошёлся объёмный паттерн, либо None.
 
@@ -190,8 +200,9 @@ class SetupDetector(BaseDetector):
         порог и её форма говорит о развороте — сдвиг тогда выбросил бы из
         окна ровно ту свечу, которую эти же проверки (и retracement/
         exhaustion-фильтры ниже, считающиеся на том же окне) должны ловить.
-        При ``shift_retry_on_undersized_bar`` блокируют сдвиг только вердикты
-        «свеча слишком большая» — разбор групп см. у VOLUME_UNDERSIZED_STAGES.
+        Вердикт «свеча слишком маленькая» блокирует сдвиг только если сама
+        свеча достаточно зрелая, чтобы ему верить — см.
+        ``_undersized_verdict_is_trusted`` и VOLUME_UNDERSIZED_STAGES.
 
         Вынесено из ``analyze()`` отдельным методом, потому что этот же поток
         нужен ``_closed_bar_verdict()`` на окне без формирующегося бара.
@@ -202,12 +213,12 @@ class SetupDetector(BaseDetector):
         """
         if self.check_volume_pattern(candles, context):
             return candles
-        blocking = VOLUME_REVERSAL_STAGES
-        if self.config.shift_retry_on_undersized_bar:
-            # «Свеча слишком маленькая» на ещё не закрытой свече — вердикт по
-            # недособранным данным, см. VOLUME_UNDERSIZED_STAGES.
-            blocking = VOLUME_OVERSIZED_STAGES
-        if context.get("stage") in blocking:
+        stage = context.get("stage")
+        if stage in VOLUME_OVERSIZED_STAGES:
+            return None
+        if stage in VOLUME_UNDERSIZED_STAGES and self._undersized_verdict_is_trusted(
+            last_bar_age_sec
+        ):
             return None
 
         for shift in range(1, 2):  # -1 свеча
@@ -240,6 +251,7 @@ class SetupDetector(BaseDetector):
         vol_window: list[dict],
         min_bars: int,
         signal: Signal,
+        age_sec: int | None = None,
     ) -> None:
         """Записать в сигнал, прошёл бы он на окне БЕЗ формирующегося бара.
 
@@ -251,12 +263,34 @@ class SetupDetector(BaseDetector):
         момент решения, задним числом не из чего.
         См. docs/strategy.md, «Формирующийся бар».
         """
-        last_ts = await self._dp.get_last_candle_ts(session, exchange, symbol)
-        age_sec = self._last_bar_age_sec(last_ts)
+        if age_sec is None:
+            last_ts = await self._dp.get_last_candle_ts(session, exchange, symbol)
+            age_sec = self._last_bar_age_sec(last_ts)
         signal.last_bar_age_sec = age_sec
         signal.closed_bar_ok, signal.closed_bar_stage = self._closed_bar_verdict(
             candles, vol_window, min_bars, age_sec
         )
+
+    def _undersized_verdict_is_trusted(self, last_bar_age_sec: int | None) -> bool:
+        """Можно ли верить вердикту «последняя свеча слишком маленькая».
+
+        Вердикты `volume_fading` и `volume_declining` сравнивают объём ПОСЛЕДНЕЙ
+        свечи окна с соседними. В проде эта свеча формирующаяся, и её объём
+        неполон по построению — на молодой свече такой вердикт говорит не о том,
+        что памп иссяк, а о том, что бар ещё не набрал объём.
+
+        Порог зрелости задаётся `undersized_verdict_min_bar_maturity_pct`.
+        Ноль (по умолчанию) — доверять всегда, поведение до 22.09.2026.
+
+        `last_bar_age_sec is None` — возраст неизвестен (бэктест, тесты,
+        отсутствующий кеш). Тогда вердикту доверяем: в бэктесте бары закрыты,
+        и расширять там ретрай не за чем — замер 22.09.2026 показал, что грубое
+        расширение стоит -2.30R.
+        """
+        threshold_pct = self.config.undersized_verdict_min_bar_maturity_pct
+        if threshold_pct <= 0 or last_bar_age_sec is None:
+            return True
+        return last_bar_age_sec >= self._timeframe_sec * threshold_pct / 100
 
     def _last_bar_age_sec(self, last_ts: datetime | None) -> int | None:
         """Сколько секунд прожил последний бар окна к моменту скана.

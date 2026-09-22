@@ -1117,14 +1117,18 @@ class TestLastBarAge:
 
 class TestShiftRetryOnUndersizedBar:
     """Последняя свеча окна в проде — формирующаяся, её объём неполон ПО
-    ПОСТРОЕНИЮ. Поэтому отказ «объём угасает / снижается» выносится по
-    недособранным данным, а отказ «спайк / выброс» — нет: неполная свеча
-    может только вырасти.
+    ПОСТРОЕНИЮ. Поэтому вердикту «объём угасает / снижается» можно верить
+    только на достаточно зрелой свече; вердикту «спайк / выброс» — всегда,
+    неполная свеча может только вырасти.
 
     Замер 22.09.2026 (боевая БД 27.08-21.09 против бэктеста на ней же): из 13
     сигналов, которых бот не увидел вовсе, 6 зарезал volume_fading и 2 —
     volume_declining; пять из них в один момент, все дошли до полного TP.
+    При этом ГРУБОЕ расширение ретрая (без условия на зрелость) стоило в
+    бэктесте -2.30R — отсюда порог зрелости, а не булев флаг.
     """
+
+    TF_SEC = 180  # таймфрейм фикстур — 3m
 
     @staticmethod
     def _d(**over):
@@ -1142,39 +1146,59 @@ class TestShiftRetryOnUndersizedBar:
         return _candles(10, volume=[100.0] * 5 + [500.0, 900.0, 900.0, 900.0, 400.0],
                         price=1.0)
 
-    def test_fading_blocks_shift_by_default(self):
-        """Поведение до 22.09.2026 сохранено: флаг выключен — сдвига нет."""
+    def test_blocks_shift_by_default(self):
+        """Порог 0 — поведение до 22.09.2026: вердикту верим всегда."""
         d = self._d()
         ctx: dict = {}
-        assert d._match_volume_window(self._fading_window(), min_bars=9, context=ctx) is None
+        assert d._match_volume_window(self._fading_window(), min_bars=9, context=ctx,
+                                      last_bar_age_sec=10) is None
         assert ctx.get("stage") == "volume_fading"
 
-    def test_fading_allows_shift_when_enabled(self):
-        """С флагом сдвиг делается и окно находится — уже без формирующейся свечи."""
-        d = self._d(shift_retry_on_undersized_bar=True)
+    def test_young_bar_allows_shift(self):
+        """Свеча прожила 20% таймфрейма при пороге доверия 80% — вердикт
+        вынесен по недособранным данным, сдвиг разрешён."""
+        d = self._d(undersized_verdict_min_bar_maturity_pct=80.0)
         candles = self._fading_window()
-        window = d._match_volume_window(candles, min_bars=9, context={})
-        assert window is not None, "окно без последней свечи обязано пройти гейт"
-        assert len(window) == len(candles) - 1
+        window = d._match_volume_window(candles, min_bars=9, context={},
+                                        last_bar_age_sec=int(self.TF_SEC * 0.2))
         assert window == candles[:-1]
 
-    def test_oversized_bar_blocks_shift_even_when_enabled(self):
-        """«Свеча слишком большая» блокирует сдвиг в любом случае: неполная
-        свеча может только вырасти, значит вердикт уже окончателен."""
+    def test_mature_bar_still_blocks_shift(self):
+        """Та же свеча, но прожившая 90% таймфрейма: вердикту верим, сдвига нет."""
+        d = self._d(undersized_verdict_min_bar_maturity_pct=80.0)
+        ctx: dict = {}
+        assert d._match_volume_window(self._fading_window(), min_bars=9, context=ctx,
+                                      last_bar_age_sec=int(self.TF_SEC * 0.9)) is None
+        assert ctx.get("stage") == "volume_fading"
+
+    def test_unknown_age_is_treated_as_mature(self):
+        """Возраст неизвестен (бэктест, тесты) — вердикту верим.
+
+        Это и делает правку безопасной для бэктеста: там бары закрыты, и
+        расширять ретрай не за чем — грубое расширение стоило -2.30R.
+        """
+        d = self._d(undersized_verdict_min_bar_maturity_pct=80.0)
+        assert d._match_volume_window(self._fading_window(), min_bars=9, context={},
+                                      last_bar_age_sec=None) is None
+
+    def test_oversized_bar_blocks_shift_at_any_maturity(self):
+        """«Свеча слишком большая» блокирует сдвиг всегда: неполная свеча может
+        только вырасти, значит вердикт уже окончателен."""
         spike = _candles(9, volume=[100.0] * 5 + [300.0, 300.0, 300.0, 9_000.0],
                          price=1.0)
-        for enabled in (False, True):
-            d = self._d(shift_retry_on_undersized_bar=enabled, smooth_max_ratio=5.0)
+        for pct in (0.0, 80.0):
+            d = self._d(undersized_verdict_min_bar_maturity_pct=pct, smooth_max_ratio=5.0)
             ctx: dict = {}
-            assert d._match_volume_window(spike, min_bars=9, context=ctx) is None, enabled
-            assert ctx.get("stage") == "volume_spike", (enabled, ctx)
+            assert d._match_volume_window(spike, min_bars=9, context=ctx,
+                                          last_bar_age_sec=1) is None, pct
+            assert ctx.get("stage") == "volume_spike", (pct, ctx)
 
-    def test_silent_rejection_still_retries_in_both_modes(self):
+    def test_silent_rejection_retries_regardless(self):
         """«Тихий» отказ (порог всплеска ещё не достигнут) ретраился всегда —
-        флаг на это поведение не влияет."""
+        порог зрелости на это поведение не влияет."""
         candles = _candles(10, volume=[100.0] * 5 + [500.0, 500.0, 500.0, 500.0, 50.0],
                            price=1.0)
-        for enabled in (False, True):
-            d = self._d(shift_retry_on_undersized_bar=enabled)
-            window = d._match_volume_window(candles, min_bars=9, context={})
-            assert window == candles[:-1], enabled
+        for pct in (0.0, 80.0):
+            d = self._d(undersized_verdict_min_bar_maturity_pct=pct)
+            assert d._match_volume_window(candles, min_bars=9, context={},
+                                          last_bar_age_sec=1) == candles[:-1], pct

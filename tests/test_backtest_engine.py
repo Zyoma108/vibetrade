@@ -802,16 +802,20 @@ def test_engine_calls_detector_shift_retry_instead_of_copying_it(golden_db, monk
     assert result["trades"] == 1, "поведение при этом не изменилось"
 
 
-def test_undersized_flag_reaches_the_engine(golden_db):
-    """Флаг стратегии обязан доходить до движка — копия его не видела."""
-    data = load_data(golden_db)
-    off = _settings()
-    on = _settings()
-    on.strategy.shift_retry_on_undersized_bar = True
+def test_maturity_threshold_does_not_touch_the_backtest(golden_db):
+    """Порог зрелости бара не должен менять бэктест ни при каком значении.
 
-    # На золотой фикстуре сетап проходит без сдвига, поэтому результат один и
-    # тот же; важно, что прогон с флагом не падает и флаг доезжает до детектора.
-    assert simulate(on, data, has_oi=True)["trades"] == simulate(off, data, has_oi=True)["trades"]
+    В бэктесте бары закрыты, возраст последнего неизвестен, и вердикт «свеча
+    слишком маленькая» там честный. Замер 22.09.2026: грубое расширение
+    ретрая (без условия на зрелость) стоило -2.30R — этот тест и стоит на том,
+    чтобы правка не протекла в движок.
+    """
+    data = load_data(golden_db)
+    base = simulate(_settings(), data, has_oi=True)
+    for pct in (0.0, 50.0, 80.0, 100.0):
+        s = _settings()
+        s.strategy.undersized_verdict_min_bar_maturity_pct = pct
+        assert simulate(s, data, has_oi=True)["trades_list"] == base["trades_list"], pct
 
 
 def test_deposit_scales_result_without_lot_metadata(golden_db):
