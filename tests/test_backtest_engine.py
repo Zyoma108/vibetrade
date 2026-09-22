@@ -644,6 +644,10 @@ class TestLotStep:
         PnL меньше — округление всегда против нас."""
         data = load_data(golden_db)
         settings = _settings()
+        # Доля партиала ровно в один шаг лота: частичная фиксация остаётся
+        # исполнимой, и обе ноги сделки масштабируются одинаково. Иначе тест
+        # мерил бы сразу два эффекта — урезание объёма и отказ от партиала.
+        settings.trading.partial_close_qty_pct = 50.0
         free = simulate(settings, data, has_oi=True)
         trade = free["trades_list"][0]
 
@@ -658,6 +662,49 @@ class TestLotStep:
         assert 0 < stepped["trades_list"][0]["pnl"] < trade["pnl"]
         # 2 шага из 2.5 → примерно 80% исходного размера.
         assert stepped["trades_list"][0]["pnl"] == pytest.approx(trade["pnl"] * 0.8, rel=0.05)
+
+    def test_partial_below_lot_step_is_skipped_entirely(self, golden_db):
+        """Доля партиала мельче шага лота → в бою лимитник не выставляется, и
+        позиция идёт до TP/SL СО СВОИМ СТОПОМ: безубыток включает исполнение
+        лимитника, а не достижение триггера.
+
+        Это не то же самое, что partial_close_qty_pct = 0, где доля нулевая
+        намеренно и безубыток как раз включается. Проверка нужна потому, что
+        на депозите ~$55 нотионал позиции около $11, и доля 10-30% на монетах
+        с грубым шагом недостижима — без этой модели свип на реальном депозите
+        отвечал бы на вопрос, которого в бою не существует.
+        """
+        data = load_data(golden_db)
+        settings = _settings()
+        settings.trading.partial_close_qty_pct = 30.0
+        free = simulate(settings, data, has_oi=True)
+
+        qty = free["trades_list"][0]["risk"] / (
+            free["trades_list"][0]["entry_price"] * settings.trading.stop_loss_pct / 100
+        )
+        # Объём усечётся до 0.8*qty, доля 30% от него — 0.24*qty, меньше шага.
+        step = {SYMBOL: {"step": qty * 0.4, "min_amount": 0.0}}
+        stepped = simulate(settings, data, has_oi=True, markets=step)
+
+        assert stepped["trades"] == 1
+        assert stepped["partial_unavailable"] == 1
+        assert stepped["partials"] == 0
+        assert free["partials"] == 1
+        # Позиция дошла до TP целиком, поэтому на 80% размера заработала
+        # БОЛЬШЕ, чем 80% от сделки с частичной фиксацией.
+        assert stepped["trades_list"][0]["pnl"] > free["trades_list"][0]["pnl"] * 0.8
+
+    def test_partial_qty_zero_still_moves_stop_to_breakeven(self, golden_db):
+        """Нулевая доля — намеренная конфигурация, а не отказ биржи: безубыток
+        работает. Граница с предыдущим тестом держится этим."""
+        data = load_data(golden_db)
+        settings = _settings()
+        settings.trading.partial_close_qty_pct = 0.0
+        result = simulate(settings, data, has_oi=True,
+                          markets={SYMBOL: {"step": 0.001, "min_amount": 0.0}})
+
+        assert result["partial_unavailable"] == 0
+        assert result["partials"] == 1
 
 
 def test_symbol_missing_from_lot_metadata_is_reported(golden_db):

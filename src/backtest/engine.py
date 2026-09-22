@@ -40,7 +40,7 @@ BACKTEST_VIRTUAL_BALANCE = 1000.0
 class SimPosition:
     __slots__ = (
         "symbol", "entry_price", "entry_time", "quantity",
-        "tp_price", "sl_price", "partial_closed", "partial_pnl",
+        "tp_price", "sl_price", "partial_closed", "partial_unavailable", "partial_pnl",
         "closed", "exit_price", "exit_time", "pnl", "exit_reason", "fee",
         "risk",
     )
@@ -55,6 +55,9 @@ class SimPosition:
         self.tp_price = tp_price
         self.sl_price = sl_price
         self.partial_closed = False
+        # Доля под частичную фиксацию оказалась мельче шага лота: в бою лимитник
+        # не выставляется, и повторять проверку каждый бар незачем.
+        self.partial_unavailable = False
         self.partial_pnl = 0.0
         self.closed = False
         self.exit_price = 0.0
@@ -399,6 +402,7 @@ def simulate(settings, data, has_oi: bool = True, collect_retracement: bool = Tr
     closed_trades: list[SimPosition] = []
     signals_count = 0
     amount_too_small = 0
+    partial_unavailable = 0
     prefiltered = 0
     # Монеты, которых нет в метаданных биржи: они торгуются дробным объёмом,
     # то есть по старой модели. Молча это делать нельзя — устаревший файл
@@ -463,17 +467,31 @@ def simulate(settings, data, has_oi: bool = True, collect_retracement: bool = Tr
                 continue
             _, o, high, low, close, v = row
 
-            if not pos.partial_closed:
+            if not pos.partial_closed and not pos.partial_unavailable:
                 trigger = pos.entry_price + (pos.tp_price - pos.entry_price) * (cfg.partial_close_pct / 100)
                 if high >= trigger:
                     close_qty = pos.quantity * (cfg.partial_close_qty_pct / 100)
-                    partial_pnl = (trigger - pos.entry_price) * close_qty
-                    pos.quantity -= close_qty
-                    pos.partial_closed = True
-                    pos.partial_pnl = partial_pnl
-                    pos.sl_price = pos.entry_price
-                    pos.fee += _fee(cfg, trigger * close_qty, taker=False)
-                    continue
+                    # Прод округляет долю до шага лота (`_partial_qty`), и если она
+                    # мельче шага — лимитник частичной фиксации НЕ ВЫСТАВЛЯЕТСЯ
+                    # вовсе. Позиция тогда идёт до TP/SL со своим исходным стопом:
+                    # безубыток включает не триггер, а факт исполнения лимитника.
+                    # Это не то же самое, что partial_close_qty_pct = 0, где
+                    # безубыток как раз включается — там доля нулевая намеренно.
+                    # При markets=None `_round_to_lot` возвращает объём как есть,
+                    # поэтому на чистой модели (этап 1 свипов) ветка недостижима.
+                    if cfg.partial_close_qty_pct > 0:
+                        close_qty = _round_to_lot(close_qty, markets.get(pos.symbol) if markets else None)
+                    if cfg.partial_close_qty_pct > 0 and close_qty <= 0:
+                        pos.partial_unavailable = True
+                        partial_unavailable += 1
+                    else:
+                        partial_pnl = (trigger - pos.entry_price) * close_qty
+                        pos.quantity -= close_qty
+                        pos.partial_closed = True
+                        pos.partial_pnl = partial_pnl
+                        pos.sl_price = pos.entry_price
+                        pos.fee += _fee(cfg, trigger * close_qty, taker=False)
+                        continue
 
             if high >= pos.tp_price:
                 pos.exit_price = pos.tp_price
@@ -838,6 +856,7 @@ def simulate(settings, data, has_oi: bool = True, collect_retracement: bool = Tr
         "vol_stage_counts": vol_stage_counts,
         "shift_used_count": shift_used_count,
         "amount_too_small": amount_too_small,
+        "partial_unavailable": partial_unavailable,
         "prefiltered": prefiltered,
         "symbols_without_lot_meta": sorted(symbols_without_meta),
         "trades_list": trades_out,
