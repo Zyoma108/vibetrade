@@ -129,6 +129,7 @@ class Signal(Base):
     closed_bar_ok: Mapped[int | None] = mapped_column(Integer, nullable=True, default=None)  # 1 = сетап есть и на закрытых барах, 0 = нет, NULL = не определено
     closed_bar_stage: Mapped[str | None] = mapped_column(String(32), nullable=True, default=None)  # гейт, валящий сетап на закрытых барах: volume_threshold / volume_* / price_trend / price_growth_low / window_range / exhaustion* / pre_surge_pump / hourly_drop
     last_bar_age_sec: Mapped[int | None] = mapped_column(Integer, nullable=True, default=None)  # возраст последнего бара окна на момент сигнала, с (timeframe = 180 → бар закрыт)
+    volume_window_shifted: Mapped[int | None] = mapped_column(Integer, nullable=True, default=None)  # 1 = объёмное окно взято со сдвигом -1 бар (формирующийся бар отброшен), 0 = как есть. Нужно, чтобы измерить эффект undersized_verdict_min_bar_maturity_pct вживую: бэктестом он непроверяем в принципе
 
 
 class FilteredSignal(Base):
@@ -143,6 +144,13 @@ class FilteredSignal(Base):
     symbol: Mapped[str] = mapped_column(String(32), index=True)
     stage: Mapped[str] = mapped_column(String(32), index=True)  # volume_spike / volume_dump / volume_fading / volume_declining / oi_declining / oi_slope_low / pre_surge_pump / hourly_drop / price_growth_low / exhaustion / exhaustion_extreme / retracement / price_growth_high
     reason: Mapped[str] = mapped_column(Text)
+    # Замер эффекта undersized_verdict_min_bar_maturity_pct (только запись, на
+    # решение не влияет). Заполняются лишь для отказов вида «последняя свеча
+    # слишком маленькая»: бэктест такой вопрос не воспроизводит в принципе —
+    # там нет формирующегося бара, — поэтому цену порога приходится копить на
+    # живых данных ДО его включения.
+    last_bar_age_sec: Mapped[int | None] = mapped_column(Integer, nullable=True, default=None)  # возраст последнего бара окна на момент отказа, с
+    shift_would_pass: Mapped[int | None] = mapped_column(Integer, nullable=True, default=None)  # 1 = сетап прошёл бы все гейты на окне БЕЗ формирующегося бара
 
 
 class PriceSurgeSignal(Base):

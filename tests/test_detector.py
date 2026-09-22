@@ -1202,3 +1202,77 @@ class TestShiftRetryOnUndersizedBar:
             d = self._d(undersized_verdict_min_bar_maturity_pct=pct)
             assert d._match_volume_window(candles, min_bars=9, context={},
                                           last_bar_age_sec=1) == candles[:-1], pct
+
+
+class TestUndersizedVerdictMeasurement:
+    """Замер цены порога зрелости — ДО его включения.
+
+    Бэктест этот вопрос не воспроизводит: там нет формирующегося бара, и
+    вердикт «свеча слишком маленькая» честный. Поэтому при каждом таком отказе
+    записывается, прошёл бы сетап на окне без последней свечи. Только запись,
+    на решение не влияет. Тот же приём, что и с closed_bar_ok (коммит 6275d3c).
+    """
+
+    @staticmethod
+    def _d(**over):
+        return _detector(baseline_bars=5, sustain_bars=4, volume_surge_mult=3.0,
+                         dump_volume_mult=0.0, **over)
+
+    @staticmethod
+    def _fading_window(rising: bool = True):
+        """Всплеск объёма с просевшей последней свечой.
+
+        `rising=True` — цена растёт, поэтому на сдвинутом окне сетап доходит до
+        конца цепочки и замер даёт 1. `rising=False` — цена стоит, объёмный гейт
+        сдвиг пройдёт, а ценовой нет.
+        """
+        path = ([1.0] * 6 + [1.008, 1.016, 1.024, 1.030, 1.030]) if rising else None
+        return _candles(
+            10,
+            volume=[100.0] * 5 + [500.0, 900.0, 900.0, 900.0, 400.0],
+            price=1.0,
+            price_path=path,
+        )
+
+    def test_records_that_shift_would_pass(self):
+        d = self._d()
+        ctx: dict = {}
+        assert d._match_volume_window(self._fading_window(), min_bars=9, context=ctx,
+                                      last_bar_age_sec=30) is None, "решение не изменилось"
+        assert ctx["stage"] == "volume_fading"
+        assert ctx["last_bar_age_sec"] == 30
+        assert ctx["shift_would_pass"] == 1
+
+    def test_records_zero_when_shift_would_not_help(self):
+        """Цена не проходит и на сдвинутом окне — порог зрелости ничего бы не дал."""
+        d = self._d()
+        ctx: dict = {}
+        d._match_volume_window(self._fading_window(rising=False), min_bars=9, context=ctx,
+                               last_bar_age_sec=30)
+        assert ctx["shift_would_pass"] == 0
+
+    def test_no_measurement_without_bar_age(self):
+        """Бэктест и тесты возраст не передают — замер не нужен и не пишется."""
+        d = self._d()
+        ctx: dict = {}
+        d._match_volume_window(self._fading_window(), min_bars=9, context=ctx,
+                               last_bar_age_sec=None)
+        assert "shift_would_pass" not in ctx
+
+    def test_measurement_does_not_log_rejection(self, caplog):
+        """Замер не должен сыпать «Сигнал пропущен» — он ничего не отвергает."""
+        d = self._d()
+        with caplog.at_level("INFO"):
+            d._match_volume_window(self._fading_window(), min_bars=9, context={},
+                                   last_bar_age_sec=30)
+        assert caplog.text.count("Сигнал пропущен") == 1, caplog.text
+        assert d._measuring is False
+
+    def test_no_measurement_once_threshold_is_on(self):
+        """С включённым порогом сдвиг делается по-настоящему, мерить нечего."""
+        d = self._d(undersized_verdict_min_bar_maturity_pct=80.0)
+        candles = self._fading_window()
+        ctx: dict = {}
+        assert d._match_volume_window(candles, min_bars=9, context=ctx,
+                                      last_bar_age_sec=30) == candles[:-1]
+        assert "shift_would_pass" not in ctx

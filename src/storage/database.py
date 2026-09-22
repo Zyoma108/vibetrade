@@ -214,10 +214,24 @@ async def init_db() -> None:
             ("closed_bar_ok", "INTEGER"),
             ("closed_bar_stage", "VARCHAR(32)"),
             ("last_bar_age_sec", "INTEGER"),
+            ("volume_window_shifted", "INTEGER"),
         ]:
             try:
                 await conn.exec_driver_sql(
                     f"ALTER TABLE signals ADD COLUMN {col_name} {col_type}"
+                )
+            except Exception:
+                pass  # колонка уже существует
+
+        # filtered_signals: замер эффекта undersized_verdict_min_bar_maturity_pct
+        # (см. FilteredSignal). Только запись, на решение не влияет.
+        for col_name, col_type in [
+            ("last_bar_age_sec", "INTEGER"),
+            ("shift_would_pass", "INTEGER"),
+        ]:
+            try:
+                await conn.exec_driver_sql(
+                    f"ALTER TABLE filtered_signals ADD COLUMN {col_name} {col_type}"
                 )
             except Exception:
                 pass  # колонка уже существует

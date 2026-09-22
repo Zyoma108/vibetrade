@@ -33,7 +33,8 @@ logger = logging.getLogger(__name__)
 # Замер 22.09.2026 (боевая БД 27.08-21.09 против бэктеста на ней же): из 13
 # сигналов, которых бот не увидел вовсе, 6 зарезал volume_fading и 2 —
 # volume_declining; пять из них в один момент 16.09 18:06, все дошли до
-# полного TP. Управляется strategy.shift_retry_on_undersized_bar.
+# полного TP. Управляется strategy.undersized_verdict_min_bar_maturity_pct:
+# вердикту «слишком маленькая» верим только на достаточно зрелом баре.
 VOLUME_OVERSIZED_STAGES = frozenset({"volume_spike", "volume_dump"})
 VOLUME_UNDERSIZED_STAGES = frozenset({"volume_fading", "volume_declining"})
 VOLUME_REVERSAL_STAGES = VOLUME_OVERSIZED_STAGES | VOLUME_UNDERSIZED_STAGES
@@ -144,6 +145,12 @@ class SetupDetector(BaseDetector):
                 seen.add(symbol)
 
                 signal = self._build_signal(symbol, direction, vol_window)
+                # Взято ли окно со сдвигом — единственный способ измерить
+                # эффект undersized_verdict_min_bar_maturity_pct: бэктест его
+                # не воспроизводит (там нет формирующегося бара), поэтому
+                # сравнивать исходы сдвинутых и обычных сигналов придётся на
+                # живых данных.
+                signal.volume_window_shifted = int(len(vol_window) < len(candles))
                 await self._annotate_closed_bar(
                     session, exchange, symbol, candles, vol_window, min_bars, signal,
                     age_sec=age_sec,
@@ -171,6 +178,8 @@ class SetupDetector(BaseDetector):
                 symbol=symbol,
                 stage=ctx["stage"],
                 reason=ctx["reason"],
+                last_bar_age_sec=ctx.get("last_bar_age_sec"),
+                shift_would_pass=ctx.get("shift_would_pass"),
             )
         )
 
@@ -219,6 +228,13 @@ class SetupDetector(BaseDetector):
         if stage in VOLUME_UNDERSIZED_STAGES and self._undersized_verdict_is_trusted(
             last_bar_age_sec
         ):
+            # Замер (на решение не влияет): прошёл бы сетап, если бы сдвиг всё же
+            # сделали. Бэктестом этот вопрос не проверяется в принципе — там нет
+            # формирующегося бара, — поэтому цену порога зрелости можно узнать
+            # только накопив её на живых данных, до включения самого порога.
+            if last_bar_age_sec is not None and not self._measuring:
+                context["last_bar_age_sec"] = last_bar_age_sec
+                context["shift_would_pass"] = self._shift_would_pass(candles, min_bars)
             return None
 
         for shift in range(1, 2):  # -1 свеча
@@ -270,6 +286,25 @@ class SetupDetector(BaseDetector):
         signal.closed_bar_ok, signal.closed_bar_stage = self._closed_bar_verdict(
             candles, vol_window, min_bars, age_sec
         )
+
+    def _shift_would_pass(self, candles: list[dict], min_bars: int) -> int:
+        """Стал бы этот кандидат сигналом, если отбросить формирующийся бар.
+
+        Только запись в `filtered_signals`, на решение не влияет. Прогоняются
+        те же гейты (`check_volume_pattern` + `check_price_trend`) на окне без
+        последнего бара — то есть ровно то, что сделал бы shift-ретрай, будь он
+        здесь разрешён.
+        """
+        shifted = candles[:-1]
+        if len(shifted) < min_bars:
+            return 0
+        self._measuring = True
+        try:
+            if not self.check_volume_pattern(shifted, {}):
+                return 0
+            return int(self.check_price_trend(shifted, {}) == "long")
+        finally:
+            self._measuring = False
 
     def _undersized_verdict_is_trusted(self, last_bar_age_sec: int | None) -> bool:
         """Можно ли верить вердикту «последняя свеча слишком маленькая».
