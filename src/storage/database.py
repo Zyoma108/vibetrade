@@ -99,6 +99,44 @@ async def _create_missing_indexes(conn) -> None:
                 logger.exception(f"Не удалось создать индекс {index.name}")
 
 
+# Индексы, которые create_all() никогда не уберёт сам: он проверяет наличие
+# таблицы и, если она есть, пропускает её целиком. Старые БД тащат лишние
+# индексы за собой, а каждый из них — обслуживание на КАЖДОЙ вставке.
+#
+# `ix_tickers_*` — из-за `ix_tickers_exchange` планировщик выбирал заведомо
+# худший план для `_get_current_price` (см. Ticker.__doc__).
+#
+# `ix_open_interest_exchange` — там же по смыслу: колонка с двумя различными
+# величинами, из-за которой планировщик выбирал худший план для
+# `_write_oi_batch`. Составной индекс из `OpenInterest.__table_args__` его
+# полностью заменяет.
+#
+# `ix_open_interest_symbol` (22.09.2026) — держался на одном запросе
+# `PriceSurgeSignalProcessor._calc_oi_change` «по любой бирже»; тот переписан
+# на `exchange.in_(...)` и попадает в составной индекс. Замер на боевом
+# снапшоте (9.6 млн строк, цикл из 600 монет): 89 мс -> 17 мс, из них INSERT
+# 85 мс -> 10 мс. Индекс рассеян по 666 значениям symbol, то есть каждая
+# вставка — случайная запись страницы; 236 МБ.
+#
+# `ix_candles_exchange` (22.09.2026) — тот же случай двух величин; ни один
+# запрос в коде не фильтрует по одному `exchange`, пару (exchange, symbol)
+# обслуживает уникальный ключ `uq_candle`; 100 МБ.
+OBSOLETE_INDEXES = (
+    "ix_tickers_exchange", "ix_tickers_symbol", "ix_tickers_timestamp",
+    "ix_open_interest_exchange",
+    "ix_open_interest_symbol", "ix_candles_exchange",
+)
+
+
+async def _drop_obsolete_indexes(conn) -> None:
+    """Снести индексы из OBSOLETE_INDEXES, если они остались от старой схемы."""
+    for idx in OBSOLETE_INDEXES:
+        try:
+            await conn.exec_driver_sql(f"DROP INDEX IF EXISTS {idx}")
+        except Exception:
+            logger.warning(f"Не удалось удалить устаревший индекс {idx}")
+
+
 async def init_db() -> None:
     """Создать таблицы и недостающие колонки."""
     from src.storage.models import Base
@@ -184,23 +222,7 @@ async def init_db() -> None:
             except Exception:
                 pass  # колонка уже существует
 
-        # Индексы tickers: create_all() создаёт недостающие, но никогда не убирает
-        # лишние — старые БД тащат за собой одиночные индексы, из-за одного из
-        # которых (ix_tickers_exchange) планировщик выбирал заведомо худший план
-        # для `_get_current_price`. См. Ticker.__doc__.
-        #
-        # `ix_open_interest_exchange` — там же по смыслу: колонка с двумя
-        # различными величинами, из-за которой планировщик выбирал заведомо
-        # худший план для `_write_oi_batch`. Составной индекс из
-        # `OpenInterest.__table_args__` его полностью заменяет (см. её докстринг).
-        for idx in (
-            "ix_tickers_exchange", "ix_tickers_symbol", "ix_tickers_timestamp",
-            "ix_open_interest_exchange",
-        ):
-            try:
-                await conn.exec_driver_sql(f"DROP INDEX IF EXISTS {idx}")
-            except Exception:
-                logger.warning(f"Не удалось удалить устаревший индекс {idx}")
+        await _drop_obsolete_indexes(conn)
 
         # tickers перестала быть журналом и стала снимком (одна строка на монету).
         # На БД, накопленной до этой смены, уникального ключа нет, и upsert упал бы

@@ -194,6 +194,9 @@ class Application:
                     config=self.settings.strategy_price_surge,
                     detector=self._detector_price_surge,
                     timeframe=self.settings.collectors.timeframe,
+                    exchanges=[
+                        name for name, ex in self.settings.exchanges.items() if ex.enabled
+                    ],
                 )
                 logger.info("PriceSurgeSignalProcessor инициализирован")
         elif self.settings.strategy_price_surge:

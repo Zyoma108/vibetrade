@@ -60,14 +60,26 @@ async def _seed_pump(
     """Ровный рост на growth_pct ровно за окно детектора (6 свечей по 3м = 18 мин).
 
     Перед окном — столько же плоских свечей: детектор требует минимум
-    window_bars + 1 баров. `get_active_symbols` берёт только символы, которые
-    есть в тикерах ByBit, поэтому тикер тоже нужен.
+    window_bars + 1 баров.
+
+    Тикеры нужны в ДВУХ ролях, поэтому заводим строку и для bybit, и для той
+    биржи, чьи свечи сеем: `get_active_symbols` берёт список пар из `tickers`
+    (с 22.09.2026 — там же, где раньше стоял SELECT DISTINCT по свечам на
+    585 мс) и отдельно проверяет, что монета листится на ByBit. В проде
+    коллектор пишет тикеры по каждой бирже в том же цикле, что и свечи, —
+    на боевом снапшоте пары со свечами оказались подмножеством пар в тикерах
+    без единого расхождения.
     """
-    exists = await session.scalar(
-        select(Ticker.id).where(Ticker.exchange == "bybit", Ticker.symbol == symbol)
-    )
-    if exists is None:
-        session.add(Ticker(exchange="bybit", symbol=symbol, timestamp=NOW, last=1.0))
+    for ticker_exchange in {"bybit", exchange}:
+        exists = await session.scalar(
+            select(Ticker.id).where(
+                Ticker.exchange == ticker_exchange, Ticker.symbol == symbol
+            )
+        )
+        if exists is None:
+            session.add(
+                Ticker(exchange=ticker_exchange, symbol=symbol, timestamp=NOW, last=1.0)
+            )
 
     window_bars = 6
     flat_bars = 6

@@ -164,7 +164,22 @@ class DataProvider:
     async def get_active_symbols(
         self, session: AsyncSession, exclude_coins: set[str]
     ) -> list[tuple[str, str]]:
-        """Return all (exchange, symbol) pairs traded on ByBit (with candle data)."""
+        """Пары (биржа, монета), торгуемые на ByBit — источник списка для детектора.
+
+        Пары берутся из `tickers`, а не из `candles`. До 22.09.2026 здесь стоял
+        `SELECT DISTINCT exchange, symbol FROM candles`, и это был единственный
+        запрос цикла, растущий ЛИНЕЙНО с историей: он сканировал уникальный
+        индекс свечей целиком, чтобы вернуть ~1200 строк. Замер на боевом
+        снапшоте (6.0 млн свечей): **585 мс против 2 мс** у того же списка из
+        `tickers` — 280-кратная разница, и она продолжала бы расти.
+
+        Замена корректна по составу: `tickers` — снимок того, что коллектор
+        собирает прямо сейчас, и на боевом снапшоте множество пар со свечами
+        оказалось ПОДМНОЖЕСТВОМ пар в тикерах (0 расхождений на 1235 парах).
+        Лишние 66 пар — монеты, по которым история ещё не накоплена; их
+        отсекает существующая проверка `len(candles) < min_bars` в
+        `SetupDetector.analyze()`, ровно как и любую монету с коротким окном.
+        """
         if self._symbols is not None:
             return [
                 (ex, sym) for ex, sym in self._symbols
@@ -177,11 +192,8 @@ class DataProvider:
         )
         bybit_symbols = set(bybit_result.scalars().all())
 
-        # All unique exchange+symbol pairs with candle data
         result = await session.execute(
-            select(Candle.exchange, Candle.symbol)
-            .distinct()
-            .order_by(Candle.exchange, Candle.symbol)
+            select(Ticker.exchange, Ticker.symbol).order_by(Ticker.exchange, Ticker.symbol)
         )
         self._symbols = [
             (ex, sym)

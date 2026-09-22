@@ -5,14 +5,14 @@ Verifies candles are not lost across refresh cycles at intervals
 simulating 5, 10, and 15 minute collector cycles.
 """
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest_asyncio
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from src.analytics.data_provider import CandleCache, DataProvider
-from src.storage.models import Base, Candle
+from src.storage.models import Base, Candle, Ticker
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -669,3 +669,51 @@ class TestCandleCacheStaleTail:
         assert _candle_volumes(third)[-1] == 123_456.0, (
             "свеча, впервые увиденная с нулевым объёмом, потеряна навсегда"
         )
+
+
+class TestActiveSymbolsSource:
+    """Список пар берётся из `tickers`, а не сканом по `candles`.
+
+    До 22.09.2026 здесь стоял `SELECT DISTINCT exchange, symbol FROM candles` —
+    единственный запрос цикла, растущий ЛИНЕЙНО с историей: скан уникального
+    индекса свечей целиком ради ~1200 строк. Замер на боевом снапшоте
+    (6.0 млн свечей): 585 мс против 2 мс у того же списка из тикеров.
+    """
+
+    async def test_pair_without_ticker_row_is_not_scanned(self, session):
+        """Свечи есть, тикера нет — пара не попадает в список.
+
+        В проде коллектор пишет тикеры по каждой бирже в том же цикле, что и
+        свечи (на боевом снапшоте расхождений ноль). Тест фиксирует сам
+        контракт: источник списка — тикеры.
+        """
+        session.add(Ticker(exchange="bybit", symbol="AAA/USDT",
+                           timestamp=datetime.now(tz=timezone.utc), last=1.0))
+        session.add(Candle(exchange="binance", symbol="AAA/USDT",
+                           timestamp=datetime.now(tz=timezone.utc),
+                           open=1, high=1, low=1, close=1, volume=1))
+        await session.commit()
+
+        pairs = await DataProvider().get_active_symbols(session, set())
+        assert ("bybit", "AAA/USDT") in pairs
+        assert ("binance", "AAA/USDT") not in pairs
+
+    async def test_symbol_not_listed_on_bybit_is_dropped(self, session):
+        """Монета без тикера ByBit не сканируется ни на одной бирже —
+        торгуем только то, что есть на бирже исполнения."""
+        session.add(Ticker(exchange="binance", symbol="BBB/USDT",
+                           timestamp=datetime.now(tz=timezone.utc), last=1.0))
+        await session.commit()
+
+        assert await DataProvider().get_active_symbols(session, set()) == []
+
+    async def test_pair_without_candles_is_returned_and_skipped_downstream(self, session):
+        """Новая монета без истории в список попадает — её отсекает уже
+        проверка длины окна в детекторе, как и любую монету с коротким окном."""
+        now = datetime.now(tz=timezone.utc)
+        session.add(Ticker(exchange="bybit", symbol="NEW/USDT", timestamp=now, last=1.0))
+        await session.commit()
+
+        dp = DataProvider()
+        assert ("bybit", "NEW/USDT") in await dp.get_active_symbols(session, set())
+        assert await dp.load_candles(session, "bybit", "NEW/USDT", 84) == []

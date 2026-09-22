@@ -9,10 +9,20 @@ class Base(DeclarativeBase):
 
 
 class Candle(Base):
+    """Свечи OHLCV.
+
+    `ix_candles_exchange` удалён 22.09.2026 — ровно тот же случай, что у
+    `Ticker` и `OpenInterest`: колонка с двумя различными величинами, по
+    которой планировщик может отобрать лишь половину таблицы. Ни один запрос
+    в коде не фильтрует по одному `exchange` — везде он идёт в паре с
+    `symbol`, а эту пару обслуживает уникальный ключ `uq_candle`. Цена
+    индекса была 100 МБ и лишнее обслуживание на каждой вставке.
+    """
+
     __tablename__ = "candles"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    exchange: Mapped[str] = mapped_column(String(32), index=True)
+    exchange: Mapped[str] = mapped_column(String(32))
     symbol: Mapped[str] = mapped_column(String(32), index=True)
     timestamp: Mapped[datetime] = mapped_column(index=True)
     open: Mapped[float] = mapped_column(Float)
@@ -70,10 +80,22 @@ class OpenInterest(Base):
     что была у `Ticker` (см. её докстринг), — там вылечили, здесь пропустили.
 
     `ix_open_interest_exchange` удалён как бесполезный (две различные
-    величины) — он только удорожал вставку. `ix_open_interest_symbol`
-    оставлен: `PriceSurgeSignalProcessor._calc_oi_change` спрашивает по
-    одному symbol без exchange. `ix_open_interest_timestamp` оставлен ради
-    `SELECT MAX(timestamp)` в загрузчике бэктеста.
+    величины) — он только удорожал вставку. `ix_open_interest_symbol` удалён
+    22.09.2026: он держался на одном запросе
+    `PriceSurgeSignalProcessor._calc_oi_change` «по любой бирже», который
+    переписан на `exchange.in_(...)` и теперь попадает в составной индекс.
+    Цена индекса была несоразмерна: 236 МБ и львиная доля времени записи —
+    замер на боевом снапшоте (9.6 млн строк, цикл из 600 монет) дал
+    89 мс с тремя индексами против 17 мс без него; INSERT ускорился с 85 до
+    10 мс. Индекс по symbol рассеян по 666 значениям, то есть каждая вставка
+    — случайная запись страницы.
+
+    `ix_open_interest_timestamp` оставлен: на нём держится удаление по
+    ретенции (`WHERE timestamp < cutoff` батчами) и `SELECT MAX(timestamp)`
+    в загрузчике бэктеста. Снять его можно только вместе с переводом
+    ретенции на диапазон по `id` — он в этой таблице монотонен по времени
+    (0 нарушений на 9.6 млн строк), но это уже изменение логики удаления
+    данных, и отдельной проверки стоит ещё 369 МБ и ~4% времени цикла.
     """
 
     __tablename__ = "open_interest"
@@ -84,7 +106,7 @@ class OpenInterest(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     exchange: Mapped[str] = mapped_column(String(32))
-    symbol: Mapped[str] = mapped_column(String(32), index=True)
+    symbol: Mapped[str] = mapped_column(String(32))
     timestamp: Mapped[datetime] = mapped_column(index=True)
     value: Mapped[float] = mapped_column(Float)
 
