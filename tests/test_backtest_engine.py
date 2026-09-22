@@ -18,9 +18,11 @@ from datetime import datetime, timedelta
 
 import pytest
 
+from src.analytics.detector import SetupDetector
 from src.backtest.engine import (
     BACKTEST_VIRTUAL_BALANCE,
     _round_to_lot,
+    build_volume_gate_mask,
     load_data,
     simulate,
 )
@@ -238,7 +240,11 @@ def test_candle_slice_matches_live_detector_window(golden_db, monkeypatch):
         return original(self, candles, context)
 
     monkeypatch.setattr(det_mod.SetupDetector, "check_volume_pattern", spy)
-    simulate(settings, load_data(golden_db), has_oi=True)
+    # prefilter=False намеренно: предмет теста — геометрия среза, а предфильтр
+    # решает лишь, строить ли срез вообще, и на баре без кандидата детектор
+    # просто не вызывается. Что предфильтр не съедает настоящих кандидатов,
+    # проверяет TestVolumeGatePrefilter.
+    simulate(settings, load_data(golden_db), has_oi=True, prefilter=False)
 
     assert seen, "детектор должен был вызываться"
     # Ближе к началу истории баров меньше — важен максимум (полное окно)
@@ -664,3 +670,111 @@ def test_symbol_missing_from_lot_metadata_is_reported(golden_db):
 
     assert result["trades"] == 1, "сделка состоялась, объём не округлялся"
     assert result["symbols_without_lot_meta"] == [SYMBOL]
+
+
+# ---------------------------------------------------------------------------
+# Векторный предфильтр по объёму
+# ---------------------------------------------------------------------------
+#
+# Предфильтр обязан быть НАДМНОЖЕСТВОМ гейта детектора: он отсекает только те
+# бары, на которых check_volume_pattern гарантированно вернёт False. Если он
+# съест хотя бы одного настоящего кандидата, результат бэктеста поедет молча —
+# ровно тот класс регрессий, из-за которого в проекте появилось правило 3.
+
+
+def _noisy_market_db(path, n_symbols: int = 6, n_bars: int = 420, seed: int = 20260922):
+    """Случайные монеты со всплесками объёма разной силы, в т.ч. пограничными.
+
+    Смысл фикстуры — не «реалистичный рынок», а множество баров рядом с порогом
+    всплеска: именно там ошибка выравнивания предфильтра на один бар и вылезет.
+    Часть всплесков сопровождается ростом цены и доходит до сигнала, часть —
+    нет; и то и другое полезно, лишь бы сигналы вообще были.
+    """
+    import random
+
+    rnd = random.Random(seed)
+    burst_mults = [3.0, 4.6, 4.9, 5.1, 5.4, 8.0]
+    candles, oi = [], []
+    for s_i in range(n_symbols):
+        symbol = f"SYM{s_i}/USDT:USDT"
+        price = 10.0 * (s_i + 1)
+        burst_at = set()
+        for start in range(90, n_bars - 40, 47):
+            burst_at.update({start, start + 1, start + 2, start + 3})
+        for i in range(n_bars):
+            vol = rnd.uniform(900, 1100)
+            if i in burst_at:
+                vol *= burst_mults[(i + s_i) % len(burst_mults)]
+                price *= 1.006           # ~2.4% за четыре бара окна
+            elif (i + s_i) % 37 == 0:
+                vol *= rnd.choice(burst_mults)   # всплеск объёма без роста цены
+                price *= 1 + rnd.uniform(-0.0008, 0.0008)
+            else:
+                price *= 1 + rnd.uniform(-0.0008, 0.0008)
+            candles.append(("bybit", symbol, _ts(i), price, price * 1.002,
+                            price * 0.998, price, vol))
+            oi.append(("bybit", symbol, _ts(i), 1_000_000.0 + i * 100))
+    _write_db(path, candles, oi)
+
+
+class TestVolumeGatePrefilter:
+    def test_results_are_identical_with_and_without(self, tmp_path):
+        """Главная проверка: посделочный список обязан совпасть целиком."""
+        db = tmp_path / "noisy.db"
+        _noisy_market_db(db)
+        data = load_data(str(db))
+        settings = _settings()
+
+        slow = simulate(settings, data, has_oi=True, prefilter=False)
+        fast = simulate(settings, data, has_oi=True, prefilter=True)
+
+        assert slow["signals"] > 0, "фикстура обязана давать сигналы, иначе тест пустой"
+        assert fast["trades_list"] == slow["trades_list"]
+        assert fast["signals"] == slow["signals"]
+        assert fast["total_pnl"] == slow["total_pnl"]
+        assert fast["prefiltered"] > 0, "предфильтр обязан хоть что-то отсекать"
+
+    def test_identical_across_strategy_thresholds(self, tmp_path):
+        """То же на других порогах: маска строится по конфигу, и сдвиг
+        baseline_bars/sustain_bars не должен её ломать."""
+        db = tmp_path / "noisy.db"
+        _noisy_market_db(db)
+        data = load_data(str(db))
+
+        for mult, min_usdt in ((3.0, 0.0), (5.0, 0.0), (5.0, 5_000.0), (7.0, 0.0)):
+            settings = _settings()
+            settings.strategy.volume_surge_mult = mult
+            settings.strategy.min_baseline_volume_usdt = min_usdt
+            slow = simulate(settings, data, has_oi=True, prefilter=False)
+            fast = simulate(settings, data, has_oi=True, prefilter=True)
+            assert fast["trades_list"] == slow["trades_list"], (mult, min_usdt)
+
+    def test_mask_admits_every_bar_the_detector_would_accept(self, tmp_path):
+        """Прямая проверка надмножества: на каждом баре, где детектор сказал бы
+        «да», маска обязана быть True."""
+        db = tmp_path / "noisy.db"
+        _noisy_market_db(db)
+        data = load_data(str(db))
+        settings = _settings()
+        detector = SetupDetector(settings.strategy,
+                                 timeframe=settings.collectors.timeframe)
+        mask = build_volume_gate_mask(data["symbols"], detector.config)
+
+        need = settings.strategy.baseline_bars + settings.strategy.sustain_bars
+        checked = accepted = 0
+        for sym, rows in data["symbols"].items():
+            for i in range(need, len(rows)):
+                candle_slice = [
+                    {"open": r[1], "high": r[2], "low": r[3],
+                     "close": r[4], "volume": r[5]}
+                    for r in rows[max(0, i - need - 9):i + 1]
+                ]
+                if len(candle_slice) < need:
+                    continue
+                checked += 1
+                for window in (candle_slice, candle_slice[:-1]):
+                    if len(window) >= need and detector.check_volume_pattern(window, {}):
+                        accepted += 1
+                        assert mask[sym][i], f"{sym} бар {i}: маска съела кандидата"
+                        break
+        assert checked > 0 and accepted > 0, (checked, accepted)

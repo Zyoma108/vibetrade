@@ -134,6 +134,88 @@ def _round_to_lot(qty: float, meta: dict | None) -> float:
     return qty
 
 
+
+def build_volume_gate_mask(symbols: dict, cfg, slice_pad: int = 10) -> dict:
+    """Векторный ПРЕДФИЛЬТР по объёму: где сигнал в принципе невозможен.
+
+    Это не вторая реализация детектора (правило 2 AGENTS.md) — решение
+    по-прежнему принимает `SetupDetector.check_volume_pattern`. Здесь считается
+    только НЕОБХОДИМОЕ условие: если оно не выполнено, детектор гарантированно
+    вернёт False, и строить срез из 84 словарей незачем.
+
+    Условие берётся из самого начала check_volume_pattern:
+
+        baseline  = median(volumes[:baseline_bars])          # бары [i-83 .. i-14]
+        threshold = baseline * volume_surge_mult
+        all(volumes[-sustain:] >= threshold)                  # бары [i-3 .. i]
+
+    Плюс shift-ретрай движка проверяет срез без последнего бара: baseline у него
+    ТОТ ЖЕ (первые baseline_bars того же среза), а sustain-окно сдвинуто на бар
+    назад — бары [i-4 .. i-1]. Поэтому допускаем бар, если проходит любое из двух.
+
+    Плюс порог ликвидности min_baseline_volume_usdt на том же baseline-окне.
+
+    Почему это безопасно:
+      * множитель берётся БАЗОВЫЙ, а cautious-режим его только повышает, то есть
+        маска шире реального гейта;
+      * края (короткий срез в начале истории монеты) пропускаются без проверки —
+        там детектор решает сам;
+      * любое сомнение трактуется в сторону «пропустить дальше».
+
+    Возвращает symbol → np.ndarray(bool) по индексу бара.
+    """
+    import numpy as _np
+    import pandas as _pd
+
+    baseline_bars = cfg.baseline_bars
+    sustain = cfg.sustain_bars
+    need = baseline_bars + sustain
+    full_slice = need + slice_pad          # длина среза, который строит движок
+    lag = full_slice - baseline_bars       # сдвиг конца baseline-окна от текущего бара
+    mult = cfg.volume_surge_mult
+    min_usdt = cfg.min_baseline_volume_usdt
+
+    masks = {}
+    for sym, rows in symbols.items():
+        n = len(rows)
+        mask = _np.ones(n, dtype=bool)
+        if n <= full_slice:
+            masks[sym] = mask                   # вся история — край, решает детектор
+            continue
+
+        vol = _np.fromiter((r[5] for r in rows), dtype=float, count=n)
+        close = _np.fromiter((r[4] for r in rows), dtype=float, count=n)
+        vs = _pd.Series(vol)
+
+        base_med = vs.rolling(baseline_bars).median().to_numpy()
+        min_sustain = vs.rolling(sustain).min().to_numpy()
+        close_med = _pd.Series(close).rolling(baseline_bars).median().to_numpy()
+
+        # baseline для бара i заканчивается на баре i-lag
+        idx = _np.arange(n)
+        src = idx - lag
+        ok_src = src >= 0
+
+        bm = _np.full(n, _np.nan)
+        cm = _np.full(n, _np.nan)
+        bm[ok_src] = base_med[src[ok_src]]
+        cm[ok_src] = close_med[src[ok_src]]
+
+        thr = bm * mult
+        cur = min_sustain                                   # бары [i-sustain+1 .. i]
+        prev = _np.concatenate(([_np.nan], min_sustain[:-1]))  # бары [i-sustain .. i-1]
+
+        with _np.errstate(invalid="ignore"):
+            passes = (bm > 0) & ((cur >= thr) | (prev >= thr))
+            if min_usdt > 0:
+                passes &= (bm * cm) >= min_usdt
+
+        # Бары, где срез короче полного, не фильтруем — там индексация другая.
+        edge = idx < full_slice
+        masks[sym] = passes | edge | _np.isnan(bm)
+    return masks
+
+
 def _bar(rows, idx):
     if 0 <= idx < len(rows):
         return rows[idx]
@@ -290,13 +372,17 @@ def compute_retracement_pct(candle_slice, sustain):
 
 
 def simulate(settings, data, has_oi: bool = True, collect_retracement: bool = True,
-             markets: dict | None = None):
+             markets: dict | None = None, prefilter: bool = True):
     """Цикл симуляции.
 
     `markets` — метаданные инструментов биржи (symbol → {step, min_amount}) из
     scripts/fetch_market_meta.py. Переданы — объём округляется вниз до шага
     лота и сделка отбрасывается, если после округления остался ноль, ровно как
     в бою. Не переданы — объём дробный, как было до 22.09.2026.
+
+    `prefilter` — векторный предфильтр по объёму (build_volume_gate_mask). На
+    результат влиять не должен: он лишь пропускает бары, на которых детектор
+    гарантированно откажет. Выключается для проверки этого утверждения.
     """
     cfg = settings.trading
     detector = SetupDetector(settings.strategy, timeframe=settings.collectors.timeframe)
@@ -313,6 +399,7 @@ def simulate(settings, data, has_oi: bool = True, collect_retracement: bool = Tr
     closed_trades: list[SimPosition] = []
     signals_count = 0
     amount_too_small = 0
+    prefiltered = 0
     # Монеты, которых нет в метаданных биржи: они торгуются дробным объёмом,
     # то есть по старой модели. Молча это делать нельзя — устаревший файл
     # метаданных иначе вернул бы прежнее поведение незаметно.
@@ -335,6 +422,8 @@ def simulate(settings, data, has_oi: bool = True, collect_retracement: bool = Tr
 
     need_bars = detector.config.baseline_bars + detector.config.sustain_bars
     sustain = detector.config.sustain_bars
+
+    gate_mask = build_volume_gate_mask(symbols, detector.config) if prefilter else None
 
     # Каданс поиска новых сигналов синхронизирован с реальной скоростью коллектора
     # (settings.collectors.scan_cycle_seconds), а не захардкожен — см. runner.py
@@ -517,6 +606,16 @@ def simulate(settings, data, has_oi: bool = True, collect_retracement: bool = Tr
             bar_idx = sym_ts_to_idx.get(sym, {}).get(ts, -1)
             if bar_idx < 0 or bar_idx < need_bars:
                 continue
+
+            # Предфильтр: необходимое условие гейта объёма, посчитанное векторно
+            # один раз на всю историю. Отсекает подавляющее большинство пар
+            # (монета, бар) до построения среза из 84 словарей — самой дорогой
+            # операции цикла. Решение по-прежнему за детектором.
+            if gate_mask is not None:
+                sym_mask = gate_mask.get(sym)
+                if sym_mask is not None and not sym_mask[bar_idx]:
+                    prefiltered += 1
+                    continue
 
             # Ровно столько же баров, сколько грузит боевой детектор
             # (SetupDetector.analyze: limit = baseline_bars + sustain_bars + 10).
@@ -740,6 +839,7 @@ def simulate(settings, data, has_oi: bool = True, collect_retracement: bool = Tr
         "vol_stage_counts": vol_stage_counts,
         "shift_used_count": shift_used_count,
         "amount_too_small": amount_too_small,
+        "prefiltered": prefiltered,
         "symbols_without_lot_meta": sorted(symbols_without_meta),
         "trades_list": trades_out,
         "period": f"{all_timestamps[0]} -> {all_timestamps[-1]}" if all_timestamps else "",
