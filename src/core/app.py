@@ -134,7 +134,7 @@ class Application:
             # Провайдер статистики
             async def stats_provider(period: str) -> str:
                 async with async_session() as s:
-                    return await trade_stats(s, period)
+                    return await trade_stats(s, period, self.settings.trading)
 
             self._notifier.set_stats_provider(stats_provider)
 

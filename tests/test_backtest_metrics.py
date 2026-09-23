@@ -344,3 +344,71 @@ def test_empty_summary_has_the_new_keys():
     out = summarize([])
     for key in ("wins", "breakevens", "losses", "win_rate", "breakeven_rate", "loss_rate"):
         assert key in out
+
+
+# ---------------------------------------------------------------------------
+# Безубыток засчитывается в победы пропорционально прибыли от полного тейка
+# ---------------------------------------------------------------------------
+
+
+def test_breakeven_credit_matches_the_arithmetic():
+    from src.backtest.metrics import breakeven_credit
+
+    # доля 20%, RR 2.0, триггер 35% пути до TP:
+    # забронировано 0.20*2.0*0.35 = 0.14R, полный тейк 0.14 + 0.80*2.0 = 1.74R
+    assert breakeven_credit(2.0, 35.0, 20.0) == pytest.approx(0.14 / 1.74, rel=1e-9)
+    assert 1 / breakeven_credit(2.0, 35.0, 20.0) == pytest.approx(12.43, abs=0.01)
+
+
+def test_no_partial_means_no_credit():
+    """Доля 0% — на триггере не бронируется ничего, зачитывать нечего."""
+    from src.backtest.metrics import breakeven_credit
+
+    assert breakeven_credit(2.0, 35.0, 0.0) == 0.0
+
+
+def test_weighted_win_rate_credits_breakevens():
+    from src.backtest.metrics import breakeven_credit, outcome_counts
+
+    trades = ([_trade(100.0, 110.0, +2.0)] * 27
+              + [_trade(100.0, 100.0, +0.12)] * 41
+              + [_trade(100.0, 95.0, -1.0)] * 40)
+    c = outcome_counts(trades, be_credit=breakeven_credit(2.0, 35.0, 20.0))
+    assert (c["wins"], c["breakevens"], c["losses"]) == (27, 41, 40)
+    assert c["win_rate"] == 25.0                       # три колонки не меняются
+    assert c["breakeven_equivalent_wins"] == pytest.approx(3.3, abs=0.05)
+    assert c["win_rate_weighted"] == pytest.approx(28.1, abs=0.1)
+
+
+def test_unprofitable_breakeven_gets_no_credit():
+    """Комиссия съела забронированную часть — зачитывать нечего."""
+    from src.backtest.metrics import outcome_counts
+
+    c = outcome_counts([_trade(100.0, 100.0, -0.01)] * 10, be_credit=0.08)
+    assert c["breakevens"] == 10
+    assert c["breakeven_equivalent_wins"] == 0.0
+    assert c["win_rate_weighted"] == 0.0
+
+
+def test_weighted_keys_absent_without_credit():
+    """Без веса отчёт остаётся прежним — колонка просто не появляется."""
+    from src.backtest.metrics import outcome_counts
+
+    c = outcome_counts([_trade(100.0, 100.0, +0.12)])
+    assert "win_rate_weighted" not in c
+    assert "breakeven_credit" not in c
+
+
+def test_weighted_win_rate_is_not_a_decision_metric():
+    """Вес растёт с долей партиала, а ΣR при этом падает — поэтому взвешенный
+    winrate отчётный, а решение принимается по E[R] (AGENTS.md, правило 8).
+
+    Свип 22.09.2026 на двух БД: ΣR убывает монотонно с ростом доли (−0.036R на
+    каждые +10 п.п. на 27.08-22.09). Вес же растёт, потому что растёт и
+    забронированная часть, и одновременно обесценивается полный тейк.
+    """
+    from src.backtest.metrics import breakeven_credit
+
+    assert (breakeven_credit(2.0, 35.0, 20.0)
+            < breakeven_credit(2.0, 35.0, 50.0)
+            < breakeven_credit(2.0, 35.0, 80.0))

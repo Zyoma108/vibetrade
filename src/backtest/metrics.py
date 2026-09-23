@@ -89,7 +89,31 @@ def outcome(trade, band_pct: float = BREAKEVEN_BAND_PCT) -> str:
     return WIN if move > 0 else LOSS
 
 
-def outcome_counts(trades, band_pct: float = BREAKEVEN_BAND_PCT) -> dict:
+def breakeven_credit(risk_reward_ratio: float, partial_close_pct: float,
+                     partial_close_qty_pct: float) -> float:
+    """Какую долю полного тейка приносит безубыток. 0.0 — партиала нет вовсе.
+
+    Безубыток отдаёт только часть, забронированную на триггере:
+    `доля × RR × порог/100` в единицах R. Полный тейк отдаёт её же плюс остаток
+    позиции по TP. При текущем конфиге (доля 20%, RR 2.0, триггер 35% пути до TP)
+    это 0.14R против 1.74R, то есть **один полный тейк = 12.4 безубытка**.
+    Замер нетто на 26 сутках (27.08-22.09.2026) дал +0.12R против +1.72R, то есть
+    14.3 — расхождение целиком комиссионное, и формула даёт верхнюю оценку
+    вклада примерно на 15% относительно.
+
+    Величина считается по ТЕКУЩЕМУ конфигу, поэтому отчёт за период, внутри
+    которого конфиг менялся, приблизителен: на доле партиала 30% (до 22.09.2026)
+    вес был 0.130, то есть 7.7 безубытка на тейк. Точнее без хранения конфига у
+    каждой сделки не получится.
+    """
+    q = partial_close_qty_pct / 100
+    banked = q * risk_reward_ratio * partial_close_pct / 100
+    full = banked + (1 - q) * risk_reward_ratio
+    return banked / full if full else 0.0
+
+
+def outcome_counts(trades, band_pct: float = BREAKEVEN_BAND_PCT,
+                   be_credit: float | None = None) -> dict:
     """Три счётчика исходов плюс доли. Знаменатель всех долей — ВСЕ сделки.
 
     Безубыток из знаменателя не выносится. Вынести — значит снова сделать
@@ -100,14 +124,28 @@ def outcome_counts(trades, band_pct: float = BREAKEVEN_BAND_PCT) -> dict:
     """
     n = len(trades)
     c = {WIN: 0, BREAKEVEN: 0, LOSS: 0}
+    be_profitable = 0
     for t in trades:
-        c[outcome(t, band_pct)] += 1
-    return {
+        o = outcome(t, band_pct)
+        c[o] += 1
+        if o == BREAKEVEN and (t.get("pnl") or 0.0) > 0:
+            be_profitable += 1
+    out = {
         "wins": c[WIN], "breakevens": c[BREAKEVEN], "losses": c[LOSS],
         "win_rate": round(100 * c[WIN] / n, 1) if n else None,
         "breakeven_rate": round(100 * c[BREAKEVEN] / n, 1) if n else None,
         "loss_rate": round(100 * c[LOSS] / n, 1) if n else None,
     }
+    if be_credit is not None:
+        # Безубыток засчитывается в победы ПРОПОРЦИОНАЛЬНО прибыли от полного
+        # тейка: 12.4 безубытка = один тейк при текущем конфиге. Кредит дают
+        # только безубытки с положительным PnL — у остальных комиссия съела
+        # забронированную часть, и зачитывать там нечего.
+        equiv = be_profitable * be_credit
+        out["breakeven_credit"] = round(be_credit, 4)
+        out["breakeven_equivalent_wins"] = round(equiv, 2)
+        out["win_rate_weighted"] = round(100 * (c[WIN] + equiv) / n, 1) if n else None
+    return out
 
 
 def bootstrap_ci(values, confidence: float = 0.95, resamples: int = BOOTSTRAP_RESAMPLES,
@@ -176,7 +214,8 @@ def equity_metrics(trades, risk_key: str = "risk"):
     return {"max_drawdown_R": round(max_dd, 2), "worst_loss_streak": worst_streak}
 
 
-def summarize(trades, days: float | None = None, deposit: float | None = None):
+def summarize(trades, days: float | None = None, deposit: float | None = None,
+              be_credit: float | None = None):
     """Полный набор метрик решения по списку закрытых сделок (`trades_list`).
 
     `trades` — словари из `engine.simulate()`; обязателен ключ `risk` (бюджет
@@ -199,6 +238,9 @@ def summarize(trades, days: float | None = None, deposit: float | None = None):
             "profit_factor": None, "win_rate": None, "total_pnl": 0.0,
             "wins": 0, "breakevens": 0, "losses": 0,
             "breakeven_rate": None, "loss_rate": None,
+            **({"breakeven_credit": round(be_credit, 4),
+                "breakeven_equivalent_wins": 0.0,
+                "win_rate_weighted": None} if be_credit is not None else {}),
             "max_drawdown_R": 0.0, "worst_loss_streak": 0,
             "hold_hours_median": None, "hold_hours_p90": None,
         }
@@ -238,7 +280,7 @@ def summarize(trades, days: float | None = None, deposit: float | None = None):
         "total_R": round(sum(rs), 2) if rs else None,
         "sd_R": round(st.pstdev(rs), 3) if len(rs) > 1 else None,
         "profit_factor": round(gross_win / gross_loss, 3) if gross_loss else None,
-        **outcome_counts(trades),
+        **outcome_counts(trades, be_credit=be_credit),
         "total_pnl": round(sum(pnls), 2),
         **equity_metrics(trades),
     }

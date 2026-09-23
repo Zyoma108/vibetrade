@@ -28,7 +28,7 @@ from pathlib import Path
 
 from src.analytics.detector import SetupDetector
 from src.analytics.utils import OI_TREND_BARS, oi_trend_passes, timeframe_to_minutes
-from src.backtest.metrics import summarize
+from src.backtest.metrics import breakeven_credit, summarize
 
 
 # Депозит бэктеста по умолчанию; переопределяется trading.backtest_deposit_usdt.
@@ -829,7 +829,11 @@ def simulate(settings, data, has_oi: bool = True, collect_retracement: bool = Tr
     days = None
     if all_timestamps and len(all_timestamps) > 1:
         days = (all_timestamps[-1] - all_timestamps[0]).total_seconds() / 86400 or None
-    summary = summarize(trades_out, days=days, deposit=deposit)
+    summary = summarize(
+        trades_out, days=days, deposit=deposit,
+        be_credit=breakeven_credit(cfg.risk_reward_ratio, cfg.partial_close_pct,
+                                   cfg.partial_close_qty_pct),
+    )
 
     return {
         **summary,

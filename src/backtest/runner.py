@@ -15,7 +15,7 @@ import logging
 from pathlib import Path
 
 from src.backtest.engine import DEFAULT_MARKETS_PATH, load_data, load_markets, simulate
-from src.backtest.metrics import outcome_counts
+from src.backtest.metrics import breakeven_credit, outcome_counts
 from src.config import Settings
 
 logger = logging.getLogger(__name__)
@@ -36,8 +36,12 @@ def run_backtest(config_path: str, db_path: str, has_oi: bool = True,
     return simulate(settings, data, has_oi=has_oi, markets=load_markets(markets_path))
 
 
-def _load_live_stats(db_path: str) -> dict | None:
-    """Загрузить статистику реальных сделок из БД."""
+def _load_live_stats(db_path: str, trading=None) -> dict | None:
+    """Загрузить статистику реальных сделок из БД.
+
+    `trading` — конфиг сделок: нужен только для веса безубытка в
+    взвешенном winrate, без него колонка просто не появится.
+    """
     import sqlite3
 
     try:
@@ -64,10 +68,12 @@ def _load_live_stats(db_path: str) -> dict | None:
     total_pnl = sum(t[6] or 0 for t in trades)
     # Классификация исхода — общая с движком (metrics.outcome): безубыток
     # отдельным классом, иначе снятая с б/у стопа сделка попадает в «плюс».
-    counts = outcome_counts([
-        {"entry_price": t[2], "exit_price": t[3], "pnl": t[6] or 0.0, "direction": t[1]}
-        for t in trades
-    ])
+    counts = outcome_counts(
+        [{"entry_price": t[2], "exit_price": t[3], "pnl": t[6] or 0.0, "direction": t[1]}
+         for t in trades],
+        be_credit=(breakeven_credit(trading.risk_reward_ratio, trading.partial_close_pct,
+                                    trading.partial_close_qty_pct) if trading else None),
+    )
 
     # Диапазон дат
     entry_times = [t[4] for t in trades if t[4]]
@@ -114,15 +120,16 @@ def _print_comparison(bt: dict, live: dict | None) -> None:
 
     rows = [
         ("Сделок", str(bt["trades"]), str(live["trades"]) if live else "—"),
-        ("Плюс / б/у / минус",
+        ("Тейк / б/у / стоп",
          f"{bt['wins']} / {bt['breakevens']} / {bt['losses']}",
          f"{live['wins']} / {live['breakevens']} / {live['losses']}" if live else "—"),
-        ("Win rate (б/у в знаменателе)",
+        ("Win rate (б/у не в счёт)",
          f"{bt['win_rate']}%",
          f"{live['win_rate']}%" if live else "—"),
-        ("Доля безубытков",
-         f"{bt['breakeven_rate']}%",
-         f"{live['breakeven_rate']}%" if live else "—"),
+        (f"Win rate (б/у по {1/bt['breakeven_credit']:.1f} за тейк)"
+         if bt.get("breakeven_credit") else "Win rate взвешенный",
+         f"{bt.get('win_rate_weighted', '—')}%",
+         f"{live.get('win_rate_weighted', '—')}%" if live else "—"),
         ("Total PnL",
          f"${bt['total_pnl']:+.2f}",
          f"${live['total_pnl']:+.2f}" if live else "—"),
@@ -201,8 +208,11 @@ def main():
         print("Нет данных")
         return
 
-    # Загружаем реальные сделки из той же БД (если есть)
-    live = _load_live_stats(args.db)
+    # Загружаем реальные сделки из той же БД (если есть). Конфиг нужен для
+    # веса безубытка — он берётся из ТЕКУЩЕГО конфига, поэтому на периоде, где
+    # доля партиала менялась, взвешенный winrate приблизителен (см.
+    # metrics.breakeven_credit).
+    live = _load_live_stats(args.db, Settings.from_yaml(args.config).trading)
 
     # Сводка бэктеста
     print("\n" + "=" * 60)
@@ -227,9 +237,14 @@ def main():
     print(f"  Период:            {result['period']}")
     print(f"  Сигналов:          {result['signals']}")
     print(f"  Сделок:            {result['trades']}")
-    print(f"  Плюс / б/у / минус: {result['wins']} / {result['breakevens']} / {result['losses']}")
-    print(f"  Win rate:          {result['win_rate']}% (безубытки в знаменателе, "
+    print(f"  Тейк / б/у / стоп: {result['wins']} / {result['breakevens']} / {result['losses']}")
+    print(f"  Win rate:          {result['win_rate']}% (безубытки не в счёт, "
           f"их доля {result['breakeven_rate']}%)")
+    if result.get("breakeven_credit"):
+        print(f"  Win rate взвеш.:   {result['win_rate_weighted']}% "
+              f"(безубыток = {result['breakeven_credit']:.3f} тейка, "
+              f"{1/result['breakeven_credit']:.1f} безубытка на тейк; "
+              f"зачтено {result['breakeven_equivalent_wins']} побед)")
     print(f"  Total PnL:         ${result['total_pnl']:+.2f} (net of fees)")
     print(f"  Средний PnL:       ${result['avg_pnl']:+.2f}")
 
