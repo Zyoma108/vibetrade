@@ -187,3 +187,48 @@ def test_none_verdict_is_not_written_as_zero():
                                            datetime.now(tz=timezone.utc))
     assert row.closed_bar_ok is None
     assert row.volume_window_shifted is None
+
+
+# ---------------------------------------------------------------------------
+# Настройки SQLite
+# ---------------------------------------------------------------------------
+#
+# До 23.09.2026 в проекте был выставлен ровно один PRAGMA — journal_mode=WAL, а
+# всё остальное осталось на дефолтах SQLite. Дефолтный кеш (7.8 МБ) оказался
+# РАВЕН рабочему множеству одного цикла сбора (6.6 МБ: 560 монет × три индекса
+# с префиксом symbol), а порог чекпойнта WAL (3.9 МБ) — вдвое меньше него, то
+# есть чекпойнт случался чаще, чем раз в цикл. Настройки легко потерять при
+# правке `_set_journal_mode`, поэтому они закреплены тестом.
+
+
+@pytest.mark.asyncio
+async def test_sqlite_pragmas_are_configured():
+    from src.storage.database import (
+        CACHE_SIZE_KIB,
+        WAL_AUTOCHECKPOINT_PAGES,
+        engine,
+    )
+
+    async with engine.connect() as conn:
+        async def pragma(name):
+            return (await conn.exec_driver_sql(f"PRAGMA {name}")).fetchone()[0]
+
+        assert (await pragma("journal_mode")) == "wal"
+        # Отрицательное значение — кибибайты, положительное — страницы.
+        assert (await pragma("cache_size")) == -CACHE_SIZE_KIB
+        assert (await pragma("wal_autocheckpoint")) == WAL_AUTOCHECKPOINT_PAGES
+        assert (await pragma("synchronous")) == 1, "NORMAL, а не дефолтный FULL"
+
+
+@pytest.mark.asyncio
+async def test_connection_pool_is_bounded():
+    """Кеш страниц выделяется НА СОЕДИНЕНИЕ, а на VPS 1 ГБ памяти.
+
+    Дефолтный пул SQLAlchemy (5 + 10 overflow) дал бы до 15 кешей по 16 МБ.
+    """
+    from src.storage.database import CACHE_SIZE_KIB, engine
+
+    pool = engine.pool
+    max_conns = pool.size() + pool._max_overflow
+    assert max_conns <= 3, "пул не ограничен — потолок памяти под кеши уедет"
+    assert max_conns * CACHE_SIZE_KIB / 1024 <= 64, "суммарный кеш больше 64 МБ"
