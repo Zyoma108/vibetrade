@@ -115,3 +115,75 @@ class TestHasUniqueIndex:
         con.execute("CREATE INDEX ix ON t (a, b)")
         con.close()
         assert await self._check(path, "t", ("a", "b")) is False
+
+
+# ---------------------------------------------------------------------------
+# Перенос полей замера из датакласса детектора в строку БД
+# ---------------------------------------------------------------------------
+#
+# 22.09.2026 `volume_window_shifted` добавили в ORM-модель и в детектор, но
+# перенос в `core/app.py` собирался явным списком полей, и поле в него не
+# попало. Датакласс `Signal` не использует __slots__, поэтому присваивание
+# неописанного атрибута не упало — колонка просто стояла NULL у всех сигналов,
+# и замер, ради которого её вводили, сутки не собирался. Эти тесты закрывают
+# именно этот класс ошибки: не «маппинг работает», а «новое поле нельзя
+# добавить так, чтобы оно молча потерялось».
+
+
+def _detector_signal(**over):
+    from src.analytics.base import Signal
+
+    fields = dict(symbol="X/USDT:USDT", setup_type="volume_surge", direction="long",
+                  confidence=75, message="m")
+    fields.update(over)
+    return Signal(**fields)
+
+
+def test_every_measurement_field_reaches_the_row():
+    from datetime import datetime, timezone
+
+    from src.storage.models import Signal as SignalModel
+
+    sig = _detector_signal(closed_bar_ok=True, closed_bar_stage="volume_threshold",
+                           last_bar_age_sec=104, volume_window_shifted=1)
+    row = SignalModel.from_detector_signal(sig, datetime.now(tz=timezone.utc))
+
+    assert [getattr(row, f) for f in SignalModel.MEASUREMENT_FIELDS] == [
+        1, "volume_threshold", 104, 1
+    ], "поле замера не доехало от датакласса до строки БД"
+
+
+def test_measurement_fields_all_exist_on_the_dataclass():
+    """Поле, объявленное в MEASUREMENT_FIELDS, обязано быть в датакласса —
+    иначе перенос падал бы в бою на AttributeError, а не в тестах."""
+    from dataclasses import fields
+
+    from src.analytics.base import Signal
+    from src.storage.models import Signal as SignalModel
+
+    declared = {f.name for f in fields(Signal)}
+    missing = [f for f in SignalModel.MEASUREMENT_FIELDS if f not in declared]
+    assert not missing, f"нет в датаклассе analytics.base.Signal: {missing}"
+
+
+def test_measurement_fields_all_exist_as_columns():
+    """И обратная сторона: поле замера обязано быть колонкой, иначе оно
+    потеряется на flush(), а не на присваивании."""
+    from src.storage.models import Signal as SignalModel
+
+    columns = set(SignalModel.__table__.columns.keys())
+    missing = [f for f in SignalModel.MEASUREMENT_FIELDS if f not in columns]
+    assert not missing, f"нет колонки в signals: {missing}"
+
+
+def test_none_verdict_is_not_written_as_zero():
+    """NULL («вердикт не определён») и 0 («сетапа на закрытых барах нет») —
+    разные факты, и склеивать их нельзя: на этом различии стоит весь замер."""
+    from datetime import datetime, timezone
+
+    from src.storage.models import Signal as SignalModel
+
+    row = SignalModel.from_detector_signal(_detector_signal(),
+                                           datetime.now(tz=timezone.utc))
+    assert row.closed_bar_ok is None
+    assert row.volume_window_shifted is None

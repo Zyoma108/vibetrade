@@ -16,6 +16,12 @@ class Signal:
     closed_bar_ok: bool | None = None      # None = вердикт не определён
     closed_bar_stage: str | None = None    # гейт, на котором отказ
     last_bar_age_sec: int | None = None    # возраст последнего бара окна, с
+    # 1 = объёмное окно взято со сдвигом -1 бар (формирующийся бар отброшен).
+    # Объявлять обязательно: датакласс без __slots__ молча принимает любой
+    # атрибут, поэтому присваивание неописанного поля в детекторе не падало, а
+    # до БД не доезжало — колонка signals.volume_window_shifted стояла NULL у
+    # всех сигналов. См. SignalModel.from_detector_signal.
+    volume_window_shifted: int | None = None
 
 
 class BaseDetector(ABC):

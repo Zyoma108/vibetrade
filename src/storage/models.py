@@ -131,6 +131,38 @@ class Signal(Base):
     last_bar_age_sec: Mapped[int | None] = mapped_column(Integer, nullable=True, default=None)  # возраст последнего бара окна на момент сигнала, с (timeframe = 180 → бар закрыт)
     volume_window_shifted: Mapped[int | None] = mapped_column(Integer, nullable=True, default=None)  # 1 = объёмное окно взято со сдвигом -1 бар (формирующийся бар отброшен), 0 = как есть. Нужно, чтобы измерить эффект undersized_verdict_min_bar_maturity_pct вживую: бэктестом он непроверяем в принципе
 
+    # Список полей замера, которые обязаны доезжать от детектора до строки БД.
+    # Существует потому, что перенос собирался явным списком полей в
+    # `core/app.py`, и добавленное 22.09.2026 `volume_window_shifted` в него не
+    # попало: датакласс `Signal` без __slots__ молча принял неописанный
+    # атрибут, ошибки не было, а колонка стояла NULL у всех сигналов сутки.
+    MEASUREMENT_FIELDS = (
+        "closed_bar_ok", "closed_bar_stage", "last_bar_age_sec", "volume_window_shifted",
+    )
+
+    @classmethod
+    def from_detector_signal(cls, sig, timestamp: datetime) -> "Signal":
+        """ORM-строка из датакласса `analytics.base.Signal`.
+
+        Единственное место переноса: добавленное в датакласс поле замера
+        попадает в БД, только если оно есть в `MEASUREMENT_FIELDS`, а
+        отсутствие его в датаклассе роняет тест, а не тихо пишет NULL.
+        """
+        row = cls(
+            timestamp=timestamp,
+            symbol=sig.symbol,
+            setup_type=sig.setup_type,
+            direction=sig.direction,
+            confidence=sig.confidence,
+            message=sig.message,
+        )
+        for field in cls.MEASUREMENT_FIELDS:
+            value = getattr(sig, field)
+            # bool -> int: SQLite хранит INTEGER, а None должен остаться None
+            # («вердикт не определён» — не то же самое, что 0).
+            setattr(row, field, int(value) if isinstance(value, bool) else value)
+        return row
+
 
 class FilteredSignal(Base):
     """Сетапы, отсеянные детектором до появления в signals (после того как объём уже
