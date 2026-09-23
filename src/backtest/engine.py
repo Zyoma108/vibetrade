@@ -314,7 +314,13 @@ def load_data(db_path: str, limit_days: float | None = None, limit_symbols: list
     oi_where = []
     oi_params = []
     if limit_days is not None:
-        row = db.execute("SELECT MAX(timestamp) FROM open_interest").fetchone()
+        # По первичному ключу, а не MAX(timestamp): индекс по timestamp снят
+        # 23.09.2026 (13.5% размера БД), а без него MAX — полный проход, 12.4 с
+        # на 9.6 млн строк против 1.9 мс. `id` в этой таблице монотонен по
+        # времени, проверено на двух архивных БД (0 нарушений).
+        row = db.execute(
+            "SELECT timestamp FROM open_interest ORDER BY id DESC LIMIT 1"
+        ).fetchone()
         if row[0] is not None:
             oi_where.append("timestamp >= datetime(?, ?)")
             oi_params.extend([row[0], f"-{limit_days} days"])

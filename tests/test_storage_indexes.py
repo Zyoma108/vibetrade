@@ -111,13 +111,12 @@ async def test_obsolete_indexes_are_dropped_from_existing_db(tmp_path):
              for r in db.execute(f"PRAGMA index_list({table})")}
 
     for gone in ("ix_open_interest_symbol", "ix_open_interest_exchange",
-                 "ix_candles_exchange"):
+                 "ix_candles_exchange", "ix_open_interest_timestamp"):
         assert gone not in names, f"{gone} не удалён: {sorted(names)}"
 
-    # Оставшиеся нужны: составной обслуживает горячие чтения, timestamp —
-    # удаление по ретенции.
+    # Оставшиеся нужны: составной обслуживает все горячие чтения OI,
+    # ix_candles_timestamp — выборку баров по времени.
     assert "ix_oi_exchange_symbol_timestamp" in names
-    assert "ix_open_interest_timestamp" in names
     assert "ix_candles_timestamp" in names
 
 
@@ -131,3 +130,27 @@ async def test_dropping_is_idempotent(tmp_path):
             await _create_missing_indexes(conn)
             await _drop_obsolete_indexes(conn)
     await engine.dispose()
+
+
+async def test_dropped_oi_timestamp_index_is_not_recreated(tmp_path):
+    """Снятый индекс не должен возвращаться на следующем старте.
+
+    Ловушка: `_drop_obsolete_indexes` снимает индекс, а
+    `_create_missing_indexes` идёт по метаданным модели и создаёт всё, чего в
+    базе нет. Оставь `index=True` на колонке — и каждый запуск бота будет
+    сносить индекс и создавать его заново. Поэтому индекс снят в ДВУХ местах:
+    в модели и в списке устаревших.
+    """
+    db_path = tmp_path / "recreate.db"
+    engine = create_async_engine(f"sqlite+aiosqlite:///{db_path}")
+    for _ in range(2):
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+            await _create_missing_indexes(conn)
+            await _drop_obsolete_indexes(conn)
+    await engine.dispose()
+
+    db = sqlite3.connect(db_path)
+    names = {r[1] for r in db.execute("PRAGMA index_list(open_interest)")}
+    assert "ix_open_interest_timestamp" not in names, sorted(names)
+    assert "ix_oi_exchange_symbol_timestamp" in names

@@ -90,14 +90,14 @@ class OpenInterest(Base):
     10 мс. Индекс по symbol рассеян по 666 значениям, то есть каждая вставка
     — случайная запись страницы.
 
-    `ix_open_interest_timestamp` ОСТАЛСЯ БЕЗ ЧИТАТЕЛЕЙ 23.09.2026: он держался
-    на удалении по ретенции, а `retention_days` удалён (вся история нужна для
-    бэктестов). Единственный оставшийся запрос к нему — `SELECT MAX(timestamp)`
-    в загрузчике бэктеста, и только при `limit_days`: один полный проход на
-    загрузку, не в цикле бота. Цена индекса — 13.5% размера БД (20.9 МБ из 155
-    на суточной боевой) и доля времени каждой вставки. Кандидат на `DROP INDEX`
-    в `init_db()`; не снят, чтобы не смешивать с другой правкой. Подробности:
-    `docs/database.md`.
+    `ix_open_interest_timestamp` СНЯТ 23.09.2026: он держался на удалении по
+    ретенции, а `retention_days` удалён (вся история нужна для бэктестов).
+    Единственный оставшийся запрос к нему — `SELECT MAX(timestamp)` в загрузчике
+    бэктеста — переписан на `ORDER BY id DESC LIMIT 1`: `id` в этой таблице
+    монотонен по времени (проверено на двух архивных БД, 0 нарушений на 9.6 млн
+    и 0.5 млн строк), и такой запрос идёт по первичному ключу. Цена индекса была
+    13.5% размера БД (20.9 МБ из 155 на суточной боевой) плюс обслуживание на
+    каждой вставке. Подробности: `docs/database.md`.
     """
 
     __tablename__ = "open_interest"
@@ -109,7 +109,7 @@ class OpenInterest(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     exchange: Mapped[str] = mapped_column(String(32))
     symbol: Mapped[str] = mapped_column(String(32))
-    timestamp: Mapped[datetime] = mapped_column(index=True)
+    timestamp: Mapped[datetime] = mapped_column()  # без index — см. докстринг
     value: Mapped[float] = mapped_column(Float)
 
 

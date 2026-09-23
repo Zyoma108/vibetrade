@@ -162,10 +162,17 @@ async def _create_missing_indexes(conn) -> None:
 # `ix_candles_exchange` (22.09.2026) — тот же случай двух величин; ни один
 # запрос в коде не фильтрует по одному `exchange`, пару (exchange, symbol)
 # обслуживает уникальный ключ `uq_candle`; 100 МБ.
+#
+# `ix_open_interest_timestamp` (23.09.2026) — остался без читателей после
+# удаления `retention_days`: чистки истории больше нет, а единственный запрос
+# «когда последняя запись» переписан в загрузчике бэктеста на `ORDER BY id DESC
+# LIMIT 1` (id здесь монотонен по времени). 13.5% размера БД — 20.9 МБ из 155 на
+# суточной боевой, и это растёт линейно с историей.
 OBSOLETE_INDEXES = (
     "ix_tickers_exchange", "ix_tickers_symbol", "ix_tickers_timestamp",
     "ix_open_interest_exchange",
     "ix_open_interest_symbol", "ix_candles_exchange",
+    "ix_open_interest_timestamp",
 )
 
 
