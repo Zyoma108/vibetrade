@@ -318,6 +318,64 @@ def test_oi_declining_blocks_signal(golden_db, tmp_path):
     assert off["signals"] == 1
 
 
+def test_oi_trend_window_changes_verdict(tmp_path, golden_db):
+    """Временное окно OI подключено в движке и меняет вердикт на тех же данных.
+
+    Форма данных: OI стоит на месте и разгоняется на двух барах, последний из
+    которых — бар сигнала. Прежний режим берёт три последние СТРОКИ, то есть
+    два каданса скана, и к моменту решения видит уже выполаживание
+    (1.02 -> 1.04 -> 1.04, наклон 2.9%). Двенадцатиминутное окно видит весь
+    разгон от плоскости (наклон 4.7%). Один и тот же порог 3% даёт
+    противоположные ответы — не потому, что окно строже или мягче, а потому,
+    что это разные величины: скорость за два каданса против прироста за
+    sustain-окно детектора.
+    """
+    n_baseline, n_sustain, n_after = 20, 4, 60
+    total = n_baseline + n_sustain + n_after
+    # Разгон OI заканчивается на последнем баре sustain-окна, а решение движок
+    # принимает на следующем — поэтому к моменту решения ряд уже плоский.
+    ramp_top = n_baseline + n_sustain - 1
+
+    def oi_at(i: int) -> float:
+        if i >= ramp_top:
+            return 1_040_000.0
+        if i == ramp_top - 1:
+            return 1_020_000.0
+        return 1_000_000.0
+
+    path = tmp_path / "oi_window.db"
+    oi = [("bybit", SYMBOL, _ts(i), oi_at(i)) for i in range(total)]
+    _write_db(path, _build_candles(n_baseline, n_sustain, n_after), oi)
+    data = load_data(str(path))
+
+    legacy = simulate(_settings(oi_slope_min_pct=3.0), data, has_oi=True)
+    windowed = simulate(
+        _settings(oi_slope_min_pct=3.0, oi_trend_window_bars=4), data, has_oi=True,
+    )
+    assert legacy["signals"] == 0, "три последние точки застали уже выполаживание"
+    assert windowed["signals"] == 1, "окно застало весь разгон"
+
+    # Контроль с обеих сторон: окно не пропускает что угодно и не режет что угодно.
+    for th, expected in ((2.0, 1), (5.0, 0)):
+        both = [
+            simulate(_settings(oi_slope_min_pct=th, oi_trend_window_bars=w), data,
+                     has_oi=True)["signals"]
+            for w in (0, 4)
+        ]
+        assert both == [expected, expected], f"порог {th}: {both}"
+
+
+def test_oi_trend_window_default_is_legacy(tmp_path, golden_db):
+    """Дефолт параметра (0) обязан повторять прежнее поведение до сделки."""
+    data = load_data(golden_db)
+    legacy = simulate(_settings(), data, has_oi=True)
+    explicit = simulate(_settings(oi_trend_window_bars=0), data, has_oi=True)
+    assert legacy["signals"] == explicit["signals"]
+    assert [t["entry_time"] for t in legacy["trades_list"]] == [
+        t["entry_time"] for t in explicit["trades_list"]
+    ]
+
+
 def test_oi_filter_disabled_lets_signals_through(tmp_path, golden_db):
     """`oi_filter_enabled=false` обязан снимать ГЕЙТ ЦЕЛИКОМ.
 

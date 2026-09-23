@@ -12,7 +12,7 @@ first load fetches full history, subsequent cycles only fetch new candles.
 """
 
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import desc, func, select
@@ -21,6 +21,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.storage.models import Candle, OpenInterest, Ticker
 
 logger = logging.getLogger(__name__)
+
+# Потолок на число точек во временном окне OI: защита от вырожденного случая
+# «OI пишется чаще, чем раз в несколько секунд». Наклон от 64 точек и от 640
+# неотличим, а время запроса — нет.
+OI_WINDOW_MAX_POINTS = 64
 
 
 # Сколько последних баров перечитывать из БД на каждом цикле.
@@ -155,6 +160,7 @@ class DataProvider:
         self._symbols: list[tuple[str, str]] | None = None
         self._candles: dict[str, list[dict[str, Any]]] = {}
         self._oi_values: dict[str, list[float]] = {}
+        self._oi_windows: dict[str, tuple[list[float], list[float]] | None] = {}
         self._persistent_cache = candle_cache
 
     # ------------------------------------------------------------------
@@ -324,3 +330,83 @@ class DataProvider:
         oi_chronological = list(reversed(oi_values))
         self._oi_values[cache_key] = oi_chronological
         return oi_chronological
+
+
+    async def load_oi_window(
+        self, session: AsyncSession, exchange: str, symbol: str, window_sec: float,
+        now: datetime | None = None,
+    ) -> tuple[list[float], list[float]] | None:
+        """Точки OI за ПОСЛЕДНИЕ `window_sec` секунд: (моменты в секундах, значения).
+
+        Отличие от `load_oi_values` — окно задано временем, а не числом строк.
+        Строка OI пишется раз в цикл сбора, поэтому «три последние точки» — это
+        два каданса скана: величина, которая меняется от перф-правок и от
+        возможного прореживания записи, а не от стратегии.
+
+        Моменты возвращаются в секундах от начала окна, а не абсолютным
+        timestamp: наклон считается по разностям, а абсолютная шкала только
+        заставила бы вызывающего думать про tzinfo.
+
+        ПЕРВОЙ точкой (t = 0) подставляется последнее значение ДО окна — якорь.
+        Без него ряд покрывает не окно, а лишь ту его часть, где значение
+        менялось, и наклон, нормированный на окно, экстраполирует скорость
+        последней минуты на все двенадцать. С якорем ряд всегда покрывает окно
+        целиком, а под дедупликацией записи (`_write_oi_batch` пишет только
+        изменения) якорь ещё и ТОЧЕН: раз строки нет — значение не менялось.
+        Это же свойство делает гейт независимым от частоты записи OI, то есть
+        разрешает прореживать её ради размера БД.
+
+        Известный угол: если монета выпадала из списка сбора (объём ниже
+        порога) и вернулась, якорь будет из последнего дня, когда её собирали,
+        и «плоскость» между ними — выдумка. Редкий случай, цена — один
+        завышенный наклон.
+
+        None — в окне нет ни одной точки и якоря тоже нет. Проверку «сколько
+        точек достаточно» делает `oi_trend_passes` (`OI_TREND_MIN_POINTS`),
+        чтобы порог жил в одном месте с самим гейтом.
+        """
+        # SQLite роняет tzinfo при round-trip — сравниваем в naive-UTC, как в
+        # SetupDetector._bar_is_stale.
+        now = now or datetime.now(timezone.utc)
+        if now.tzinfo is not None:
+            now = now.astimezone(timezone.utc).replace(tzinfo=None)
+        low = now - timedelta(seconds=window_sec)
+
+        cache_key = f"oiw:{exchange}:{symbol}:{window_sec:.0f}"
+        if cache_key in self._oi_windows:
+            return self._oi_windows[cache_key]
+
+        stmt = (
+            select(OpenInterest.timestamp, OpenInterest.value)
+            .where(
+                OpenInterest.exchange == exchange,
+                OpenInterest.symbol == symbol,
+                OpenInterest.timestamp > low,
+                OpenInterest.timestamp <= now,
+            )
+            .order_by(desc(OpenInterest.timestamp))
+            .limit(OI_WINDOW_MAX_POINTS)
+        )
+        rows = list(reversed((await session.execute(stmt)).all()))
+
+        anchor = await session.scalar(
+            select(OpenInterest.value)
+            .where(
+                OpenInterest.exchange == exchange,
+                OpenInterest.symbol == symbol,
+                OpenInterest.timestamp <= low,
+            )
+            .order_by(desc(OpenInterest.timestamp))
+            .limit(1)
+        )
+
+        times = [0.0] if anchor is not None else []
+        values = [anchor] if anchor is not None else []
+        times += [(r[0] - low).total_seconds() for r in rows]
+        values += [r[1] for r in rows]
+        if not values:
+            self._oi_windows[cache_key] = None
+            return None
+
+        self._oi_windows[cache_key] = (times, values)
+        return times, values

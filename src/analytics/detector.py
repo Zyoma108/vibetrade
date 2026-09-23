@@ -479,14 +479,29 @@ class SetupDetector(BaseDetector):
     async def _check_oi_trend(
         self, session, exchange: str, symbol: str, context: dict | None = None
     ) -> bool:
-        """Проверить, что OI растёт (приток денег, а не перекладка)."""
-        oi_values = await self._dp.load_oi_values(
-            session, exchange, symbol, OI_TREND_BARS
-        )
+        """Проверить, что OI растёт (приток денег, а не перекладка).
+
+        Два режима окна. `oi_trend_window_bars > 0` — точки за фиксированное
+        ВРЕМЯ (столько баров таймфрейма), прежний режим — три последние строки,
+        то есть два каданса скана. Почему это не одно и то же и что намерил
+        замер 23.09.2026 — в докстринге `oi_trend_passes`.
+        """
+        window_bars = self.config.oi_trend_window_bars
+        if window_bars > 0:
+            window_sec = window_bars * self._timeframe_sec
+            points = await self._dp.load_oi_window(session, exchange, symbol, window_sec)
+            oi_times, oi_values = points if points else (None, None)
+        else:
+            window_sec, oi_times = None, None
+            oi_values = await self._dp.load_oi_values(
+                session, exchange, symbol, OI_TREND_BARS
+            )
         passed, stage, reason = oi_trend_passes(
             oi_values,
             self.config.oi_declining_enabled,
             self.config.oi_slope_min_pct,
+            oi_times=oi_times,
+            window_sec=window_sec,
         )
         if not passed and stage:
             self._reject(context, stage, reason)
