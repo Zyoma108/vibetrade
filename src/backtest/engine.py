@@ -439,6 +439,8 @@ def simulate(settings, data, has_oi: bool = True, collect_retracement: bool = Tr
     cycle_delay_bars = max(
         1, round(settings.collectors.scan_cycle_seconds / (timeframe_minutes * 60))
     )
+    # Окно OI-гейта в секундах, 0 = прежний режим «три последние точки».
+    oi_window_sec = detector.config.oi_trend_window_bars * timeframe_minutes * 60
 
     for ts_idx, ts in enumerate(all_timestamps):
         if ts_idx < need_bars:
@@ -703,17 +705,45 @@ def simulate(settings, data, has_oi: bool = True, collect_retracement: bool = Tr
                     key = (ex, sym)
                     if key not in oi_cache:
                         continue
-                    oi_points = [v for t, v in oi_cache[key] if t <= ts]
-                    if len(oi_points) < OI_TREND_BARS:
-                        continue
+                    # Окно гейта: временное (`oi_trend_window_bars > 0`) или
+                    # прежнее — три последние точки, то есть два каданса скана.
+                    # Точка отсчёта «сейчас» в обоих случаях одна и та же (`ts`),
+                    # чтобы сравнение режимов было сравнением ОКНА, а не момента.
+                    if oi_window_sec:
+                        low = ts - timedelta(seconds=oi_window_sec)
+                        series = oi_cache[key]
+                        # Якорь — последнее значение ДО окна, подставляется в
+                        # t = 0. Смысл тот же, что в `DataProvider.load_oi_window`
+                        # (см. её докстринг): без якоря ряд покрывает не окно, а
+                        # только ту его часть, где OI менялся.
+                        anchor = None
+                        for t, v in series:
+                            if t > low:
+                                break
+                            anchor = v
+                        pts = [(t, v) for t, v in series if low < t <= ts]
+                        oi_times = [0.0] if anchor is not None else []
+                        oi_points = [anchor] if anchor is not None else []
+                        oi_times += [(t - low).total_seconds() for t, _ in pts]
+                        oi_points += [v for _, v in pts]
+                        if not oi_points:
+                            continue
+                    else:
+                        oi_times = None
+                        oi_points = [v for t, v in oi_cache[key] if t <= ts]
+                        if len(oi_points) < OI_TREND_BARS:
+                            continue
+                        oi_points = oi_points[-OI_TREND_BARS:]
                     # Решение гейта — ОБЩЕЕ с боевым детектором (`oi_trend_passes`),
                     # а не своя копия. Копия здесь уже дважды разъезжалась с проливом:
                     # сначала из неё выпал `oi_declining`, потом — учёт
                     # `oi_filter_enabled`. Оба раза это молча меняло результаты свипов.
                     passed, _stage, _reason = oi_trend_passes(
-                        oi_points[-OI_TREND_BARS:],
+                        oi_points,
                         detector.config.oi_declining_enabled,
                         detector.config.oi_slope_min_pct,
+                        oi_times=oi_times,
+                        window_sec=oi_window_sec,
                     )
                     if passed:
                         oi_pass = True

@@ -8,7 +8,12 @@ import numpy as np
 import pytest
 
 from src.analytics.detector import SetupDetector
-from src.analytics.utils import OI_TREND_BARS, calculate_oi_slope_pct, oi_trend_passes
+from src.analytics.utils import (
+    OI_TREND_BARS,
+    OI_TREND_MIN_POINTS,
+    calculate_oi_slope_pct,
+    oi_trend_passes,
+)
 from src.config import StrategyConfig
 
 
@@ -786,6 +791,79 @@ class TestOISlope:
         assert slope is not None
         # slope ≈ 9.7% for these values
         assert 8.0 < slope < 12.0
+
+
+class TestOITrendWindow:
+    """Временное окно OI: наклон не должен зависеть от частоты записи.
+
+    Прежний режим брал три последние СТРОКИ, а строка пишется раз в цикл сбора,
+    поэтому окно равнялось двум кадансам: 557 с на БД 10-25.08 и 139 с на
+    свежей — одна и та же настройка означала разные фильтры. Эти тесты держат
+    новое свойство: при одной и той же траектории OI вердикт гейта одинаков и
+    при частой записи, и при прореженной.
+    """
+
+    WINDOW = 720.0  # 4 бара x 3 мин — sustain-окно детектора
+
+    @staticmethod
+    def _series(step_sec: float, window: float, rate_per_min: float) -> tuple[list, list]:
+        """OI, растущий с постоянной скоростью, снятый с шагом `step_sec`."""
+        times = [t * step_sec for t in range(int(window // step_sec) + 1)]
+        values = [100.0 * (1 + rate_per_min * t / 60) for t in times]
+        return times, values
+
+    def test_slope_is_same_for_dense_and_thinned_writes(self):
+        """Одна траектория, запись раз в 70 с и раз в 3 мин → один наклон."""
+        dense = self._series(70.0, self.WINDOW, 0.01)
+        thinned = self._series(180.0, self.WINDOW, 0.01)
+        a = calculate_oi_slope_pct(np.array(dense[1]), x=dense[0], span=self.WINDOW)
+        b = calculate_oi_slope_pct(np.array(thinned[1]), x=thinned[0], span=self.WINDOW)
+        assert a is not None and b is not None
+        assert abs(a - b) < 0.1
+        # 1% в минуту за 12 минут — около 12% от среднего
+        assert 11.0 < a < 13.0
+
+    def test_legacy_mode_depends_on_cadence(self):
+        """Контроль: без окна те же данные дают РАЗНЫЙ ответ — это и чинится."""
+        dense = self._series(70.0, self.WINDOW, 0.01)[1][-OI_TREND_BARS:]
+        thinned = self._series(180.0, self.WINDOW, 0.01)[1][-OI_TREND_BARS:]
+        a = calculate_oi_slope_pct(np.array(dense))
+        b = calculate_oi_slope_pct(np.array(thinned))
+        assert abs(a - b) > 1.0
+
+    def test_gate_verdict_survives_thinning(self):
+        """Порог 10% за окно: вердикт одинаков при обеих частотах записи."""
+        for step in (70.0, 180.0):
+            times, values = self._series(step, self.WINDOW, 0.01)
+            passed, _, _ = oi_trend_passes(
+                values, False, 10.0, oi_times=times, window_sec=self.WINDOW,
+            )
+            assert passed, f"шаг {step}с: гейт должен пропускать"
+            passed, stage, _ = oi_trend_passes(
+                values, False, 15.0, oi_times=times, window_sec=self.WINDOW,
+            )
+            assert not passed and stage == "oi_slope_low", f"шаг {step}с"
+
+    def test_window_mode_requires_min_points(self):
+        """Меньше OI_TREND_MIN_POINTS точек в окне — гейт не пропускает."""
+        values = [100.0] * (OI_TREND_MIN_POINTS - 1)
+        times = [0.0, 60.0][: len(values)]
+        passed, _, _ = oi_trend_passes(values, False, 2.0, oi_times=times, window_sec=self.WINDOW)
+        assert not passed
+
+    def test_slope_normalised_to_window_not_to_point_span(self):
+        """Точки покрывают половину окна — наклон считается ЗА ОКНО, не за них."""
+        times, values = [0.0, 30.0, 60.0], [100.0, 101.0, 102.0]
+        over_window = calculate_oi_slope_pct(np.array(values), x=times, span=120.0)
+        over_points = calculate_oi_slope_pct(np.array(values), x=times, span=60.0)
+        assert over_window == pytest.approx(over_points * 2, rel=1e-6)
+
+    def test_legacy_call_unchanged(self):
+        """Вызов без окна — прежняя формула до последнего знака."""
+        values = np.array([100.0, 110.0, 120.0])
+        assert calculate_oi_slope_pct(values) == pytest.approx(
+            (10.0 * 3) / 110.0 * 100, rel=1e-9
+        )
 
 
 # ---------------------------------------------------------------------------

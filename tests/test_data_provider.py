@@ -12,7 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from src.analytics.data_provider import CandleCache, DataProvider
-from src.storage.models import Base, Candle, Ticker
+from src.storage.models import Base, Candle, OpenInterest, Ticker
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -717,3 +717,70 @@ class TestActiveSymbolsSource:
         dp = DataProvider()
         assert ("bybit", "NEW/USDT") in await dp.get_active_symbols(session, set())
         assert await dp.load_candles(session, "bybit", "NEW/USDT", 84) == []
+
+
+# ---------------------------------------------------------------------------
+# OI: временное окно
+# ---------------------------------------------------------------------------
+
+
+class TestLoadOIWindow:
+    """load_oi_window — точки OI за фиксированное ВРЕМЯ, а не за N строк.
+
+    Смысл якоря: коллектор пишет OI только при изменении значения
+    (`_write_oi_batch`), поэтому отсутствие строк — это не «нет данных», а
+    «значение не менялось». Без подстановки последнего значения до окна ряд
+    покрывал бы лишь ту часть окна, где что-то происходило, и наклон,
+    нормированный на окно, завышался бы во столько раз, во сколько ряд короче.
+    """
+
+    NOW = datetime(2026, 9, 23, 12, 0, 0)
+
+    @staticmethod
+    async def _seed(session, points):
+        """points: [(смещение в секундах ОТ NOW, значение)]."""
+        for offset, value in points:
+            session.add(OpenInterest(
+                exchange="binance", symbol="OI/USDT",
+                timestamp=TestLoadOIWindow.NOW + timedelta(seconds=offset), value=value,
+            ))
+        await session.commit()
+
+    async def test_returns_points_within_window_with_anchor(self, session):
+        await self._seed(session, [(-3600, 90.0), (-600, 100.0), (-300, 105.0), (-60, 110.0)])
+        times, values = await DataProvider().load_oi_window(
+            session, "binance", "OI/USDT", 720, now=self.NOW,
+        )
+        # якорь (90.0) в t=0 плюс три точки окна; часовой давности точка НЕ
+        # добавляется второй раз
+        assert values == [90.0, 100.0, 105.0, 110.0]
+        assert times == [0.0, 120.0, 420.0, 660.0]
+
+    async def test_stale_symbol_gives_flat_series(self, session):
+        """OI не менялся всё окно → якорь один, точек нет → гейт не пропустит."""
+        await self._seed(session, [(-7200, 100.0)])
+        result = await DataProvider().load_oi_window(
+            session, "binance", "OI/USDT", 720, now=self.NOW,
+        )
+        assert result == ([0.0], [100.0])
+
+    async def test_no_data_at_all_returns_none(self, session):
+        assert await DataProvider().load_oi_window(
+            session, "binance", "MISSING/USDT", 720, now=self.NOW,
+        ) is None
+
+    async def test_future_points_excluded(self, session):
+        """Точки позже `now` в окно не попадают — иначе бэктест смотрит вперёд."""
+        await self._seed(session, [(-300, 100.0), (+60, 200.0)])
+        _, values = await DataProvider().load_oi_window(
+            session, "binance", "OI/USDT", 720, now=self.NOW,
+        )
+        assert 200.0 not in values
+
+    async def test_window_is_cached_per_cycle(self, session):
+        await self._seed(session, [(-300, 100.0), (-60, 110.0)])
+        dp = DataProvider()
+        first = await dp.load_oi_window(session, "binance", "OI/USDT", 720, now=self.NOW)
+        await self._seed(session, [(-30, 999.0)])
+        second = await dp.load_oi_window(session, "binance", "OI/USDT", 720, now=self.NOW)
+        assert first == second
