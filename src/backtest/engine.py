@@ -28,6 +28,7 @@ from pathlib import Path
 
 from src.analytics.detector import SetupDetector
 from src.analytics.utils import OI_TREND_BARS, oi_trend_passes, timeframe_to_minutes
+from src.analytics.utils import adaptive_stop_pct
 from src.backtest.metrics import breakeven_credit, summarize
 
 
@@ -678,6 +679,14 @@ def simulate(settings, data, has_oi: bool = True, collect_retracement: bool = Tr
 
             price_ctx: dict = {}
             direction = detector.check_price_trend(vol_window, price_ctx)
+            # Размах sustain-окна кладёт сам детектор (`window_range_pct`), здесь
+            # он только читается: считать его копией в движке запрещено
+            # правилом 2 AGENTS.md.
+            stop_pct = adaptive_stop_pct(
+                price_ctx.get("window_range_pct"),
+                cfg.stop_loss_window_range_mult,
+                cfg.stop_loss_pct,
+            )
             if direction != "long":
                 if price_ctx.get("stage"):
                     price_stage_counts[price_ctx["stage"]] = price_stage_counts.get(price_ctx["stage"], 0) + 1
@@ -725,7 +734,7 @@ def simulate(settings, data, has_oi: bool = True, collect_retracement: bool = Tr
 
             if cfg.pending_entry_pullback_pct > 0:
                 limit_price = signal_price * (1 - cfg.pending_entry_pullback_pct / 100)
-                sl_distance = limit_price * (cfg.stop_loss_pct / 100)
+                sl_distance = limit_price * (stop_pct / 100)
                 tp_distance = sl_distance * cfg.risk_reward_ratio
                 meta = markets.get(sym) if markets else None
                 if markets and meta is None:
@@ -750,7 +759,7 @@ def simulate(settings, data, has_oi: bool = True, collect_retracement: bool = Tr
                 continue
 
             entry_price = signal_price * (1 + cfg.backtest_slippage_pct / 100)
-            sl_distance = entry_price * (cfg.stop_loss_pct / 100)
+            sl_distance = entry_price * (stop_pct / 100)
             tp_distance = sl_distance * cfg.risk_reward_ratio
             meta = markets.get(sym) if markets else None
             if markets and meta is None:

@@ -229,6 +229,16 @@ class TradingConfig(BaseModel):
     risk_per_trade_pct: float = Field(default=1.0, ge=0.1, le=100.0, description="% от депозита, которым рискуем за один стоп")
     risk_reward_ratio: float = Field(default=3.0, ge=1.0, le=20.0, description="Соотношение TP/SL (3.0 = 1:3 risk/reward)")
     stop_loss_pct: float = Field(default=5.0, ge=0.5, le=50.0, description="Стоп-лосс, % от цены входа")
+    stop_loss_window_range_mult: float = Field(
+        default=0.0, ge=0.0, le=10.0,
+        description=(
+            "Стоп как ЧИСЛО РАЗМАХОВ sustain-окна вместо фиксированного процента. "
+            "0 = выкл, используется stop_loss_pct. Формула и границы — "
+            "analytics.utils.adaptive_stop_pct. Концепт (б) ревизии 23.09.2026: "
+            "фиксированные 5% дают стоп от 1.4 до 3.8 размаха в зависимости от "
+            "монеты, и самый шумный квартиль — худший на обеих БД."
+        ),
+    )
     max_hold_hours: float = Field(default=24.0, ge=1.0, description="Максимальное время удержания позиции, часов")
     partial_close_pct: float = Field(default=50.0, ge=10.0, le=90.0, description="% пути до TP для частичного закрытия / перевода в б/у")
     partial_close_qty_pct: float = Field(default=50.0, ge=5.0, le=95.0, description="Какая доля позиции (%) закрывается при срабатывании partial-триггера; остаток идёт в б/у-стоп и бежит на полный TP")

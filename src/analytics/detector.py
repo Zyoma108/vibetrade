@@ -496,6 +496,24 @@ class SetupDetector(BaseDetector):
     # Price direction (public — used by backtest)
     # ------------------------------------------------------------------
 
+    def window_range_pct(self, candles: list[dict]) -> float | None:
+        """Размах цены внутри sustain-окна, % (high/low - 1). None — не определён.
+
+        Единственная реализация: её же использует фильтр `max_window_range_pct`
+        и адаптивный стоп (`utils.adaptive_stop_pct`). Замер 23.09.2026: у монет
+        эта величина гуляет от 0.95% до 5.0%, то есть фиксированный стоп 5%
+        стоит от 1.4 до 3.8 размаха, и самый шумный квартиль — худший на обеих
+        БД.
+        """
+        sustain = self.config.sustain_bars
+        if len(candles) < sustain:
+            return None
+        win_high = np.max([c["high"] for c in candles[-sustain:]])
+        win_low = np.min([c["low"] for c in candles[-sustain:]])
+        if win_low <= 0:
+            return None
+        return float((win_high / win_low - 1) * 100)
+
     def check_price_trend(self, candles: list[dict], context: dict | None = None) -> str | None:
         """Только лонг: цена должна вырасти, но не слишком сильно
         (фильтр «памп уже состоялся»).
@@ -562,19 +580,21 @@ class SetupDetector(BaseDetector):
         # гарантированно, независимо от того, куда пойдёт движение дальше.
         # См. max_window_range_pct в StrategyConfig (аудит августа 2026).
         max_range = self.config.max_window_range_pct
-        if max_range > 0:
-            win_high = np.max([c["high"] for c in candles[-sustain:]])
-            win_low = np.min([c["low"] for c in candles[-sustain:]])
-            if win_low > 0:
-                range_pct = (win_high / win_low - 1) * 100
-                if range_pct > max_range:
-                    self._reject(
-                        context,
-                        "window_range",
-                        f"размах sustain-окна {range_pct:.1f}% (>{max_range}%) — "
-                        f"фиксированный стоп внутри шума",
-                    )
-                    return None
+        range_pct = self.window_range_pct(candles)
+        if context is not None and range_pct is not None:
+            # Величина нужна снаружи: по ней считается адаптивный стоп
+            # (`utils.adaptive_stop_pct`). Кладём в контекст, а не пересчитываем
+            # у вызывающего — копия этой арифметики разъехалась бы так же, как
+            # копии гейтов (AGENTS.md, правило 2).
+            context["window_range_pct"] = range_pct
+        if max_range > 0 and range_pct is not None and range_pct > max_range:
+            self._reject(
+                context,
+                "window_range",
+                f"размах sustain-окна {range_pct:.1f}% (>{max_range}%) — "
+                f"фиксированный стоп внутри шума",
+            )
+            return None
 
         # Exhaustion filter v1: цена выросла за sustain-окно И свеча закрылась у верха
         # (покупатели выдохлись). Пропускаем только если свеча в середине/снизу —

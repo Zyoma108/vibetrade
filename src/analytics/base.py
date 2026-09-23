@@ -22,6 +22,10 @@ class Signal:
     # до БД не доезжало — колонка signals.volume_window_shifted стояла NULL у
     # всех сигналов. См. SignalModel.from_detector_signal.
     volume_window_shifted: int | None = None
+    # Размах sustain-окна, % — мера шума монеты, по которой считается адаптивный
+    # стоп (utils.adaptive_stop_pct). Детектор считает её всё равно, для
+    # max_window_range_pct.
+    window_range_pct: float | None = None
 
 
 class BaseDetector(ABC):
