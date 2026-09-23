@@ -2,6 +2,7 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import func, select
 
+from src.backtest.metrics import BREAKEVEN, outcome, outcome_counts
 from src.storage.models import Trade
 
 
@@ -39,15 +40,29 @@ async def trade_stats(session, period: str = "all") -> str:
             f"Открыто позиций: {open_count}{pending_line}"
         )
 
-    wins = sum(1 for t in trades if (t.pnl or 0) > 0)
-    losses = sum(1 for t in trades if (t.pnl or 0) <= 0)
     total_pnl = sum(t.pnl or 0 for t in trades)
-    win_rate = wins / len(trades) * 100 if trades else 0
+    # Безубыток — отдельный класс, а не «плюс»: сделку, снятую с безубыточного
+    # стопа после частичной фиксации, приносит только забронированная на
+    # триггере часть (при доле 20% и RR 2.0 это +0.14R против +2R у полного
+    # тейка), и рынок при этом вернулся к цене входа. Классификация общая с
+    # бэктестом — `metrics.outcome`, чтобы отчёты не расходились.
+    counts = outcome_counts([
+        {"entry_price": t.entry_price, "exit_price": t.exit_price,
+         "pnl": t.pnl or 0.0, "direction": t.direction}
+        for t in trades
+    ])
+    be_pnl = sum(t.pnl or 0 for t in trades
+                 if outcome({"entry_price": t.entry_price, "exit_price": t.exit_price,
+                             "pnl": t.pnl or 0.0, "direction": t.direction}) == BREAKEVEN)
 
     return (
         f"📊 <b>Статистика за {labels[period]}</b>\n\n"
-        f"Сделок: {len(trades)} | Плюс: {wins} | Минус: {losses}\n"
-        f"Win rate: {win_rate:.0f}%\n"
-        f"PnL: ${total_pnl:+.2f}\n\n"
-        f"Открыто позиций: {open_count}{pending_line}"
+        f"Сделок: {len(trades)}\n"
+        f"Плюс: {counts['wins']} | Безубыток: {counts['breakevens']} | "
+        f"Минус: {counts['losses']}\n"
+        f"Win rate: {counts['win_rate']:.0f}% "
+        f"(безубытки {counts['breakeven_rate']:.0f}%, они в знаменателе)\n"
+        f"PnL: ${total_pnl:+.2f}"
+        + (f", из него с безубытков ${be_pnl:+.2f}\n" if counts["breakevens"] else "\n")
+        + f"\nОткрыто позиций: {open_count}{pending_line}"
     )

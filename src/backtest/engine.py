@@ -791,10 +791,7 @@ def simulate(settings, data, has_oi: bool = True, collect_retracement: bool = Tr
 
     pending_expired += len(pending)
 
-    wins = sum(1 for t in closed_trades if t.pnl > 0)
-    losses = sum(1 for t in closed_trades if t.pnl <= 0)
     total_pnl = sum(t.pnl for t in closed_trades)
-    win_rate = (wins / len(closed_trades) * 100) if closed_trades else 0
     tp_wins = sum(1 for t in closed_trades if t.exit_reason == "tp")
     sl_losses = sum(1 for t in closed_trades if t.exit_reason == "sl")
     time_exits = sum(1 for t in closed_trades if t.exit_reason == "time")
@@ -838,9 +835,8 @@ def simulate(settings, data, has_oi: bool = True, collect_retracement: bool = Tr
         **summary,
         "signals": signals_count,
         "trades": len(closed_trades),
-        "wins": wins,
-        "losses": losses,
-        "win_rate": round(win_rate, 1),
+        # wins / breakevens / losses / win_rate приходят из summarize():
+        # классификация исхода живёт в metrics.outcome() в одном месте на проект.
         "total_pnl": round(total_pnl, 2),
         "avg_pnl": round(total_pnl / len(closed_trades), 2) if closed_trades else 0,
         "total_fees": round(total_fees, 2),

@@ -239,3 +239,108 @@ class TestBlockBootstrap:
     def test_single_block_has_no_interval(self):
         """Все сделки в одном дне — блоков меньше двух, интервала нет."""
         assert bootstrap_ci([1.0, 2.0, 3.0], blocks=["d1", "d1", "d1"]) is None
+
+
+# ---------------------------------------------------------------------------
+# Безубыток — отдельный класс исхода
+# ---------------------------------------------------------------------------
+#
+# До 23.09.2026 сделка, снятую с безубыточного стопа после частичной фиксации,
+# отчёты считали успешной: PnL у неё положительный (забронированная на триггере
+# часть минус комиссии), а классификация шла по знаку PnL. Для winrate это
+# означало, что рынок вернулся к цене входа, сетап не отработал, а статистика
+# рапортует плюс.
+
+
+def _trade(entry, exit_price, pnl, **over):
+    from src.backtest.metrics import BREAKEVEN_BAND_PCT  # noqa: F401
+    return {"entry_price": entry, "exit_price": exit_price, "pnl": pnl, **over}
+
+
+def test_breakeven_exit_is_not_a_win():
+    from src.backtest.metrics import BREAKEVEN, outcome
+
+    # Частичная фиксация 20% на +3.5%, остаток снят стопом ровно на входе:
+    # PnL положительный, но исход — безубыток.
+    assert outcome(_trade(100.0, 100.0, +0.14)) == BREAKEVEN
+
+
+def test_full_take_and_full_stop_keep_their_classes():
+    from src.backtest.metrics import LOSS, WIN, outcome
+
+    assert outcome(_trade(100.0, 110.0, +2.0)) == WIN
+    assert outcome(_trade(100.0, 95.0, -1.0)) == LOSS
+
+
+def test_band_edges():
+    from src.backtest.metrics import BREAKEVEN, LOSS, WIN, outcome
+
+    assert outcome(_trade(100.0, 100.5, +0.2)) == BREAKEVEN      # ровно на границе
+    assert outcome(_trade(100.0, 100.6, +0.2)) == WIN
+    assert outcome(_trade(100.0, 99.5, -0.1)) == BREAKEVEN
+    assert outcome(_trade(100.0, 99.4, -0.1)) == LOSS
+
+
+def test_short_direction_is_mirrored():
+    from src.backtest.metrics import LOSS, WIN, outcome
+
+    assert outcome(_trade(100.0, 95.0, +1.0, direction="short")) == WIN
+    assert outcome(_trade(100.0, 105.0, -1.0, direction="short")) == LOSS
+
+
+def test_classification_does_not_depend_on_partial_share():
+    """Ключевое свойство: доля партиала меняет РАЗМЕР результата, но не класс.
+
+    Классификация по механизму («был партиал и вышли по стопу») сделала бы
+    winrate управляемым через partial_close_qty_pct без изменения денег. По цене
+    выхода этого не происходит.
+    """
+    from src.backtest.metrics import outcome
+
+    same_exit = [_trade(100.0, 100.0, pnl) for pnl in (0.05, 0.14, 0.35, 0.70)]
+    assert {outcome(t) for t in same_exit} == {"breakeven"}
+
+
+def test_missing_prices_fall_back_to_pnl_sign():
+    """Старые прогоны и частичные выгрузки не должны ломать форму отчёта."""
+    from src.backtest.metrics import LOSS, WIN, outcome
+
+    assert outcome({"pnl": +1.0}) == WIN
+    assert outcome({"pnl": -1.0}) == LOSS
+
+
+def test_counts_keep_breakeven_in_the_denominator():
+    from src.backtest.metrics import outcome_counts
+
+    c = outcome_counts([
+        _trade(100.0, 110.0, +2.0),
+        _trade(100.0, 100.0, +0.14),
+        _trade(100.0, 100.0, +0.14),
+        _trade(100.0, 95.0, -1.0),
+    ])
+    assert (c["wins"], c["breakevens"], c["losses"]) == (1, 2, 1)
+    # 1 из 4, а не 1 из 2: вынести безубытки из знаменателя — снова сделать
+    # winrate управляемым долей партиала.
+    assert c["win_rate"] == 25.0
+    assert c["breakeven_rate"] == 50.0
+    assert c["loss_rate"] == 25.0
+
+
+def test_summarize_reports_all_three_classes():
+    from src.backtest.metrics import summarize
+
+    out = summarize([
+        dict(_trade(100.0, 110.0, +2.0), risk=1.0, entry_time="2026-09-01T00:00:00"),
+        dict(_trade(100.0, 100.0, +0.14), risk=1.0, entry_time="2026-09-02T00:00:00"),
+        dict(_trade(100.0, 95.0, -1.0), risk=1.0, entry_time="2026-09-03T00:00:00"),
+    ])
+    assert (out["wins"], out["breakevens"], out["losses"]) == (1, 1, 1)
+    assert out["win_rate"] == 33.3
+
+
+def test_empty_summary_has_the_new_keys():
+    from src.backtest.metrics import summarize
+
+    out = summarize([])
+    for key in ("wins", "breakevens", "losses", "win_rate", "breakeven_rate", "loss_rate"):
+        assert key in out

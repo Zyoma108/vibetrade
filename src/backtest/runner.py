@@ -15,6 +15,7 @@ import logging
 from pathlib import Path
 
 from src.backtest.engine import DEFAULT_MARKETS_PATH, load_data, load_markets, simulate
+from src.backtest.metrics import outcome_counts
 from src.config import Settings
 
 logger = logging.getLogger(__name__)
@@ -60,10 +61,13 @@ def _load_live_stats(db_path: str) -> dict | None:
         db.close()
         return None
 
-    wins = sum(1 for t in trades if (t[6] or 0) > 0)
-    losses = sum(1 for t in trades if (t[6] or 0) <= 0)
     total_pnl = sum(t[6] or 0 for t in trades)
-    win_rate = wins / len(trades) * 100 if trades else 0
+    # Классификация исхода — общая с движком (metrics.outcome): безубыток
+    # отдельным классом, иначе снятая с б/у стопа сделка попадает в «плюс».
+    counts = outcome_counts([
+        {"entry_price": t[2], "exit_price": t[3], "pnl": t[6] or 0.0, "direction": t[1]}
+        for t in trades
+    ])
 
     # Диапазон дат
     entry_times = [t[4] for t in trades if t[4]]
@@ -89,9 +93,7 @@ def _load_live_stats(db_path: str) -> dict | None:
 
     return {
         "trades": len(trades),
-        "wins": wins,
-        "losses": losses,
-        "win_rate": round(win_rate, 1),
+        **counts,
         "total_pnl": round(total_pnl, 2),
         "avg_pnl": round(total_pnl / len(trades), 2) if trades else 0,
         "period": period,
@@ -112,12 +114,15 @@ def _print_comparison(bt: dict, live: dict | None) -> None:
 
     rows = [
         ("Сделок", str(bt["trades"]), str(live["trades"]) if live else "—"),
-        ("Плюс / Минус",
-         f"{bt['wins']} / {bt['losses']}",
-         f"{live['wins']} / {live['losses']}" if live else "—"),
-        ("Win rate",
+        ("Плюс / б/у / минус",
+         f"{bt['wins']} / {bt['breakevens']} / {bt['losses']}",
+         f"{live['wins']} / {live['breakevens']} / {live['losses']}" if live else "—"),
+        ("Win rate (б/у в знаменателе)",
          f"{bt['win_rate']}%",
          f"{live['win_rate']}%" if live else "—"),
+        ("Доля безубытков",
+         f"{bt['breakeven_rate']}%",
+         f"{live['breakeven_rate']}%" if live else "—"),
         ("Total PnL",
          f"${bt['total_pnl']:+.2f}",
          f"${live['total_pnl']:+.2f}" if live else "—"),
@@ -222,8 +227,9 @@ def main():
     print(f"  Период:            {result['period']}")
     print(f"  Сигналов:          {result['signals']}")
     print(f"  Сделок:            {result['trades']}")
-    print(f"  Плюс / Минус:      {result['wins']} / {result['losses']}")
-    print(f"  Win rate:          {result['win_rate']}%")
+    print(f"  Плюс / б/у / минус: {result['wins']} / {result['breakevens']} / {result['losses']}")
+    print(f"  Win rate:          {result['win_rate']}% (безубытки в знаменателе, "
+          f"их доля {result['breakeven_rate']}%)")
     print(f"  Total PnL:         ${result['total_pnl']:+.2f} (net of fees)")
     print(f"  Средний PnL:       ${result['avg_pnl']:+.2f}")
 

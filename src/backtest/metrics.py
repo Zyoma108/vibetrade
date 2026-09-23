@@ -13,7 +13,15 @@
   * безубыточные сделки НЕ исключаются из статистики и не выносятся из
     знаменателя winrate: они честно весят своим вкладом в R. Исключение их
     делает winrate управляемым через partial_close_qty_pct, не меняя денег;
-  * winrate — отчётная величина, целевой считается только вместе с E[R].
+  * winrate — отчётная величина, целевой считается только вместе с E[R];
+  * безубыток — ОТДЕЛЬНЫЙ класс исхода (`outcome`), а не «плюс»: сделку, снятую
+    с безубыточного стопа, market вернул к цене входа, и считать её успешной
+    неверно. В знаменателе winrate безубытки при этом остаются — см.
+    `outcome_counts`.
+
+Модуль намеренно не имеет зависимостей кроме stdlib: его импортирует не только
+бэктест, но и боевая отчётность (`storage/stats.py` для /stats в Telegram),
+чтобы классификация исхода не разъехалась между отчётами двумя копиями.
 """
 
 import random
@@ -24,6 +32,82 @@ import statistics as st
 # флаки, а сравнение двух свипов — невоспроизводимым.
 BOOTSTRAP_SEED = 20260922
 BOOTSTRAP_RESAMPLES = 10_000
+
+
+WIN, BREAKEVEN, LOSS = "win", "breakeven", "loss"
+
+# Полуширина полосы «вышли примерно там, где вошли», % от цены входа.
+#
+# Полоса не подгонная, она зажата с двух сторон. Снизу — фактическим разбросом
+# исполнения безубыточного стопа и комиссией: замер 42 стоповых и 38
+# безубыточных выходов на боевой БД 27.08-22.09.2026 дал отклонение выхода в
+# б/у медианно −0.003%, максимум 0.219%, а круговая комиссия в ценовом
+# выражении около 0.11%. Сверху — ближайшими настоящими исходами: триггер
+# партиала стоит на +3.5% от входа, стоп на −5%. 0.5% даёт семикратный запас в
+# обе стороны, поэтому полоса не может проглотить ни настоящую прибыль, ни
+# настоящий убыток.
+BREAKEVEN_BAND_PCT = 0.5
+
+
+def outcome(trade, band_pct: float = BREAKEVEN_BAND_PCT) -> str:
+    """Исход сделки: `win` / `breakeven` / `loss`.
+
+    Безубыток — отдельная категория, а не «плюс». Сделка, которую сняли с
+    безубыточного стопа после частичной фиксации, приносит только
+    забронированную на триггере часть: при доле 20%, RR 2.0 и триггере на 35%
+    пути до TP это +0.14R против +2R у полного тейка. Считать её успешной
+    неверно: рынок вернулся к цене входа, и сетап не отработал.
+
+    Классификация по ЦЕНЕ ВЫХОДА относительно входа, а не по механизму и не по
+    знаку PnL. Почему так:
+
+    * по знаку PnL безубыток попадает в плюс, ради чего эта функция и появилась;
+    * по механизму («был партиал и вышли по стопу») категория становится
+      управляемой через `partial_close_qty_pct`: подняв долю, можно двигать
+      winrate, не меняя денег. По цене выхода доля не влияет ни на что — она
+      меняет только РАЗМЕР результата, а не его класс;
+    * выход по времени, случайно оказавшийся у цены входа, — тоже безубыток по
+      существу, и цена его так и классифицирует.
+
+    Требует `entry_price` и `exit_price`. Их нет (частичные данные, старые
+    прогоны) — остаётся двухклассовый ответ по знаку PnL, чтобы форма отчёта не
+    ломалась.
+    """
+    entry = trade.get("entry_price")
+    exit_price = trade.get("exit_price")
+    pnl = trade.get("pnl") or 0.0
+    if not entry or not exit_price:
+        return WIN if pnl > 0 else LOSS
+    # Сравнение в ЦЕНЕ, а не в процентах: пересчёт в проценты через деление
+    # сдвигает границу на ошибку округления — (99.5/100 - 1) * 100 даёт
+    # -0.5000000000000004, и цена ровно на краю полосы выпадала из безубытка.
+    move = exit_price - entry
+    if (trade.get("direction") or "long") == "short":
+        move = -move
+    if abs(move) <= abs(entry) * band_pct / 100:
+        return BREAKEVEN
+    return WIN if move > 0 else LOSS
+
+
+def outcome_counts(trades, band_pct: float = BREAKEVEN_BAND_PCT) -> dict:
+    """Три счётчика исходов плюс доли. Знаменатель всех долей — ВСЕ сделки.
+
+    Безубыток из знаменателя не выносится. Вынести — значит снова сделать
+    winrate управляемым: доля партиала определяет, сколько сделок окажется в
+    безубытке, и «winrate без безубытков» поехал бы вместе с ней при тех же
+    деньгах. Три числа рядом честнее одного, а решение всё равно принимается по
+    E[R] с интервалом (AGENTS.md, правило 8).
+    """
+    n = len(trades)
+    c = {WIN: 0, BREAKEVEN: 0, LOSS: 0}
+    for t in trades:
+        c[outcome(t, band_pct)] += 1
+    return {
+        "wins": c[WIN], "breakevens": c[BREAKEVEN], "losses": c[LOSS],
+        "win_rate": round(100 * c[WIN] / n, 1) if n else None,
+        "breakeven_rate": round(100 * c[BREAKEVEN] / n, 1) if n else None,
+        "loss_rate": round(100 * c[LOSS] / n, 1) if n else None,
+    }
 
 
 def bootstrap_ci(values, confidence: float = 0.95, resamples: int = BOOTSTRAP_RESAMPLES,
@@ -113,6 +197,8 @@ def summarize(trades, days: float | None = None, deposit: float | None = None):
             "trades": 0, "expectancy_R": None, "expectancy_R_ci": None,
             "expectancy_R_significant": False, "total_R": 0.0, "sd_R": None,
             "profit_factor": None, "win_rate": None, "total_pnl": 0.0,
+            "wins": 0, "breakevens": 0, "losses": 0,
+            "breakeven_rate": None, "loss_rate": None,
             "max_drawdown_R": 0.0, "worst_loss_streak": 0,
             "hold_hours_median": None, "hold_hours_p90": None,
         }
@@ -152,7 +238,7 @@ def summarize(trades, days: float | None = None, deposit: float | None = None):
         "total_R": round(sum(rs), 2) if rs else None,
         "sd_R": round(st.pstdev(rs), 3) if len(rs) > 1 else None,
         "profit_factor": round(gross_win / gross_loss, 3) if gross_loss else None,
-        "win_rate": round(100 * sum(1 for p in pnls if p > 0) / len(pnls), 1),
+        **outcome_counts(trades),
         "total_pnl": round(sum(pnls), 2),
         **equity_metrics(trades),
     }
