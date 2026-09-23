@@ -89,6 +89,42 @@ def outcome(trade, band_pct: float = BREAKEVEN_BAND_PCT) -> str:
     return WIN if move > 0 else LOSS
 
 
+# Допуск на попадание в тейк: TP выставлен лимитным ордером, и цена закрытия
+# совпадает с ним с точностью до шага цены инструмента.
+FULL_TAKE_TOLERANCE_PCT = 0.1
+
+
+def is_full_take(trade, tolerance_pct: float = FULL_TAKE_TOLERANCE_PCT) -> bool | None:
+    """Дошла ли сделка до полного тейка. None — `tp_price` неизвестна.
+
+    Отдельно от `outcome`, потому что это разные вопросы. `outcome` отвечает
+    «вышли выше или ниже входа», а полный тейк — «сетап отработал до конца».
+    Между ними лежат выходы по времени: замер 26 суток дал 4 сделки из 108,
+    вышедшие в плюс, но не доехавшие до TP, и 5 — в минус, но не доехавшие до
+    стопа.
+
+    Зачем нужна отдельная величина. Доля полных тейков — единственная отчётная
+    метрика проекта, которая (а) не управляема `partial_close_qty_pct`: поднять
+    долю партиала полных тейков не создаёт; (б) линейно связана с деньгами при
+    фиксированном RR. Замер 23.09.2026: при RR 2.0 и доле 20% один полный тейк
+    вместо стопа стоит +2.7R, то есть один лишний тейк на 108 сделок ≈ +2.7% к
+    депозиту в месяц при риске 1%. Вся дистанция от убыточности системы (18.9%
+    тейков) до +30%/мес (27.8%) — девять процентных пунктов.
+
+    ВНИМАНИЕ: порог доли тейков имеет смысл только при фиксированном RR. Дальний
+    TP делает тейки реже, но дороже, поэтому пороги из docs/backtest.md заданы
+    для RR 2.0 и при его изменении должны пересчитываться.
+    """
+    tp = trade.get("tp_price")
+    entry = trade.get("entry_price")
+    exit_price = trade.get("exit_price")
+    if not tp or not exit_price or not entry:
+        return None
+    if (trade.get("direction") or "long") == "short":
+        return exit_price <= tp * (1 + tolerance_pct / 100)
+    return exit_price >= tp * (1 - tolerance_pct / 100)
+
+
 def breakeven_credit(risk_reward_ratio: float, partial_close_pct: float,
                      partial_close_qty_pct: float) -> float:
     """Какую долю полного тейка приносит безубыток. 0.0 — партиала нет вовсе.
@@ -130,11 +166,17 @@ def outcome_counts(trades, band_pct: float = BREAKEVEN_BAND_PCT,
         c[o] += 1
         if o == BREAKEVEN and (t.get("pnl") or 0.0) > 0:
             be_profitable += 1
+    takes = [is_full_take(t) for t in trades]
+    known = [x for x in takes if x is not None]
     out = {
         "wins": c[WIN], "breakevens": c[BREAKEVEN], "losses": c[LOSS],
         "win_rate": round(100 * c[WIN] / n, 1) if n else None,
         "breakeven_rate": round(100 * c[BREAKEVEN] / n, 1) if n else None,
         "loss_rate": round(100 * c[LOSS] / n, 1) if n else None,
+        # Доля полных тейков — целевая отчётная величина проекта, см.
+        # `is_full_take` и docs/backtest.md. None, если `tp_price` неизвестна.
+        "full_takes": sum(known) if known else None,
+        "full_take_rate": round(100 * sum(known) / n, 1) if known and n else None,
     }
     if be_credit is not None:
         # Безубыток засчитывается в победы ПРОПОРЦИОНАЛЬНО прибыли от полного
@@ -238,6 +280,7 @@ def summarize(trades, days: float | None = None, deposit: float | None = None,
             "profit_factor": None, "win_rate": None, "total_pnl": 0.0,
             "wins": 0, "breakevens": 0, "losses": 0,
             "breakeven_rate": None, "loss_rate": None,
+            "full_takes": 0, "full_take_rate": None,
             **({"breakeven_credit": round(be_credit, 4),
                 "breakeven_equivalent_wins": 0.0,
                 "win_rate_weighted": None} if be_credit is not None else {}),

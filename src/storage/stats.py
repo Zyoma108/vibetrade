@@ -50,9 +50,13 @@ async def trade_stats(session, period: str = "all", trading=None) -> str:
     # триггере часть (при доле 20% и RR 2.0 это +0.14R против +2R у полного
     # тейка), и рынок при этом вернулся к цене входа. Классификация общая с
     # бэктестом — `metrics.outcome`, чтобы отчёты не расходились.
+    # tp_price в `trades` не хранится — восстанавливается из конфига так же,
+    # как его считает PositionManager._tp_price.
+    tp_mult = (1 + trading.stop_loss_pct / 100 * trading.risk_reward_ratio) if trading else None
     counts = outcome_counts(
         [{"entry_price": t.entry_price, "exit_price": t.exit_price,
-          "pnl": t.pnl or 0.0, "direction": t.direction}
+          "pnl": t.pnl or 0.0, "direction": t.direction,
+          "tp_price": (t.entry_price * tp_mult if tp_mult and t.entry_price else None)}
          for t in trades],
         be_credit=(breakeven_credit(trading.risk_reward_ratio, trading.partial_close_pct,
                                     trading.partial_close_qty_pct) if trading else None),
@@ -66,7 +70,10 @@ async def trade_stats(session, period: str = "all", trading=None) -> str:
         f"Сделок: {len(trades)}\n"
         f"Тейк: {counts['wins']} | Безубыток: {counts['breakevens']} | "
         f"Стоп: {counts['losses']}\n"
-        f"Win rate: {counts['win_rate']:.0f}% (безубытки не в счёт)\n"
+        + (f"Полных тейков: {counts['full_takes']} = {counts['full_take_rate']:.1f}% "
+           f"(цель ≥25%, убыточность ниже 19%)\n"
+           if counts.get("full_take_rate") is not None else "")
+        + f"Win rate: {counts['win_rate']:.0f}% (безубытки не в счёт)\n"
         + (f"Win rate взвеш.: {counts['win_rate_weighted']:.1f}% "
            f"(безубыток = 1/{1/counts['breakeven_credit']:.1f} тейка, "
            f"зачтено {counts['breakeven_equivalent_wins']:.1f})\n"

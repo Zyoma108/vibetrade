@@ -68,8 +68,13 @@ def _load_live_stats(db_path: str, trading=None) -> dict | None:
     total_pnl = sum(t[6] or 0 for t in trades)
     # Классификация исхода — общая с движком (metrics.outcome): безубыток
     # отдельным классом, иначе снятая с б/у стопа сделка попадает в «плюс».
+    # tp_price у боевых сделок не хранится — восстанавливается из конфига, как
+    # его считает PositionManager._tp_price. Конфига нет — доля тейков не
+    # появится в отчёте, а не посчитается неверно.
+    tp_mult = (1 + trading.stop_loss_pct / 100 * trading.risk_reward_ratio) if trading else None
     counts = outcome_counts(
-        [{"entry_price": t[2], "exit_price": t[3], "pnl": t[6] or 0.0, "direction": t[1]}
+        [{"entry_price": t[2], "exit_price": t[3], "pnl": t[6] or 0.0, "direction": t[1],
+          "tp_price": (t[2] * tp_mult if tp_mult and t[2] else None)}
          for t in trades],
         be_credit=(breakeven_credit(trading.risk_reward_ratio, trading.partial_close_pct,
                                     trading.partial_close_qty_pct) if trading else None),
@@ -123,6 +128,9 @@ def _print_comparison(bt: dict, live: dict | None) -> None:
         ("Тейк / б/у / стоп",
          f"{bt['wins']} / {bt['breakevens']} / {bt['losses']}",
          f"{live['wins']} / {live['breakevens']} / {live['losses']}" if live else "—"),
+        ("Доля ПОЛНЫХ ТЕЙКОВ (цель ≥25%)",
+         f"{bt.get('full_take_rate', '—')}%",
+         f"{live.get('full_take_rate', '—')}%" if live else "—"),
         ("Win rate (б/у не в счёт)",
          f"{bt['win_rate']}%",
          f"{live['win_rate']}%" if live else "—"),
@@ -238,6 +246,12 @@ def main():
     print(f"  Сигналов:          {result['signals']}")
     print(f"  Сделок:            {result['trades']}")
     print(f"  Тейк / б/у / стоп: {result['wins']} / {result['breakevens']} / {result['losses']}")
+    if result.get("full_take_rate") is not None:
+        rate = result["full_take_rate"]
+        verdict = ("ЦЕЛЬ" if rate >= 25 else "порог" if rate >= 22
+                   else "выше убыточности" if rate >= 18.9 else "УБЫТОЧНО")
+        print(f"  Полных тейков:     {result['full_takes']} = {rate}% ({verdict}; "
+              f"18.9% — безубыток системы, 22% — порог, 25% — цель 20%/мес при RR 2.0)")
     print(f"  Win rate:          {result['win_rate']}% (безубытки не в счёт, "
           f"их доля {result['breakeven_rate']}%)")
     if result.get("breakeven_credit"):
