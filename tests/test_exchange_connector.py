@@ -229,3 +229,55 @@ async def test_real_failure_is_swallowed_and_retried_next_time():
 
     assert len(fake.mode_calls) == 2
     assert conn._one_way_symbols == set()
+
+
+# Плечо выше биржевого максимума. 24.09.2026 сигнал TUT не открылся: ByBit
+# снизил TUT максимум до 5x, на символе осталось 10x, set_leverage(10) ответил
+# "leverage not modified", а ордер — 110013 "cannot set leverage [1000] gt
+# maxLeverage [500] by risk limit".
+
+
+class _LeverageCcxt(_FakeCcxt):
+    def __init__(self, tiers=None, tiers_error: Exception | None = None):
+        super().__init__("ok")
+        self.leverage_calls: list[tuple] = []
+        self._tiers = tiers
+        self._tiers_error = tiers_error
+
+    def fetch_market_leverage_tiers(self, symbol, params=None):
+        if self._tiers_error is not None:
+            raise self._tiers_error
+        return self._tiers
+
+    def set_leverage(self, leverage, symbol=None, params=None):
+        self.leverage_calls.append((leverage, symbol))
+        return {"retCode": 0}
+
+
+async def test_leverage_clamped_to_exchange_max():
+    fake = _LeverageCcxt(tiers=[{"tier": 1, "maxLeverage": 5.0},
+                                {"tier": 2, "maxLeverage": 4.9}])
+    conn = _mode_connector(fake)
+
+    await conn.set_leverage("TUT/USDT:USDT", 10)
+
+    assert fake.leverage_calls == [(5.0, "TUT/USDT:USDT")]
+
+
+async def test_leverage_below_max_untouched():
+    fake = _LeverageCcxt(tiers=[{"tier": 1, "maxLeverage": 50.0}])
+    conn = _mode_connector(fake)
+
+    await conn.set_leverage("ETH/USDT:USDT", 10)
+
+    assert fake.leverage_calls == [(10, "ETH/USDT:USDT")]
+
+
+async def test_leverage_falls_back_to_config_when_tiers_unavailable():
+    """Не узнали максимум — ставим как в конфиге, а не отказываемся от входа."""
+    fake = _LeverageCcxt(tiers_error=ccxt.ExchangeError("недоступно"))
+    conn = _mode_connector(fake)
+
+    await conn.set_leverage("ETH/USDT:USDT", 10)
+
+    assert fake.leverage_calls == [(10, "ETH/USDT:USDT")]

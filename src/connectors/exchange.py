@@ -430,9 +430,40 @@ class ExchangeConnector:
             return float(amount)
 
     async def set_leverage(self, symbol: str, leverage: int) -> None:
-        """Установить плечо для символа."""
-        logger.info(f"{self.exchange_id}: устанавливаю плечо {leverage}x для {symbol}")
+        """Установить плечо для символа, не выше биржевого максимума.
+
+        ByBit режет максимум плеча у отдельных монет (у TUT — 5x), но плечо,
+        выставленное на символе раньше, при этом не трогает. Попытка поставить
+        те же 10x отвечает 110043 "leverage not modified", а рыночный ордер
+        следом — 110013 "cannot set leverage [1000] gt maxLeverage [500]" (в
+        сотых долях). Так 24.09.2026 не открылся сигнал TUT. Поэтому максимум
+        читается свежим на каждый вход (кеш рынков ccxt живёт до перезапуска и
+        снижения не увидит) и плечо прижимается к нему: 5x вместо 10x меняет
+        только маржу, риск на сделку задаётся стопом и от плеча не зависит.
+        """
+        max_lev = await self._max_leverage(symbol)
+        if max_lev and leverage > max_lev:
+            logger.info(
+                f"{self.exchange_id}: плечо {leverage}x для {symbol} выше "
+                f"биржевого максимума {max_lev:g}x — ставлю {max_lev:g}x"
+            )
+            leverage = max_lev
+        logger.info(f"{self.exchange_id}: устанавливаю плечо {leverage:g}x для {symbol}")
         await self._call("set_leverage", leverage, symbol)
+
+    async def _max_leverage(self, symbol: str) -> float | None:
+        """Максимум плеча на нижнем риск-тире (размеры бота в него всегда
+        укладываются), либо None, если узнать не удалось — тогда плечо ставится
+        как в конфиге и биржа ответит сама."""
+        try:
+            tiers = await self._call("fetch_market_leverage_tiers", symbol)
+            if tiers and tiers[0].get("maxLeverage"):
+                return float(tiers[0]["maxLeverage"])
+        except Exception as e:
+            logger.warning(
+                f"{self.exchange_id}: не удалось узнать максимум плеча {symbol}: {e}"
+            )
+        return None
 
     async def ensure_one_way_mode(self, symbol: str) -> None:
         """Привести символ к one-way режиму позиции. Идемпотентно, раз на процесс.
