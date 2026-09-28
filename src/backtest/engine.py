@@ -26,7 +26,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 
-from src.analytics.detector import SetupDetector
+from src.analytics.detector import WINDOW_PAD_BARS, SetupDetector
 from src.analytics.utils import OI_TREND_BARS, oi_trend_passes, timeframe_to_minutes
 from src.analytics.utils import adaptive_stop_pct
 from src.backtest.metrics import breakeven_credit, summarize
@@ -139,7 +139,7 @@ def _round_to_lot(qty: float, meta: dict | None) -> float:
 
 
 
-def build_volume_gate_mask(symbols: dict, cfg, slice_pad: int = 10) -> dict:
+def build_volume_gate_mask(symbols: dict, cfg, slice_pad: int = WINDOW_PAD_BARS) -> dict:
     """Векторный ПРЕДФИЛЬТР по объёму: где сигнал в принципе невозможен.
 
     Это не вторая реализация детектора (правило 2 AGENTS.md) — решение
@@ -153,9 +153,11 @@ def build_volume_gate_mask(symbols: dict, cfg, slice_pad: int = 10) -> dict:
         threshold = baseline * volume_surge_mult
         all(volumes[-sustain:] >= threshold)                  # бары [i-3 .. i]
 
-    Плюс shift-ретрай движка проверяет срез без последнего бара: baseline у него
-    ТОТ ЖЕ (первые baseline_bars того же среза), а sustain-окно сдвинуто на бар
-    назад — бары [i-4 .. i-1]. Поэтому допускаем бар, если проходит любое из двух.
+    Плюс shift-ретрай детектора проверяет полное окно, заканчивающееся на бар
+    раньше: и baseline, и sustain сдвинуты на бар назад — baseline [i-84 .. i-15],
+    sustain [i-4 .. i-1]. Поэтому допускаем бар, если проходит любое из двух.
+    (До 28.09.2026 окно ретрая было на бар короче и baseline у него оставался
+    прежним; маска повторяла эту геометрию — см. detector.LOAD_EXTRA_BARS.)
 
     Плюс порог ликвидности min_baseline_volume_usdt на том же baseline-окне.
 
@@ -174,7 +176,7 @@ def build_volume_gate_mask(symbols: dict, cfg, slice_pad: int = 10) -> dict:
     baseline_bars = cfg.baseline_bars
     sustain = cfg.sustain_bars
     need = baseline_bars + sustain
-    full_slice = need + slice_pad          # длина среза, который строит движок
+    full_slice = need + slice_pad          # длина окна гейтов (SetupDetector.window_bars)
     lag = full_slice - baseline_bars       # сдвиг конца baseline-окна от текущего бара
     mult = cfg.volume_surge_mult
     min_usdt = cfg.min_baseline_volume_usdt
@@ -205,18 +207,25 @@ def build_volume_gate_mask(symbols: dict, cfg, slice_pad: int = 10) -> dict:
         bm[ok_src] = base_med[src[ok_src]]
         cm[ok_src] = close_med[src[ok_src]]
 
-        thr = bm * mult
-        cur = min_sustain                                   # бары [i-sustain+1 .. i]
-        prev = _np.concatenate(([_np.nan], min_sustain[:-1]))  # бары [i-sustain .. i-1]
+        def _lag1(a):
+            return _np.concatenate(([_np.nan], a[:-1]))
+
+        cur = min_sustain                   # бары [i-sustain+1 .. i]
+        prev = _lag1(min_sustain)           # бары [i-sustain .. i-1]
+        bm_prev, cm_prev = _lag1(bm), _lag1(cm)  # baseline окна, кончающегося на i-1
 
         with _np.errstate(invalid="ignore"):
-            passes = (bm > 0) & ((cur >= thr) | (prev >= thr))
+            cur_ok = (bm > 0) & (cur >= bm * mult)
+            prev_ok = (bm_prev > 0) & (prev >= bm_prev * mult)
             if min_usdt > 0:
-                passes &= (bm * cm) >= min_usdt
+                cur_ok &= (bm * cm) >= min_usdt
+                prev_ok &= (bm_prev * cm_prev) >= min_usdt
+            passes = cur_ok | prev_ok
 
-        # Бары, где срез короче полного, не фильтруем — там индексация другая.
+        # Бары, где окно короче полного, не фильтруем — там индексация другая.
+        # Для сдвинутого окна это на бар дальше: его покрывает isnan(bm_prev).
         edge = idx < full_slice
-        masks[sym] = passes | edge | _np.isnan(bm)
+        masks[sym] = passes | edge | _np.isnan(bm) | _np.isnan(bm_prev)
     return masks
 
 
@@ -648,13 +657,14 @@ def simulate(settings, data, has_oi: bool = True, collect_retracement: bool = Tr
                     continue
 
             # Ровно столько же баров, сколько грузит боевой детектор
-            # (SetupDetector.analyze: limit = baseline_bars + sustain_bars + 10).
-            # Без "+ 1" срез длиннее на один бар, и baseline (первые baseline_bars
-            # элементов среза) съезжает на бар назад относительно живого — сдвигается
-            # медиана объёма, а значит и порог всплеска. Этот фикс был в runner.py и
-            # отсутствовал в свип-движке; унификация 26.08.2026 его потеряла.
+            # (SetupDetector.load_bars: окно гейтов плюс запас на сдвиг). Какие
+            # именно бары решают, выбирает сам детектор (`_match_volume_window`
+            # берёт полные окна `window_bars`), поэтому длина среза здесь только
+            # должна быть не меньше живой. Раньше срез был ровно окном, и
+            # shift-ретрай получал окно на бар короче — без pre-surge фильтра
+            # (исправлено 28.09.2026, см. detector.LOAD_EXTRA_BARS).
             candle_slice = []
-            for j in range(bar_idx - need_bars - 10 + 1, bar_idx + 1):
+            for j in range(bar_idx - detector.load_bars + 1, bar_idx + 1):
                 bar = _bar(sym_data, j)
                 if bar:
                     candle_slice.append({
@@ -673,7 +683,7 @@ def simulate(settings, data, has_oi: bool = True, collect_retracement: bool = Tr
             vol_window = detector._match_volume_window(
                 candle_slice, min_bars=need_bars, context=vol_ctx
             )
-            if vol_window is not None and len(vol_window) < len(candle_slice):
+            if vol_window is not None and detector.window_is_shifted(vol_window, candle_slice):
                 shift_used_count += 1
 
             if vol_window is None:

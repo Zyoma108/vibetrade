@@ -823,6 +823,38 @@ def _noisy_market_db(path, n_symbols: int = 6, n_bars: int = 420, seed: int = 20
 
 
 class TestVolumeGatePrefilter:
+    def test_mask_admits_shift_with_its_own_baseline(self):
+        """Сдвинутое окно — полное, со СВОИМ baseline на бар раньше (28.09.2026).
+
+        Ряд подобран так, что медиана baseline у двух окон разная: у текущего
+        (бары 16..85) 35 баров по 100 и 35 по 1000, медиана 550; у сдвинутого
+        (15..84) 36 по 100, медиана 100. Текущее окно отказывает «тихо»
+        (последний бар 50), сдвинутое проходит порог 300. Маска со старой
+        геометрией (baseline ретрая = baseline текущего окна) съела бы этот бар.
+        """
+        n = 100
+        vol = [100.0] * n
+        for i in range(51, 86):
+            vol[i] = 1000.0
+        for i in range(95, 99):
+            vol[i] = 500.0
+        vol[99] = 50.0
+        t0 = datetime(2026, 9, 1)
+        rows = [(t0 + timedelta(minutes=3 * i), 1.0, 1.001, 0.999, 1.0, v)
+                for i, v in enumerate(vol)]
+
+        cfg = StrategyConfig(baseline_bars=70, sustain_bars=4, volume_surge_mult=3.0,
+                             dump_volume_mult=0.0, min_baseline_volume_usdt=0.0)
+        detector = SetupDetector(cfg)
+        candle_slice = [{"open": r[1], "high": r[2], "low": r[3], "close": r[4],
+                         "volume": r[5]} for r in rows[n - detector.load_bars:]]
+        window = detector._match_volume_window(candle_slice, min_bars=74, context={})
+        assert window is not None and detector.window_is_shifted(window, candle_slice), \
+            "фикстура должна давать сетап только через сдвиг"
+
+        mask = build_volume_gate_mask({"X": rows}, cfg)
+        assert mask["X"][99], "маска съела сдвинутый сетап"
+
     def test_results_are_identical_with_and_without(self, tmp_path):
         """Главная проверка: посделочный список обязан совпасть целиком."""
         db = tmp_path / "noisy.db"
@@ -869,15 +901,17 @@ class TestVolumeGatePrefilter:
         checked = accepted = 0
         for sym, rows in data["symbols"].items():
             for i in range(need, len(rows)):
+                # Та же геометрия, что у движка: срез load_bars, а решают полные
+                # окна детектора — текущее и сдвинутое на бар (_match_volume_window).
                 candle_slice = [
                     {"open": r[1], "high": r[2], "low": r[3],
                      "close": r[4], "volume": r[5]}
-                    for r in rows[max(0, i - need - 9):i + 1]
+                    for r in rows[max(0, i - detector.load_bars + 1):i + 1]
                 ]
                 if len(candle_slice) < need:
                     continue
                 checked += 1
-                for window in (candle_slice, candle_slice[:-1]):
+                for window in (detector._window(candle_slice), detector._window(candle_slice, 1)):
                     if len(window) >= need and detector.check_volume_pattern(window, {}):
                         accepted += 1
                         assert mask[sym][i], f"{sym} бар {i}: маска съела кандидата"
@@ -905,6 +939,10 @@ def test_engine_calls_detector_shift_retry_instead_of_copying_it(golden_db, monk
 
     assert calls, "движок не позвал общий метод детектора"
     assert result["trades"] == 1, "поведение при этом не изменилось"
+    # Срез длиной с живую загрузку: окно плюс запас на сдвиг. Ровно окно давало
+    # ретраю 83 бара и выключало pre-surge (28.09.2026).
+    detector = SetupDetector(_settings().strategy)
+    assert max(calls) == detector.load_bars
 
 
 def test_maturity_threshold_does_not_touch_the_backtest(golden_db):
