@@ -39,6 +39,24 @@ VOLUME_OVERSIZED_STAGES = frozenset({"volume_spike", "volume_dump"})
 VOLUME_UNDERSIZED_STAGES = frozenset({"volume_fading", "volume_declining"})
 VOLUME_REVERSAL_STAGES = VOLUME_OVERSIZED_STAGES | VOLUME_UNDERSIZED_STAGES
 
+# Окно гейтов = baseline_bars + WINDOW_PAD_BARS + sustain_bars. Промежуток
+# между baseline и sustain-окном — это место pre-surge фильтра
+# (`pre_surge_bars`, 10 по умолчанию): `check_volume_pattern` берёт baseline
+# как ПЕРВЫЕ baseline_bars бар окна, `check_price_trend` меряет pre-surge на
+# барах перед sustain и пропускает проверку целиком, если окно короче полного.
+WINDOW_PAD_BARS = 10
+# Сверх окна грузим два бара: один на shift-ретрай (то же окно, заканчивающееся
+# на бар раньше) и ещё один на ретрай внутри `_closed_bar_verdict`, который
+# работает на окне уже без формирующегося бара.
+#
+# До 28.09.2026 грузили ровно окно, а ретрай брал `candles[:-1]` — на бар
+# КОРОЧЕ полного. На таком окне sustain уезжал на бар назад, baseline оставался
+# на месте (промежуток 9 баров вместо 10), а pre_surge_pump не проверялся вовсе:
+# условие `len >= baseline + sustain + pre_surge_bars` не выполнялось. Живой бот
+# сдвигает окно у ~73% сигналов, движок — редко; через эту дыру на 27.08-22.09
+# прошли 11-13 живых сделок (E[R] от −0.25 до −0.09, не значимо), см. docs/strategy.md.
+LOAD_EXTRA_BARS = 2
+
 
 class SetupDetector(BaseDetector):
     """Детектор сетапов: плавный рост объёмов + OI → начало пампа."""
@@ -104,8 +122,9 @@ class SetupDetector(BaseDetector):
         seen = set()
         for exchange, symbol in symbols:
             try:
-                limit = self.config.baseline_bars + self.config.sustain_bars + 10
-                candles = await self._dp.load_candles(session, exchange, symbol, limit)
+                candles = await self._dp.load_candles(
+                    session, exchange, symbol, self.load_bars
+                )
                 min_bars = self.config.baseline_bars + self.config.sustain_bars
                 if len(candles) < min_bars:
                     continue
@@ -150,7 +169,7 @@ class SetupDetector(BaseDetector):
                 # не воспроизводит (там нет формирующегося бара), поэтому
                 # сравнивать исходы сдвинутых и обычных сигналов придётся на
                 # живых данных.
-                signal.volume_window_shifted = int(len(vol_window) < len(candles))
+                signal.volume_window_shifted = int(self.window_is_shifted(vol_window, candles))
                 await self._annotate_closed_bar(
                     session, exchange, symbol, candles, vol_window, min_bars, signal,
                     age_sec=age_sec,
@@ -187,6 +206,38 @@ class SetupDetector(BaseDetector):
     # Выбор объёмного окна (ЕДИНСТВЕННАЯ реализация — см. AGENTS.md, правило 2)
     # ------------------------------------------------------------------
 
+    @property
+    def window_bars(self) -> int:
+        """Длина окна, на котором решают гейты (84 при боевом конфиге)."""
+        return self.config.baseline_bars + self.config.sustain_bars + WINDOW_PAD_BARS
+
+    @property
+    def load_bars(self) -> int:
+        """Сколько баров грузить на монету: окно плюс запас на сдвиги.
+
+        Этим же числом строит срез движок бэктеста — геометрия окна должна
+        совпадать с живой до бара.
+        """
+        return self.window_bars + LOAD_EXTRA_BARS
+
+    def _window(self, candles: list[dict], shift: int = 0) -> list[dict]:
+        """Полное окно гейтов, заканчивающееся на `shift` баров раньше последнего.
+
+        Если истории меньше, окно короче — так было и раньше на молодых монетах.
+        Срез, а не копия: `window_is_shifted` сравнивает бары по идентичности.
+        """
+        end = len(candles) - shift
+        return candles[max(0, end - self.window_bars):end]
+
+    @staticmethod
+    def window_is_shifted(window: list[dict], candles: list[dict]) -> bool:
+        """Взято ли окно со сдвигом, то есть без последнего бара `candles`.
+
+        По длине это больше не видно: `candles` длиннее окна на LOAD_EXTRA_BARS,
+        и несдвинутое окно тоже короче исходного списка.
+        """
+        return bool(window) and bool(candles) and window[-1] is not candles[-1]
+
     def _match_volume_window(
         self,
         candles: list[dict],
@@ -219,9 +270,15 @@ class SetupDetector(BaseDetector):
         стоила неверных выводов (AGENTS.md, правило 2).
 
         ``symbol`` — только для лога; None на замерочном прогоне.
+
+        ``candles`` может быть длиннее окна (так грузит ``analyze``, см.
+        ``load_bars``): решают всегда ПОЛНЫЕ окна ``window_bars`` — последнее и,
+        при сдвиге, заканчивающееся на бар раньше. Возвращается само окно; взято
+        ли оно со сдвигом — ``window_is_shifted``.
         """
-        if self.check_volume_pattern(candles, context):
-            return candles
+        current = self._window(candles)
+        if self.check_volume_pattern(current, context):
+            return current
         stage = context.get("stage")
         if stage in VOLUME_OVERSIZED_STAGES:
             return None
@@ -238,7 +295,7 @@ class SetupDetector(BaseDetector):
             return None
 
         for shift in range(1, 2):  # -1 свеча
-            shifted = candles[:-shift]
+            shifted = self._window(candles, shift)
             shift_ctx: dict = {}
             if len(shifted) >= min_bars and self.check_volume_pattern(shifted, shift_ctx):
                 if symbol is not None:
@@ -295,7 +352,7 @@ class SetupDetector(BaseDetector):
         последнего бара — то есть ровно то, что сделал бы shift-ретрай, будь он
         здесь разрешён.
         """
-        shifted = candles[:-1]
+        shifted = self._window(candles, 1)
         if len(shifted) < min_bars:
             return 0
         self._measuring = True
@@ -358,9 +415,10 @@ class SetupDetector(BaseDetector):
             return None, None
         if age_sec >= self._timeframe_sec:
             return True, None  # последний бар уже закрыт — окно и так «закрытое»
-        if len(vol_window) < len(candles):
+        if self.window_is_shifted(vol_window, candles):
             return True, None  # объём взят со сдвигом — форм. бар и так вне окна
 
+        # Без формирующегося бара; окно из него выберет _match_volume_window.
         closed = candles[:-1]
         if len(closed) < min_bars:
             return None, None

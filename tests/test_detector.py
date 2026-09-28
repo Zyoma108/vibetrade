@@ -1354,3 +1354,104 @@ class TestUndersizedVerdictMeasurement:
         assert d._match_volume_window(candles, min_bars=9, context=ctx,
                                       last_bar_age_sec=30) == candles[:-1]
         assert "shift_would_pass" not in ctx
+
+
+# ---------------------------------------------------------------------------
+# Окно shift-ретрая — полной длины (28.09.2026)
+# ---------------------------------------------------------------------------
+
+
+class TestShiftedWindowIsFullLength:
+    """Shift-ретрай обязан проверять ПОЛНОЕ окно, заканчивающееся на бар раньше.
+
+    До 28.09.2026 детектор грузил ровно окно (84 бара), а ретрай брал
+    `candles[:-1]` — 83. На таком окне sustain уезжал на бар назад, baseline
+    оставался на месте, а pre_surge_pump не проверялся вовсе: его условие
+    `len >= baseline + sustain + pre_surge_bars` не выполнялось. Живой бот
+    сдвигает окно у ~73% сигналов; на 27.08-22.09 через эту дыру прошли
+    11-13 живых сделок.
+    """
+
+    @staticmethod
+    def _d(**over):
+        params = dict(volume_surge_mult=3.0, dump_volume_mult=0.0, pre_surge_max_pct=3.0,
+                      max_window_range_pct=0.0)
+        params.update(over)
+        return _detector(**params)
+
+    @staticmethod
+    def _pumped_before_sustain(d) -> list[dict]:
+        """load_bars свечей: текущее окно не добирает порог «тихо» (последний
+        бар ещё не набрал объём), сдвинутое проходит объём, а за 10 баров до
+        его sustain-окна цена уже выросла на 5% — pre-surge обязан отказать."""
+        n = d.load_bars                      # 86: бары 0..85
+        volume = [100.0] * n
+        for i in (n - 5, n - 4, n - 3, n - 2):
+            volume[i] = 500.0                # sustain сдвинутого окна: бары 81..84
+        volume[-1] = 50.0                    # формирующийся бар — «тихий» отказ
+        path = [1.0] * (n + 1)
+        start, end = n - 15, n - 5           # pre-окно сдвинутого окна: бары 71..80
+        for i in range(start, n + 1):
+            path[i] = 1.0 + 0.05 * min(i - start, end - start) / (end - start)
+        for i in range(end + 1, n + 1):
+            path[i] = path[i - 1] * 1.005    # рост внутри sustain, выше min 1%
+        return _candles(n, volume=volume, price_path=path)
+
+    def test_load_and_window_sizes(self):
+        d = self._d()
+        assert d.window_bars == 70 + 4 + 10
+        assert d.load_bars == d.window_bars + 2
+
+    def test_shifted_window_is_full_and_ends_one_bar_earlier(self):
+        d = self._d()
+        candles = self._pumped_before_sustain(d)
+        window = d._match_volume_window(candles, min_bars=74, context={})
+        assert window is not None, "объём сдвинутого окна проходит"
+        assert len(window) == d.window_bars
+        assert window[-1] is candles[-2] and window[0] is candles[-2 - d.window_bars + 1]
+        assert d.window_is_shifted(window, candles)
+
+    def test_pre_surge_is_checked_on_shifted_window(self):
+        d = self._d()
+        candles = self._pumped_before_sustain(d)
+        window = d._match_volume_window(candles, min_bars=74, context={})
+        ctx: dict = {}
+        assert d.check_price_trend(window, ctx) is None
+        assert ctx["stage"] == "pre_surge_pump", ctx
+
+    def test_old_short_window_skipped_pre_surge(self):
+        """Документирует сам дефект: на окне в 83 бара pre-surge молчит."""
+        d = self._d()
+        candles = self._pumped_before_sustain(d)
+        old_window = candles[-d.window_bars:][:-1]   # как было: 84 загружено, [:-1]
+        ctx: dict = {}
+        d.check_price_trend(old_window, ctx)
+        assert ctx.get("stage") != "pre_surge_pump"
+
+    def test_unshifted_path_sees_the_same_window_as_before(self):
+        """Несдвинутое окно — последние window_bars баров, то есть ровно то,
+        что детектор грузил до правки: этот путь правка не меняет."""
+        d = self._d()
+        candles = self._pumped_before_sustain(d)
+        candles[-1]["volume"] = 500.0        # теперь проходит без сдвига
+        window = d._match_volume_window(candles, min_bars=74, context={})
+        assert window == candles[-d.window_bars:]
+        assert not d.window_is_shifted(window, candles)
+
+    def test_measurements_use_full_windows(self, monkeypatch):
+        """Замеры (shift_would_pass, closed_bar_ok) зовут гейты на тех же полных
+        окнах — иначе и они не видят pre-surge."""
+        d = self._d()
+        candles = self._pumped_before_sustain(d)
+        seen: list[int] = []
+        original = SetupDetector.check_volume_pattern
+
+        def spy(self, c, context=None):
+            seen.append(len(c))
+            return original(self, c, context)
+
+        monkeypatch.setattr(SetupDetector, "check_volume_pattern", spy)
+        d._shift_would_pass(candles, min_bars=74)
+        current = candles[-d.window_bars:]
+        d._closed_bar_verdict(candles, current, min_bars=74, age_sec=90)
+        assert seen and set(seen) == {d.window_bars}, seen
