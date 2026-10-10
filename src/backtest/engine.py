@@ -485,7 +485,9 @@ def simulate(settings, data, has_oi: bool = True, collect_retracement: bool = Tr
                 continue
             _, o, high, low, close, v = row
 
-            if not pos.partial_closed and not pos.partial_unavailable:
+            # partial_close_pct = 0 — механизм выключен целиком (как в проде:
+            # PositionManager._check_partial_close_fallback / _partial_qty).
+            if cfg.partial_close_pct > 0 and not pos.partial_closed and not pos.partial_unavailable:
                 trigger = pos.entry_price + (pos.tp_price - pos.entry_price) * (cfg.partial_close_pct / 100)
                 if high >= trigger:
                     close_qty = pos.quantity * (cfg.partial_close_qty_pct / 100)

@@ -632,6 +632,28 @@ def test_breakeven_exit_without_partial_is_neutral_for_circuit_breaker(cb_parity
     )
 
 
+def test_partial_close_pct_zero_disables_partial_and_breakeven(cb_parity_db):
+    """partial_close_pct = 0 — ни фиксации, ни б/у: стоп остаётся исходным.
+
+    По формуле нулевой порог — это цена входа, то есть без явной проверки
+    позиция уходила бы в б/у на первом же баре в плюсе. AAA доходит до +5%,
+    откатывает к −2% и под исходным стопом −5% НЕ выбивается.
+
+    Мутация: убрать `cfg.partial_close_pct > 0` в движке — AAA выйдет по `sl`
+    в б/у с partial_closed.
+    """
+    settings = _settings()
+    settings.trading.partial_close_pct = 0.0
+
+    result = simulate(settings, load_data(cb_parity_db), has_oi=True)
+    first = {t["symbol"]: t for t in result["trades_list"]}["AAA/USDT:USDT"]
+
+    assert first["partial_closed"] is False
+    assert first["partial_pnl"] == 0.0
+    assert first["sl_price"] == pytest.approx(first["entry_price"] * 0.95)
+    assert first["exit_reason"] != "sl", "откат до −2% исходный стоп −5% не задевает"
+
+
 def test_cb_trade_outcome():
     from src.analytics.utils import cb_trade_outcome
 

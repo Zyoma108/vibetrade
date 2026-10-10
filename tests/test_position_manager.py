@@ -1365,6 +1365,43 @@ class TestBreakevenOnly:
         assert closed == [pos] and pos.status == "closed"
 
 
+class TestPartialMechanismOff:
+    """partial_close_pct = 0 — механизм выключен целиком: ни фиксации, ни б/у."""
+
+    def test_config_accepts_zero_and_keeps_lower_bound(self):
+        assert _config(partial_close_pct=0.0).partial_close_pct == 0.0
+        assert _config(partial_close_pct=10.0).partial_close_pct == 10.0
+        with pytest.raises(ValueError):
+            _config(partial_close_pct=5.0)
+
+    async def test_open_position_places_no_partial_limit(self):
+        connector = TestExchangeLotStep._step_connector(step=0.001, contracts=15.0)
+        pm = TestExchangeLotStep._pm_ready(connector)
+        pm.config.partial_close_pct = 0.0
+        with patch("asyncio.sleep", AsyncMock()):
+            trade, _, _ = await pm.open_position(TestExchangeLotStep._session(), _signal())
+        assert trade is not None
+        connector.place_reduce_only_limit.assert_not_awaited()
+
+    async def test_no_breakeven_even_far_in_profit(self):
+        """Нулевой порог — это цена входа; без явной проверки б/у ставился бы сразу."""
+        connector = _fake_connector(
+            set_tpsl=AsyncMock(), create_market_reduce_order=AsyncMock(),
+            fetch_open_orders=AsyncMock(return_value=[]),
+            fetch_positions=AsyncMock(return_value=[]),
+        )
+        pm = _pm(connector, partial_close_pct=0.0, partial_close_qty_pct=20.0)
+        pos = _trade(entry_price=100.0, quantity=10.0)
+        pos.current_sl_price = 95.0
+
+        assert await pm._check_limit_partial_fill(pos) is False
+        assert await pm._check_partial_close_fallback(pos, 110.0) is False
+        connector.set_tpsl.assert_not_awaited()
+        connector.create_market_reduce_order.assert_not_awaited()
+        connector.fetch_positions.assert_not_awaited()
+        assert pos.current_sl_price == 95.0 and not pos.partial_closed
+
+
 class TestBreakevenStopRetry:
     """Регресс: б/у-стоп ставился ровно один раз, без повтора при сбое.
 

@@ -5,7 +5,7 @@ from typing import Optional
 
 import yaml
 from dotenv import load_dotenv
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 load_dotenv()
 
@@ -252,7 +252,7 @@ class TradingConfig(BaseModel):
         ),
     )
     max_hold_hours: float = Field(default=24.0, ge=1.0, description="Максимальное время удержания позиции, часов")
-    partial_close_pct: float = Field(default=50.0, ge=10.0, le=90.0, description="% пути до TP для частичного закрытия / перевода в б/у")
+    partial_close_pct: float = Field(default=50.0, ge=0.0, le=90.0, description="% пути до TP для частичного закрытия / перевода в б/у. 0 = механизм выключен целиком: ни фиксации, ни б/у — позиция живёт до TP/SL/времени под исходным стопом")
     partial_close_qty_pct: float = Field(default=50.0, ge=0.0, le=95.0, description="Какая доля позиции (%) закрывается при срабатывании partial-триггера; остаток идёт в б/у-стоп и бежит на полный TP. 0 = частичной фиксации нет, на триггере только перевод стопа в б/у")
     cooldown_hours: float = Field(default=1.0, ge=0.0, le=168.0, description="Кулдаун после закрытия позиции, часов (0 = без кулдауна)")
     circuit_breaker_enabled: bool = Field(default=True, description="Включить защиту от серий убытков (Circuit Breaker)")
@@ -275,6 +275,16 @@ class TradingConfig(BaseModel):
     pending_entry_pullback_pct: float = Field(default=0.0, ge=0.0, le=10.0, description="Вход лимитным ордером на откате от цены сигнала, % (0 = выкл — вход market сразу по сигналу, как раньше). Решает проблему покупки на пике пампа")
     pending_entry_timeout_minutes: float = Field(default=9.0, ge=1.0, le=180.0, description="Через сколько минут снять неисполненный лимитник входа (актуально только если pending_entry_pullback_pct > 0)")
     tp_as_limit_order: bool = Field(default=True, description="Выставлять TP лимитным ордером (maker, 0.02%) вместо market (taker, 0.055%) — цена исполнения та же, экономия на комиссии. SL и time-exit всегда market (надёжность выхода важнее экономии)")
+
+    @field_validator("partial_close_pct")
+    @classmethod
+    def _partial_close_pct_off_or_sane(cls, v: float) -> float:
+        # 0 — выключатель, а не «триггер на входе»: по формуле нулевой порог дал бы
+        # б/у прямо на цене входа, и первый же тик вниз выбивал бы позицию в ноль.
+        # Прежний нижний предел 10% для включённого механизма сохранён.
+        if 0 < v < 10:
+            raise ValueError("partial_close_pct: 0 (выключено) или от 10 до 90")
+        return v
 
 
 class MarketContextConfig(BaseModel):

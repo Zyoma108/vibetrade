@@ -444,7 +444,9 @@ class PositionManager:
                 try:
                     partial_trigger = self._partial_trigger_price(entry_price, tp_price)
                     partial_qty = await self._partial_qty(signal.symbol, quantity)
-                    if self.config.partial_close_qty_pct <= 0:
+                    if self.config.partial_close_pct <= 0:
+                        pass  # механизм выключен целиком — ни фиксации, ни б/у
+                    elif self.config.partial_close_qty_pct <= 0:
                         logger.info(
                             f"Частичная фиксация {signal.symbol} выключена "
                             f"(partial_close_qty_pct = 0) — на триггере "
@@ -708,7 +710,9 @@ class PositionManager:
             try:
                 partial_trigger = self._partial_trigger_price(fill_price, tp_price)
                 partial_qty = await self._partial_qty(pos.symbol, pos.quantity)
-                if partial_qty <= 0:
+                if self.config.partial_close_pct <= 0 or self.config.partial_close_qty_pct <= 0:
+                    pass  # выключено конфигом; б/у при доле 0 ставит fallback по триггеру
+                elif partial_qty <= 0:
                     logger.info(
                         f"Частичная фиксация {pos.symbol} недоступна: доля позиции "
                         f"меньше шага лота биржи"
@@ -935,9 +939,10 @@ class PositionManager:
         0.0 означает, что фиксировать нечем: шаг лота крупнее доли. Так бывает на
         малом депозите у монет с грубым шагом (SUI на bybit — 10 контрактов при
         позиции в 10), и раньше в этом случае уходил заведомо отбойный ордер.
-        Тот же 0.0 при `partial_close_qty_pct = 0` — там фиксации нет намеренно.
+        Тот же 0.0 при `partial_close_qty_pct = 0` или `partial_close_pct = 0` —
+        там фиксации нет намеренно.
         """
-        if self.config.partial_close_qty_pct <= 0:
+        if self.config.partial_close_qty_pct <= 0 or self.config.partial_close_pct <= 0:
             return 0.0
         return await self._connector.amount_to_precision(
             symbol, quantity * (self.config.partial_close_qty_pct / 100)
@@ -1027,6 +1032,11 @@ class PositionManager:
         Возвращает True, если позиция обработана (обработка триггера,
         неудача ордера и уже-существующий лимитник — всё считается обработкой).
         """
+        if self.config.partial_close_pct <= 0:
+            # Механизм выключен целиком. Проверка обязательна именно здесь: по
+            # формуле нулевой порог — это цена входа, и без неё любая позиция в
+            # плюсе мгновенно уходила бы в б/у.
+            return False
         trigger = self._partial_trigger_price(pos.entry_price, self._tp_price(pos.entry_price))
         triggered = (pos.direction == "long" and current_price >= trigger) or (
             pos.direction == "short" and current_price <= trigger
