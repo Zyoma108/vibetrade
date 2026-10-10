@@ -140,16 +140,26 @@ class TestCircuitBreakerCheck:
         pm.guards.consecutive_losses = 4
         assert pm.guards.check_circuit_breaker() == "circuit_breaker_reduce"
 
-    def test_at_stop_threshold_sets_timer_and_returns_stop(self):
-        """5 losses → full stop: sets _circuit_breaker_until, returns stop."""
+    def test_loss_reaching_stop_threshold_arms_timer_immediately(self):
+        """5-й убыток запускает остановку В МОМЕНТ убытка, без участия сигнала."""
         pm = _pm()
-        pm.guards.consecutive_losses = 5
-        result = pm.guards.check_circuit_breaker()
-        assert result == "circuit_breaker_stop"
+        pm.guards.consecutive_losses = 4
+        pm.guards.register_loss()
         assert pm.guards.circuit_breaker_until is not None
         expected_until = datetime.now(tz=timezone.utc) + timedelta(minutes=60)
         diff = abs((pm.guards.circuit_breaker_until - expected_until).total_seconds())
         assert diff < 5  # within 5 seconds
+        assert pm.guards.circuit_breaker_stop_consumed_at == 5
+        assert pm.guards.check_circuit_breaker() == "circuit_breaker_stop"
+
+    def test_check_does_not_arm_stop_lazily(self):
+        """Регрессия 10.10.2026: проверка из open_position больше НЕ запускает
+        остановку — иначе пауза стартует с первого сигнала после серии, хоть
+        через 15 часов, и отсекает его."""
+        pm = _pm()
+        pm.guards.consecutive_losses = 5
+        assert pm.guards.check_circuit_breaker() == "circuit_breaker_reduce"
+        assert pm.guards.circuit_breaker_until is None
 
     def test_during_stop_returns_stop(self):
         """While _circuit_breaker_until hasn't passed — keep returning stop."""
@@ -178,11 +188,28 @@ class TestCircuitBreakerCheck:
         pm.guards.circuit_breaker_until = datetime.now(tz=timezone.utc) - timedelta(minutes=1)
         assert pm.guards.check_circuit_breaker() == "circuit_breaker_reduce"
 
-        pm.guards.consecutive_losses = 6  # one more loss arrives while in reduce-mode
-        result = pm.guards.check_circuit_breaker()
-        assert result == "circuit_breaker_stop"
+        pm.guards.register_loss()  # one more loss arrives while in reduce-mode
+        assert pm.guards.check_circuit_breaker() == "circuit_breaker_stop"
         assert pm.guards.circuit_breaker_until is not None
         assert pm.guards.circuit_breaker_stop_consumed_at == 6
+
+    def test_loss_during_stop_queues_next_stop_after_current(self):
+        """Убыток во время идущей остановки ставит следующую с КОНЦА текущей —
+        так же, как движок бэктеста (общая cb_stop_after_loss)."""
+        pm = _pm()
+        until = datetime.now(tz=timezone.utc) + timedelta(minutes=30)
+        pm.guards.consecutive_losses = 5
+        pm.guards.circuit_breaker_stop_consumed_at = 5
+        pm.guards.circuit_breaker_until = until
+        pm.guards.register_loss()
+        assert pm.guards.circuit_breaker_until == until + timedelta(minutes=60)
+        assert pm.guards.circuit_breaker_stop_consumed_at == 6
+
+    def test_register_loss_disabled_does_not_arm(self):
+        pm = _pm(circuit_breaker_enabled=False)
+        pm.guards.consecutive_losses = 10
+        pm.guards.register_loss()
+        assert pm.guards.circuit_breaker_until is None
 
 
 # ---------------------------------------------------------------------------

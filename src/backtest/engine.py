@@ -28,7 +28,7 @@ from pathlib import Path
 
 from src.analytics.detector import WINDOW_PAD_BARS, SetupDetector
 from src.analytics.utils import OI_TREND_BARS, oi_trend_passes, timeframe_to_minutes
-from src.analytics.utils import adaptive_stop_pct, cb_trade_outcome
+from src.analytics.utils import adaptive_stop_pct, cb_stop_after_loss, cb_trade_outcome
 from src.backtest.metrics import breakeven_credit, summarize
 
 
@@ -555,6 +555,11 @@ def simulate(settings, data, has_oi: bool = True, collect_retracement: bool = Tr
                         cb_stop_consumed_at = 0
                     elif outcome == "loss":
                         cb_losses += 1
+                        cb_stop_until, cb_stop_consumed_at = cb_stop_after_loss(
+                            cb_losses, cb_stop_until, cb_stop_consumed_at, ts,
+                            cfg.circuit_breaker_loss_streak_stop,
+                            cfg.circuit_breaker_stop_minutes,
+                        )
                 continue
 
             age = (ts - pos.entry_time).total_seconds() / 3600
@@ -576,6 +581,11 @@ def simulate(settings, data, has_oi: bool = True, collect_retracement: bool = Tr
                         cb_stop_consumed_at = 0
                     elif outcome == "loss":
                         cb_losses += 1
+                        cb_stop_until, cb_stop_consumed_at = cb_stop_after_loss(
+                            cb_losses, cb_stop_until, cb_stop_consumed_at, ts,
+                            cfg.circuit_breaker_loss_streak_stop,
+                            cfg.circuit_breaker_stop_minutes,
+                        )
 
         # --- manage pending entries ---
         for pe in list(pending):
@@ -615,10 +625,6 @@ def simulate(settings, data, has_oi: bool = True, collect_retracement: bool = Tr
                 if ts < cb_stop_until:
                     continue
                 cb_stop_until = None
-            if cb_losses >= cfg.circuit_breaker_loss_streak_stop and cb_losses > cb_stop_consumed_at:
-                cb_stop_until = ts + timedelta(minutes=cfg.circuit_breaker_stop_minutes)
-                cb_stop_consumed_at = cb_losses
-                continue
             if cb_losses >= cfg.circuit_breaker_loss_streak_reduce:
                 cb_mult = cfg.circuit_breaker_reduce_mult_pct / 100.0
 
