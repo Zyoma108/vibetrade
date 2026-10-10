@@ -29,6 +29,7 @@ from pathlib import Path
 from src.analytics.detector import WINDOW_PAD_BARS, SetupDetector
 from src.analytics.utils import OI_TREND_BARS, oi_trend_passes, timeframe_to_minutes
 from src.analytics.utils import adaptive_stop_pct, cb_stop_after_loss, cb_trade_outcome
+from src.analytics.utils import trailing_activation_price, trailing_distance
 from src.backtest.metrics import breakeven_credit, summarize
 
 
@@ -43,7 +44,7 @@ class SimPosition:
         "symbol", "entry_price", "entry_time", "quantity",
         "tp_price", "sl_price", "partial_closed", "partial_unavailable", "partial_pnl",
         "closed", "exit_price", "exit_time", "pnl", "exit_reason", "fee",
-        "risk",
+        "risk", "peak",
     )
 
     def __init__(self, symbol: str, entry_price: float, entry_time: datetime,
@@ -73,6 +74,9 @@ class SimPosition:
         # Хранить обязательно и потому, что risk_budget не константа: его
         # двигают cb_mult и множитель рыночного режима.
         self.risk = risk
+        # Максимум цены с момента входа — для трейлинг-выхода
+        # (trading.trailing_activation_pct). При выключенном трейлинге не читается.
+        self.peak = entry_price
 
 
 class PendingEntry:
@@ -511,9 +515,14 @@ def simulate(settings, data, has_oi: bool = True, collect_retracement: bool = Tr
                         pos.partial_pnl = partial_pnl
                         pos.sl_price = pos.entry_price
                         pos.fee += _fee(cfg, trigger * close_qty, taker=False)
+                        if high > pos.peak:
+                            pos.peak = high
                         continue
 
-            if high >= pos.tp_price:
+            # Трейлинг-выход заменяет фиксированный TP целиком (tp_price остаётся
+            # только опорой для триггера партиала).
+            trailing = cfg.trailing_activation_pct > 0
+            if not trailing and high >= pos.tp_price:
                 pos.exit_price = pos.tp_price
                 pos.exit_time = ts
                 pos.exit_reason = "tp"
@@ -561,6 +570,20 @@ def simulate(settings, data, has_oi: bool = True, collect_retracement: bool = Tr
                             cfg.circuit_breaker_stop_minutes,
                         )
                 continue
+
+            # Стоп подтягивается ПОСЛЕ проверки выхода на этом баре: порядок
+            # максимума и минимума внутри 3-минутного бара неизвестен, и новый
+            # уровень по максимуму бара сработает только со следующего бара.
+            # Отступ — фиксированная ЦЕНОВАЯ дистанция от входа, как у нативного
+            # трейлинга ByBit (`trailingStop` в /v5/position/trading-stop), а не
+            # процент от максимума: так модель совпадает с тем, что исполняет биржа.
+            if trailing:
+                if high > pos.peak:
+                    pos.peak = high
+                if pos.peak >= trailing_activation_price(pos.entry_price, cfg):
+                    trail_sl = pos.peak - trailing_distance(pos.entry_price, cfg)
+                    if trail_sl > pos.sl_price:
+                        pos.sl_price = trail_sl
 
             age = (ts - pos.entry_time).total_seconds() / 3600
             if age >= cfg.max_hold_hours:

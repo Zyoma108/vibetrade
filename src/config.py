@@ -251,6 +251,23 @@ class TradingConfig(BaseModel):
             "монеты, и самый шумный квартиль — худший на обеих БД."
         ),
     )
+    trailing_activation_pct: float = Field(
+        default=0.0, ge=0.0, le=100.0,
+        description=(
+            "Выход трейлинг-стопом вместо фиксированного TP: с роста на N% от входа "
+            "биржа ведёт стоп за максимумом на trailing_distance_pct. 0 = выкл "
+            "(фиксированный TP). В бою — нативный трейлинг ByBit (activePrice), в бэктесте "
+            "та же формула (analytics.utils.trailing_activation_price). Фиксированный TP "
+            "при включённом трейлинге не выставляется; триггер партиала считается от "
+            "расчётного TP (entry + стоп × risk_reward_ratio). Обоснование: docs/backtest.md, "
+            "«Год истории и трейлинг-выход»; механика: docs/positions.md."
+        ),
+    )
+    trailing_distance_pct: float = Field(
+        default=0.0, ge=0.0, le=50.0,
+        description="Отступ трейлинг-стопа от максимума — ЦЕНОВАЯ дистанция, % от входа (как "
+        "trailingStop ByBit), а не процент от максимума.",
+    )
     max_hold_hours: float = Field(default=24.0, ge=1.0, description="Максимальное время удержания позиции, часов")
     partial_close_pct: float = Field(default=50.0, ge=0.0, le=90.0, description="% пути до TP для частичного закрытия / перевода в б/у. 0 = механизм выключен целиком: ни фиксации, ни б/у — позиция живёт до TP/SL/времени под исходным стопом")
     partial_close_qty_pct: float = Field(default=50.0, ge=0.0, le=95.0, description="Какая доля позиции (%) закрывается при срабатывании partial-триггера; остаток идёт в б/у-стоп и бежит на полный TP. 0 = частичной фиксации нет, на триггере только перевод стопа в б/у")

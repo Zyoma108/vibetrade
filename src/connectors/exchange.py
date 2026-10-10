@@ -335,7 +335,7 @@ class ExchangeConnector:
         symbol: str,
         side: str,
         amount: float,
-        tp_price: float,
+        tp_price: float | None,
         sl_price: float,
         tp_as_limit: bool = False,
     ) -> dict:
@@ -345,21 +345,53 @@ class ExchangeConnector:
         market: цена исполнения та же (TP и так закрывается по заранее
         известной цене), но комиссия maker (0.02%) вместо taker (0.055%).
         SL всегда остаётся market — риск непроскочить стоп при гэпе важнее
-        экономии на комиссии."""
+        экономии на комиссии.
+
+        `tp_price=None` — только стоп (выход трейлингом, `set_trailing_stop`).
+        `tradingStopEndpoint` удерживает запрос на том же эндпоинте
+        /v5/position/trading-stop, куда ccxt сам уводит пару TP+SL: без него
+        одиночный stopLossPrice ушёл бы отдельным условным ордером через
+        /v5/order/create, то есть стоп жил бы иначе, чем при TP+SL."""
         close_side = "sell" if side == "buy" else "buy"
-        params = {
-            "takeProfitPrice": tp_price,
-            "stopLossPrice": sl_price,
-        }
-        if tp_as_limit:
-            params["takeProfitLimitPrice"] = tp_price
+        params: dict = {"stopLossPrice": sl_price}
+        if tp_price is not None:
+            params["takeProfitPrice"] = tp_price
+            if tp_as_limit:
+                params["takeProfitLimitPrice"] = tp_price
+        else:
+            params["tradingStopEndpoint"] = True
         raw = await self._call(
             "create_order", symbol, "market", close_side, amount,
             None, params
         )
+        tp_txt = (
+            "нет (трейлинг)" if tp_price is None
+            else f"{tp_price:.6f}{'(limit)' if tp_as_limit else ''}"
+        )
+        logger.info(f"{self.exchange_id}: TP/SL {symbol} TP={tp_txt} SL={sl_price:.6f}")
+        return raw
+
+    async def set_trailing_stop(
+        self, symbol: str, distance: float, activation_price: float,
+    ) -> dict:
+        """Нативный трейлинг-стоп ByBit на всю позицию (/v5/position/trading-stop).
+
+        `distance` — ЦЕНОВОЕ расстояние от максимума (`trailingStop`), а не
+        процент; округляется до шага цены инструмента. `activation_price` —
+        цена, с которой биржа начинает вести стоп (`activePrice`). Режим Full:
+        трейлинг относится к позиции целиком и живёт рядом с частичными (Partial)
+        стопами, которые ставит `set_tpsl`. Повторный вызов перезаписывает
+        трейлинг, поэтому метод идемпотентен.
+        """
+        await self._call("load_markets")
+        dist = await self._call("price_to_precision", symbol, distance)
+        raw = await self._call(
+            "create_order", symbol, "market", "sell", 0, None,
+            {"trailingAmount": dist, "trailingTriggerPrice": activation_price, "tpslMode": "Full"},
+        )
         logger.info(
-            f"{self.exchange_id}: TP/SL {symbol} "
-            f"TP={tp_price:.6f}{'(limit)' if tp_as_limit else ''} SL={sl_price:.6f}"
+            f"{self.exchange_id}: трейлинг {symbol} отступ={dist} "
+            f"активация={activation_price:.6f}"
         )
         return raw
 
