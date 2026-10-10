@@ -244,6 +244,7 @@ async def init_db() -> None:
             ("source", "VARCHAR(16) DEFAULT 'algo'"),
             ("current_sl_price", "FLOAT"),
             ("signal_price", "FLOAT"),
+            ("trailing_set", "INTEGER DEFAULT 0"),
         ]:
             try:
                 await conn.exec_driver_sql(

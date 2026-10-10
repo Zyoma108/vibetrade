@@ -223,6 +223,7 @@ class Trade(Base):
     source: Mapped[str] = mapped_column(String(16), default="algo", index=True)  # всегда 'algo'; колонка осталась от удалённого ИИ-режима и скоупит запросы, чтобы его исторические строки не попадали в алго-логику
     current_sl_price: Mapped[float | None] = mapped_column(Float, nullable=True, default=None)  # последний известный эффективный стоп (перевод в безубыток после частичной фиксации)
     signal_price: Mapped[float | None] = mapped_column(Float, nullable=True, default=None)  # референсная цена в момент сигнала — неизменный якорь для замера фактического проскальзывания входа
+    trailing_set: Mapped[bool] = mapped_column(default=False)  # выставлен ли на бирже трейлинг-стоп (trading.trailing_activation_pct > 0); повторяется каждый цикл, пока не встанет
 
 
 class BotState(Base):

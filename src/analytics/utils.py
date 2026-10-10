@@ -194,3 +194,23 @@ def cb_stop_after_loss(losses: int, stop_until: datetime | None, consumed_at: in
         return stop_until, consumed_at
     start = stop_until if stop_until is not None and stop_until > now else now
     return start + timedelta(minutes=stop_minutes), losses
+
+
+def trailing_activation_price(entry_price: float, cfg) -> float:
+    """Цена, с которой включается трейлинг-стоп (`trailing_activation_pct` от входа).
+
+    Одна формула на прод (`PositionManager`, `activePrice` ByBit) и движок бэктеста —
+    правило 2 AGENTS.md распространяется на любую боевую логику, которую движок
+    воспроизводит.
+    """
+    return entry_price * (1 + cfg.trailing_activation_pct / 100)
+
+
+def trailing_distance(entry_price: float, cfg) -> float:
+    """Отступ трейлинг-стопа от максимума — ЦЕНОВАЯ дистанция, % от входа.
+
+    Нативный трейлинг ByBit (`trailingStop`) задаётся расстоянием в цене, а не в
+    процентах от максимума: стоп = максимум после активации − дистанция. Движок
+    считает так же, иначе модель описывала бы не тот выход, который исполняет биржа.
+    """
+    return entry_price * cfg.trailing_distance_pct / 100

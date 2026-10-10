@@ -7,7 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.analytics.base import Signal
-from src.analytics.utils import cb_trade_outcome
+from src.analytics.utils import cb_trade_outcome, trailing_activation_price, trailing_distance
 from src.config import TradingConfig
 from src.connectors.exchange import ExchangeConnector
 from src.executor.guards import SOURCE, TradingGuards
@@ -39,6 +39,12 @@ _AGREEMENT_ERROR_MARKERS = (
 # доля всей позиции (как было до 01.09.2026), потому что та не знает ни о
 # partial_close_qty_pct, ни о шаге лота — см. `_check_limit_partial_fill`.
 PARTIAL_FILL_DETECT_RATIO = 0.5
+
+# Допуск на проскальзывание стоп-маркета при классификации выхода в плюсе:
+# цена выхода трейлингом может оказаться чуть ниже уровня стопа. Между полом
+# трейлинга (активация − отступ, сейчас +3%) и б/у-выходом (≈ вход) запас
+# в разы шире, поэтому величина не подгоночная.
+TRAIL_EXIT_BAND_PCT = 0.5
 
 
 def _is_agreement_error(err: str) -> bool:
@@ -361,6 +367,7 @@ class PositionManager:
         )
 
         tp_sl_ok = False
+        trailing_ok = False
 
         # Ордер на бирже
         try:
@@ -401,17 +408,19 @@ class PositionManager:
                 f"TP=${tp_price:.6f}, SL=${sl_price:.6f}"
             )
 
-            # 3. Выставляем TP/SL от фактической цены
+            # 3. Выставляем TP/SL от фактической цены (при трейлинге — только SL
+            # плюс трейлинг-стоп; tp_price остаётся опорой триггера партиала)
             try:
                 await self._connector.set_tpsl(
                     symbol=signal.symbol,
                     side="buy",
                     amount=quantity,
-                    tp_price=tp_price,
+                    tp_price=self._exchange_tp(entry_price),
                     sl_price=sl_price,
                     tp_as_limit=self.config.tp_as_limit_order,
                 )
                 tp_sl_ok = True
+                trailing_ok = await self._place_trailing(signal.symbol, entry_price)
             except Exception as e:
                 err = str(e)
                 # Цена уже ушла ниже SL — аварийно закрываем позицию
@@ -515,19 +524,19 @@ class PositionManager:
             source=SOURCE,
             current_sl_price=sl_price if tp_sl_ok else None,
             signal_price=reference_price,
+            trailing_set=trailing_ok,
         )
         session.add(trade)
 
         # Нотификация
         margin = actual_size / self.config.leverage
-        tp_pct = (tp_price / entry_price - 1) * 100
         sl_pct = (1 - sl_price / entry_price) * 100
         await self._notify(
             f"📈 <b>Открыта позиция</b> {signal.direction.upper()}\n"
             f"Монета: {signal.symbol}\n"
             f"Вход: ${entry_price:.6f}\n"
             f"Объём: ${actual_size:.0f} (маржа ${margin:.0f} на {self.config.leverage}x)\n"
-            f"TP: ${tp_price:.6f} (+{tp_pct:.1f}% | 1:{self.config.risk_reward_ratio})\n"
+            f"{self._exit_line(entry_price, tp_price)}\n"
             f"SL: ${sl_price:.6f} (-{sl_pct:.1f}%)\n"
             f"Комиссия входа: ${entry_fee:.4f}"
         )
@@ -668,13 +677,12 @@ class PositionManager:
         # Лимитник на вход исполнился как maker (резидентный ордер в стакане)
         tp_price, sl_price = await self._setup_tp_sl_and_partial(pos, fill_price, is_maker=True)
 
-        tp_pct = (tp_price / fill_price - 1) * 100
         sl_pct = (1 - sl_price / fill_price) * 100
         await self._notify(
             f"✅ <b>Лимитник на вход исполнен</b> {pos.direction.upper()}\n"
             f"Монета: {pos.symbol}\n"
             f"Вход: ${fill_price:.6f}\n"
-            f"TP: ${tp_price:.6f} (+{tp_pct:.1f}%) | SL: ${sl_price:.6f} (-{sl_pct:.1f}%)"
+            f"{self._exit_line(fill_price, tp_price)} | SL: ${sl_price:.6f} (-{sl_pct:.1f}%)"
         )
         logger.info(f"Pending-вход исполнен: {pos.symbol} @ {fill_price:.6f}")
         self.guards.reset_errors(pos.symbol)
@@ -696,11 +704,12 @@ class PositionManager:
                 symbol=pos.symbol,
                 side="buy",
                 amount=pos.quantity,
-                tp_price=tp_price,
+                tp_price=self._exchange_tp(fill_price),
                 sl_price=sl_price,
                 tp_as_limit=self.config.tp_as_limit_order,
             )
             tp_sl_ok = True
+            pos.trailing_set = await self._place_trailing(pos.symbol, fill_price)
         except Exception as e:
             logger.warning(f"TP/SL для {pos.symbol} будут выставлены в следующем цикле: {e}")
         pos.tp_sl_set = tp_sl_ok
@@ -794,6 +803,9 @@ class PositionManager:
                 await self._close_from_exchange(session, pos, current_price, closed)
                 continue
 
+            if pos.tp_sl_set and not pos.trailing_set:
+                await self._ensure_trailing(pos)
+
             if not pos.partial_closed and await self._check_limit_partial_fill(pos):
                 continue
 
@@ -841,7 +853,7 @@ class PositionManager:
                 symbol=pos.symbol,
                 side="buy" if pos.direction == "long" else "sell",
                 amount=pos.quantity,
-                tp_price=self._tp_price(pos.entry_price),
+                tp_price=self._exchange_tp(pos.entry_price),
                 sl_price=pos.entry_price,
                 tp_as_limit=self.config.tp_as_limit_order,
             )
@@ -866,7 +878,7 @@ class PositionManager:
         """
         try:
             await asyncio.sleep(1)
-            tp = self._tp_price(pos.entry_price)
+            tp = self._exchange_tp(pos.entry_price)
             sl = self._sl_price(pos.entry_price)
             await self._connector.set_tpsl(
                 symbol=pos.symbol,
@@ -1005,7 +1017,7 @@ class PositionManager:
                 symbol=pos.symbol,
                 side="buy" if pos.direction == "long" else "sell",
                 amount=actual_contracts,
-                tp_price=self._tp_price(pos.entry_price),
+                tp_price=self._exchange_tp(pos.entry_price),
                 sl_price=pos.entry_price,
                 tp_as_limit=self.config.tp_as_limit_order,
             )
@@ -1057,7 +1069,7 @@ class PositionManager:
                         symbol=pos.symbol,
                         side="buy" if pos.direction == "long" else "sell",
                         amount=pos.quantity,
-                        tp_price=self._tp_price(pos.entry_price),
+                        tp_price=self._exchange_tp(pos.entry_price),
                         sl_price=pos.entry_price,
                         tp_as_limit=self.config.tp_as_limit_order,
                     )
@@ -1126,7 +1138,7 @@ class PositionManager:
                 symbol=pos.symbol,
                 side="buy" if pos.direction == "long" else "sell",
                 amount=remaining,
-                tp_price=self._tp_price(pos.entry_price),
+                tp_price=self._exchange_tp(pos.entry_price),
                 sl_price=pos.entry_price,
                 tp_as_limit=self.config.tp_as_limit_order,
             )
@@ -1197,6 +1209,66 @@ class PositionManager:
         """TP: entry + stop_loss_pct% × risk_reward_ratio."""
         sl_distance = entry * (self.config.stop_loss_pct / 100)
         return entry + sl_distance * self.config.risk_reward_ratio
+
+    @property
+    def _trailing(self) -> bool:
+        """Выход трейлинг-стопом вместо фиксированного TP (trailing_activation_pct > 0)."""
+        return self.config.trailing_activation_pct > 0
+
+    def _exchange_tp(self, entry: float) -> float | None:
+        """TP, который уходит на биржу: None при трейлинге — фиксированного TP нет.
+
+        Расчётный `_tp_price` при этом остаётся: от него считается триггер
+        партиала (`partial_close_pct` — доля пути до TP), ровно как в движке.
+        """
+        return None if self._trailing else self._tp_price(entry)
+
+    def _trailing_floor(self, entry: float) -> float:
+        """Ниже этого уровня трейлинг-стоп не стоит никогда: активация минус отступ."""
+        return trailing_activation_price(entry, self.config) - trailing_distance(entry, self.config)
+
+    def _exit_line(self, entry: float, tp_price: float) -> str:
+        """Строка о выходе для уведомления об открытии позиции."""
+        if not self._trailing:
+            tp_pct = (tp_price / entry - 1) * 100
+            return f"TP: ${tp_price:.6f} (+{tp_pct:.1f}% | 1:{self.config.risk_reward_ratio})"
+        act = trailing_activation_price(entry, self.config)
+        return (
+            f"Трейлинг: с ${act:.6f} (+{self.config.trailing_activation_pct:g}%), "
+            f"отступ {self.config.trailing_distance_pct:g}% от входа"
+        )
+
+    async def _place_trailing(self, symbol: str, entry: float) -> bool:
+        """Выставить нативный трейлинг ByBit. False — не встал, повтор в цикле.
+
+        Активация и отступ считаются теми же функциями, что в движке бэктеста
+        (`analytics.utils.trailing_*`), — правило 2 AGENTS.md.
+        """
+        if not self._trailing:
+            return False
+        try:
+            await self._connector.set_trailing_stop(
+                symbol,
+                distance=trailing_distance(entry, self.config),
+                activation_price=trailing_activation_price(entry, self.config),
+            )
+            return True
+        except Exception as e:
+            logger.warning(f"Трейлинг-стоп {symbol} не выставлен ({e}) — повтор в следующем цикле")
+            return False
+
+    async def _ensure_trailing(self, pos: Trade) -> None:
+        """Догнать трейлинг, если он не встал при открытии или позиция восстановлена.
+
+        Без трейлинга у позиции нет выхода в плюс, кроме б/у и max_hold_hours:
+        фиксированный TP при трейлинге не выставляется. Поэтому повтор каждый
+        цикл, как у `_ensure_breakeven_stop`, и уведомление, когда встал.
+        """
+        if not self._trailing:
+            return
+        pos.trailing_set = await self._place_trailing(pos.symbol, pos.entry_price)
+        if pos.trailing_set:
+            logger.info(f"Трейлинг-стоп {pos.symbol} доставлен повторной попыткой")
 
     def _sl_price(self, entry: float) -> float:
         """SL: entry − stop_loss_pct%."""
@@ -1327,7 +1399,15 @@ class PositionManager:
         # Если закрыто биржей — определяем TP или SL по PnL (sync-цикл видит
         # только «позиция исчезла», не какой именно ордер её закрыл)
         if reason == "tp_sl_exchange":
-            reason = "tp" if (trade.pnl or 0) > 0 else "sl"
+            if self._trailing:
+                # Фиксированного TP нет: в плюсе позицию закрывает либо трейлинг,
+                # либо б/у-стоп после партиала. Трейлинг не бывает ниже
+                # активации минус отступ, б/у — около входа; полоса 0.5% —
+                # на проскальзывание стоп-маркета.
+                floor = self._trailing_floor(trade.entry_price) * (1 - TRAIL_EXIT_BAND_PCT / 100)
+                reason = "trail" if exit_price >= floor else "sl"
+            else:
+                reason = "tp" if (trade.pnl or 0) > 0 else "sl"
 
         # TP закрывается лимитным ордером (maker), если включено конфигом
         # (tp_as_limit_order) — пересчитываем комиссию/PnL по реальной ставке.
@@ -1380,6 +1460,7 @@ class PositionManager:
 
         labels = {
             "tp": ("✅", "Тейк-профит"),
+            "trail": ("📈", "Трейлинг-стоп"),
             "sl": ("🛑", "Стоп-лосс"),
         }
         emoji, label = labels.get(reason, ("⏰", "Выход по времени"))

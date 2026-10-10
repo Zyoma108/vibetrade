@@ -1083,3 +1083,67 @@ def test_cb_stop_after_loss():
     # новый убыток во время идущей — с её конца
     running = now + timedelta(minutes=20)
     assert cb_stop_after_loss(4, running, 3, now, 3, 60) == (running + timedelta(minutes=60), 4)
+
+
+def _build_run_past_tp(symbol: str, n_baseline: int, n_sustain: int):
+    """Всплеск объёма → цена проходит партиал, TP (+10%) и доходит до +18%, затем откат.
+
+    Фиксированный TP выходит на +10%; трейлинг (активация 8%, отступ 4%) — на
+    1.18 − 0.04 от входа (отступ — ценовая дистанция, как у ByBit), то есть по
+    стопу, подтянутому за максимумом.
+    """
+    rows = []
+    price = 100.0
+    for i in range(n_baseline):
+        rows.append(("bybit", symbol, _ts(i), price, price * 1.001, price * 0.999, price, 1_000.0))
+    for j in range(n_sustain):
+        nxt = price * 1.012
+        rows.append(("bybit", symbol, _ts(n_baseline + j),
+                     price, nxt * 1.001, price * 0.999, nxt, 8_000.0 + j * 500))
+        price = nxt
+    e = price
+    path = [  # (high, low, close) относительно входа
+        (1.04, 0.999, 1.035),   # партиал-триггер +3.5%
+        (1.07, 1.03, 1.065),
+        (1.12, 1.06, 1.115),    # трейлинг активирован, фиксированный TP пробит
+        (1.18, 1.15, 1.175),    # стоп подтянут к 1.18 − 0.04
+        (1.181, 1.10, 1.105),   # минимум ниже подтянутого стопа — выход
+    ]
+    k = n_baseline + n_sustain
+    for j, (hi, lo, cl) in enumerate(path):
+        rows.append(("bybit", symbol, _ts(k + j), e, e * hi, e * lo, e * cl, 1_200.0))
+    for j in range(len(path), 40):
+        rows.append(("bybit", symbol, _ts(k + j), e * 1.1, e * 1.101, e * 1.099, e * 1.1, 1_200.0))
+    return rows, e
+
+
+@pytest.fixture
+def run_past_tp_db(tmp_path):
+    candles, entry = _build_run_past_tp("AAA/USDT:USDT", 20, 4)
+    oi = [("bybit", "AAA/USDT:USDT", _ts(i), 1_000_000.0 * (1 + 0.01 * i)) for i in range(80)]
+    path = tmp_path / "trail.db"
+    _write_db(path, candles, oi)
+    return str(path), entry
+
+
+def test_trailing_exit_follows_peak_instead_of_fixed_tp(run_past_tp_db):
+    """trailing_activation_pct > 0: фиксированного TP нет, стоп тянется за максимумом.
+
+    Мутации: убрать `not trailing and` у ветки TP — выход станет `tp` на +10%;
+    убрать подтяжку стопа — сделка дойдёт до max_hold и выйдет по времени.
+    """
+    path, entry = run_past_tp_db
+    base = simulate(_settings(), load_data(path), has_oi=True)["trades_list"]
+    assert len(base) == 1 and base[0]["exit_reason"] == "tp"
+    assert base[0]["exit_price"] == pytest.approx(entry * 1.10, rel=1e-9)
+
+    s = _settings()
+    s.trading.trailing_activation_pct = 8.0
+    s.trading.trailing_distance_pct = 4.0
+    trail = simulate(s, load_data(path), has_oi=True)["trades_list"]
+    assert len(trail) == 1
+    t = trail[0]
+    assert t["exit_reason"] == "sl", "выход по подтянутому стопу"
+    assert t["exit_price"] == pytest.approx(entry * (1.18 - 0.04), rel=1e-9)
+    assert t["partial_closed"] is True, "партиал от расчётного TP работает как раньше"
+    assert t["pnl"] > base[0]["pnl"]

@@ -1148,8 +1148,9 @@ class TestExchangeLotStep:
 
     @staticmethod
     def _pm_ready(connector: MagicMock, **overrides) -> PositionManager:
-        pm = _pm(connector, risk_per_trade_pct=1.0, stop_loss_pct=5.0,
-                 partial_close_qty_pct=30.0, **overrides)
+        params = {"risk_per_trade_pct": 1.0, "stop_loss_pct": 5.0,
+                  "partial_close_qty_pct": 30.0, **overrides}
+        pm = _pm(connector, **params)
         pm._count_open = AsyncMock(return_value=0)  # type: ignore[method-assign]
         pm._has_position = AsyncMock(return_value=False)  # type: ignore[method-assign]
         pm._in_cooldown = AsyncMock(return_value=False)  # type: ignore[method-assign]
@@ -1589,3 +1590,113 @@ async def test_agreement_error_alerts_once_with_ticker_to_add():
     _, status2, detail2 = await pm.open_position(session, signal)
     assert detail2 == "banned_symbol"
     pm._notify.assert_awaited_once()
+
+
+class TestTrailingExit:
+    """trailing_activation_pct > 0: на бирже нет фиксированного TP, есть SL и
+    нативный трейлинг ByBit. Активация и отступ — те же функции, что в движке."""
+
+    TRAIL = {"stop_loss_pct": 4.0, "risk_reward_ratio": 2.0, "partial_close_pct": 35.0,
+             "trailing_activation_pct": 8.0, "trailing_distance_pct": 5.0}
+
+    @classmethod
+    def _open(cls, trailing_side_effect=None, **overrides):
+        connector = TestExchangeLotStep._step_connector(step=0.001, contracts=15.0)
+        connector.set_trailing_stop = AsyncMock(side_effect=trailing_side_effect)
+        pm = TestExchangeLotStep._pm_ready(connector, **{**cls.TRAIL, **overrides})
+        return connector, pm
+
+    async def test_open_places_stop_and_trailing_without_tp(self):
+        connector, pm = self._open()
+        with patch("asyncio.sleep", AsyncMock()):
+            trade, status, _ = await pm.open_position(TestExchangeLotStep._session(), _signal())
+        assert status == "opened" and trade is not None
+        kw = connector.set_tpsl.await_args.kwargs
+        assert kw["tp_price"] is None, "фиксированного TP на бирже нет"
+        assert kw["sl_price"] == pytest.approx(0.96)
+        tkw = connector.set_trailing_stop.await_args.kwargs
+        assert tkw["activation_price"] == pytest.approx(1.08)
+        assert tkw["distance"] == pytest.approx(0.05), "отступ — цена: 5% от входа"
+        assert trade.trailing_set is True
+        # Партиал по-прежнему от расчётного TP (+8% при стопе 4% и RR 2): 35% пути = +2.8%
+        assert connector.place_reduce_only_limit.await_args.kwargs["price"] == pytest.approx(1.028)
+        assert any("Трейлинг" in m for m in pm._outbox)
+
+    async def test_trailing_failure_does_not_block_entry_and_is_retried(self):
+        connector, pm = self._open(trailing_side_effect=RuntimeError("bybit 10001"))
+        with patch("asyncio.sleep", AsyncMock()):
+            trade, status, _ = await pm.open_position(TestExchangeLotStep._session(), _signal())
+        assert status == "opened" and trade is not None
+        assert trade.trailing_set is False
+
+        connector.set_trailing_stop = AsyncMock()
+        await pm._ensure_trailing(trade)
+        assert trade.trailing_set is True
+        connector.set_trailing_stop.assert_awaited_once()
+
+    async def test_update_positions_retries_only_missing_trailing(self):
+        connector = _fake_connector(set_trailing_stop=AsyncMock())
+        pm = _pm(connector, **self.TRAIL)
+        pm._check_limit_partial_fill = AsyncMock(return_value=False)  # type: ignore[method-assign]
+        pm._check_partial_close_fallback = AsyncMock(return_value=False)  # type: ignore[method-assign]
+        pm._get_current_price = AsyncMock(return_value=100.0)  # type: ignore[method-assign]
+        missing, placed = _trade(entry_price=100.0), _trade(entry_price=100.0)
+        placed.symbol = "OTHER/USDT:USDT"
+        for pos in (missing, placed):
+            pos.tp_sl_set = True
+            pos.current_sl_price = 96.0
+        missing.trailing_set, placed.trailing_set = False, True
+        connector.fetch_positions = AsyncMock(return_value=[
+            {"symbol": missing.symbol, "contracts": 1.0}, {"symbol": placed.symbol, "contracts": 1.0},
+        ])
+        session = AsyncMock()
+        result = MagicMock()
+        result.scalars.return_value.all.return_value = [missing, placed]
+        session.execute = AsyncMock(return_value=result)
+
+        await pm.update_positions(session)
+        connector.set_trailing_stop.assert_awaited_once()
+        assert connector.set_trailing_stop.await_args.args[0] == missing.symbol
+        assert missing.trailing_set is True
+
+    async def test_breakeven_move_keeps_tp_off(self):
+        connector = _fake_connector(
+            set_tpsl=AsyncMock(), fetch_open_orders=AsyncMock(return_value=[]),
+        )
+        pm = _pm(connector, partial_close_qty_pct=0.0, **self.TRAIL)
+        pm._send_message = AsyncMock()
+        pos = _trade(entry_price=100.0, quantity=10.0)
+        trigger = pm._partial_trigger_price(pos.entry_price, pm._tp_price(pos.entry_price))
+        assert trigger == pytest.approx(102.8)
+        await pm._check_partial_close_fallback(pos, trigger)
+        assert connector.set_tpsl.await_args.kwargs["tp_price"] is None
+        assert connector.set_tpsl.await_args.kwargs["sl_price"] == pos.entry_price
+
+    async def test_exchange_exit_above_floor_is_trailing_with_taker_fee(self):
+        pm = _pm(**self.TRAIL)
+        pm._send_message = AsyncMock()
+        pos = _trade(entry_price=100.0, quantity=1.0)
+        pos.fee = 0.0
+        await pm._close_position(pos, 112.0, "tp_sl_exchange")
+        assert pos.fee == pytest.approx(112.0 * 0.055 / 100), "стоп-маркет — taker"
+        assert "Трейлинг-стоп" in pm._outbox[-1]
+        assert pm.guards.consecutive_losses == 0
+
+    async def test_breakeven_exit_in_profit_is_not_trailing(self):
+        pm = _pm(**self.TRAIL)
+        pm._send_message = AsyncMock()
+        pos = _trade(entry_price=100.0, quantity=0.8)
+        pos.partial_pnl, pos.current_sl_price = 0.56, 100.0
+        await pm._close_position(pos, 100.0, "tp_sl_exchange")
+        assert pos.pnl > 0
+        assert "Трейлинг" not in pm._outbox[-1] and "Стоп" in pm._outbox[-1]
+
+    async def test_default_config_keeps_fixed_tp(self):
+        connector = TestExchangeLotStep._step_connector(step=0.001, contracts=15.0)
+        connector.set_trailing_stop = AsyncMock()
+        pm = TestExchangeLotStep._pm_ready(connector)
+        with patch("asyncio.sleep", AsyncMock()):
+            trade, _, _ = await pm.open_position(TestExchangeLotStep._session(), _signal())
+        assert connector.set_tpsl.await_args.kwargs["tp_price"] == pytest.approx(pm._tp_price(1.0))
+        connector.set_trailing_stop.assert_not_awaited()
+        assert trade.trailing_set is False
