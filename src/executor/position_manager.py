@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.analytics.base import Signal
 from src.analytics.utils import cb_trade_outcome, trailing_activation_price, trailing_distance
+from src.backtest.metrics import BREAKEVEN, outcome
 from src.config import TradingConfig
 from src.connectors.exchange import ExchangeConnector
 from src.executor.guards import SOURCE, TradingGuards
@@ -1407,7 +1408,13 @@ class PositionManager:
                 floor = self._trailing_floor(trade.entry_price) * (1 - TRAIL_EXIT_BAND_PCT / 100)
                 reason = "trail" if exit_price >= floor else "sl"
             else:
-                reason = "tp" if (trade.pnl or 0) > 0 else "sl"
+                # По цене выхода, а не по знаку PnL: б/у-выход после партиала
+                # тоже в плюсе (забронированная доля), но это стоп, а не TP —
+                # и по комиссии (стоп-маркет, taker), и по смыслу. До 11.10.2026
+                # такие выходы уходили в Telegram как «✅ Тейк-профит» с maker-
+                # комиссией. TP — лимитник ровно на своей цене, полоса — на шаг цены.
+                tp = self._tp_price(trade.entry_price)
+                reason = "tp" if exit_price >= tp * (1 - TRAIL_EXIT_BAND_PCT / 100) else "sl"
 
         # TP закрывается лимитным ордером (maker), если включено конфигом
         # (tp_as_limit_order) — пересчитываем комиссию/PnL по реальной ставке.
@@ -1464,7 +1471,14 @@ class PositionManager:
             "sl": ("🛑", "Стоп-лосс"),
         }
         emoji, label = labels.get(reason, ("⏰", "Выход по времени"))
-        if reason == "sl" and cb_outcome == "neutral":
+        # Значок стопа — по классу исхода (цена выхода против входа), той же
+        # `metrics.outcome`, что считает /stats и отчёт бэктеста. Прежнее условие
+        # «серия CB нейтральна» срабатывало только при PnL ≤ 0, а б/у после
+        # партиала в плюсе на забронированной доле и печатался как 🛑.
+        if reason == "sl" and outcome({
+            "entry_price": trade.entry_price, "exit_price": exit_price,
+            "pnl": trade.pnl, "direction": trade.direction,
+        }) == BREAKEVEN:
             emoji, label = "⚪", "Стоп в безубытке"
 
         await self._notify(

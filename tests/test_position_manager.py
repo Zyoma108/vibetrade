@@ -551,16 +551,42 @@ class TestTakeProfitAsLimitOrder:
 
     @pytest.mark.asyncio
     async def test_tp_sl_exchange_inferred_tp_uses_maker_fee(self):
-        """reason='tp_sl_exchange' с pnl>0 определяется как TP — тоже должен
-        получить maker-комиссию, а не застрять на предварительной taker-оценке."""
+        """reason='tp_sl_exchange' с выходом по цене TP определяется как TP — тоже
+        должен получить maker-комиссию, а не застрять на предварительной taker-оценке."""
         pm = _pm(taker_fee_pct=0.055, maker_fee_pct=0.02, tp_as_limit_order=True)
         pm._send_message = AsyncMock()
 
         trade = _trade(entry_price=1.0, quantity=100, pnl=0.0)
         trade.fee = 0.055
+        tp = pm._tp_price(1.0)
 
-        await pm._close_position(trade, exit_price=1.05, reason="tp_sl_exchange")
-        assert trade.fee == pytest.approx(0.076)
+        await pm._close_position(trade, exit_price=tp, reason="tp_sl_exchange")
+        assert trade.fee == pytest.approx(0.055 + tp * 100 * 0.0002)
+        assert "Тейк-профит" in pm._outbox[-1]
+
+    @pytest.mark.asyncio
+    async def test_profitable_breakeven_exit_is_not_take_profit(self):
+        """Б/у-выход после партиала в плюсе на забронированной доле — это стоп:
+        taker-комиссия и нейтральный ⚪, а не «✅ Тейк-профит» (так было до 11.10.2026)."""
+        pm = _pm(taker_fee_pct=0.055, maker_fee_pct=0.02, tp_as_limit_order=True)
+        pm._send_message = AsyncMock()
+
+        trade = _trade(entry_price=1.0, quantity=80, pnl=0.0)
+        trade.fee, trade.partial_pnl, trade.current_sl_price = 0.055, 1.2, 1.0
+
+        await pm._close_position(trade, exit_price=1.0, reason="tp_sl_exchange")
+        assert trade.pnl > 0
+        assert trade.fee == pytest.approx(0.055 + 1.0 * 80 * 0.00055), "стоп-маркет — taker"
+        assert pm._outbox[-1].startswith("⚪ <b>Стоп в безубытке</b>")
+        assert pm.guards.consecutive_losses == 0
+
+    @pytest.mark.asyncio
+    async def test_loss_stop_stays_red(self):
+        pm = _pm()
+        pm._send_message = AsyncMock()
+        trade = _trade(entry_price=1.0, quantity=100, pnl=0.0)
+        await pm._close_position(trade, exit_price=0.95, reason="tp_sl_exchange")
+        assert pm._outbox[-1].startswith("🛑 <b>Стоп-лосс</b>")
 
 
 # ---------------------------------------------------------------------------
