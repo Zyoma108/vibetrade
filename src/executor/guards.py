@@ -20,6 +20,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.analytics.utils import cb_stop_after_loss
 from src.config import TradingConfig
 from src.storage.database import async_session
 from src.storage.models import BotState
@@ -56,7 +57,27 @@ class TradingGuards:
     # ------------------------------------------------------------------
 
     def register_loss(self) -> None:
+        """Убыток растит серию и, на пороге, СРАЗУ запускает полную остановку.
+
+        Сохранение — на вызывающем (`_close_position` пишет состояние в той же
+        транзакции, что и закрытие сделки)."""
         self.consecutive_losses += 1
+        if not self._config.circuit_breaker_enabled:
+            return
+        until, consumed = cb_stop_after_loss(
+            self.consecutive_losses, self.circuit_breaker_until,
+            self.circuit_breaker_stop_consumed_at, datetime.now(tz=timezone.utc),
+            self._config.circuit_breaker_loss_streak_stop,
+            self._config.circuit_breaker_stop_minutes,
+        )
+        if until != self.circuit_breaker_until:
+            self.circuit_breaker_until = until
+            self.circuit_breaker_stop_consumed_at = consumed
+            logger.warning(
+                f"Circuit Breaker: {self.consecutive_losses} убытков подряд → "
+                f"ПОЛНАЯ ОСТАНОВКА на {self._config.circuit_breaker_stop_minutes} мин "
+                f"(до {until.strftime('%H:%M:%S')})"
+            )
 
     def register_win(self) -> None:
         """Победа — единственное, что сбрасывает серию убытков и снимает остановку."""
@@ -232,25 +253,9 @@ class TradingGuards:
                 f"уменьшенным размером ({self.consecutive_losses} убытков подряд не сброшены)"
             )
 
-        # Новый убыток сверх уже "отработанной" остановки → полная остановка
-        if (
-            self.consecutive_losses >= self._config.circuit_breaker_loss_streak_stop
-            and self.consecutive_losses > self.circuit_breaker_stop_consumed_at
-        ):
-            self.circuit_breaker_until = now + timedelta(
-                minutes=self._config.circuit_breaker_stop_minutes
-            )
-            self.circuit_breaker_stop_consumed_at = self.consecutive_losses
-            logger.warning(
-                f"Circuit Breaker: {self.consecutive_losses} убытков подряд → "
-                f"ПОЛНАЯ ОСТАНОВКА на {self._config.circuit_breaker_stop_minutes} мин "
-                f"(до {self.circuit_breaker_until.strftime('%H:%M:%S')})"
-            )
-            # Метод синхронный (вызывается из горячего пути open_position) — сохраняем
-            # состояние фоновой задачей, не блокируя проверку сигнала на запись в БД.
-            self.schedule_save()
-            return "circuit_breaker_stop"
-
+        # Полная остановка запускается в register_loss — в момент убытка, а не
+        # здесь: здесь её запуск откладывался до следующего сигнала (см.
+        # analytics/utils.cb_stop_after_loss).
         if self.consecutive_losses >= self._config.circuit_breaker_loss_streak_reduce:
             return "circuit_breaker_reduce"
 

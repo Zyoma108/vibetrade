@@ -1062,3 +1062,24 @@ def test_small_deposit_feels_the_lot_step(golden_db):
     rs = simulate(small, data, has_oi=True, markets=markets)
     rb = simulate(big, data, has_oi=True, markets=markets)
     assert rs["expectancy_R"] < rb["expectancy_R"], (rs["expectancy_R"], rb["expectancy_R"])
+
+
+def test_cb_stop_after_loss():
+    """Остановка стартует в момент убытка на пороге; повторно на той же серии
+    не стартует; новая во время идущей ставится с конца текущей."""
+    from datetime import datetime, timedelta
+    from src.analytics.utils import cb_stop_after_loss
+
+    now = datetime(2026, 10, 2, 18, 39)
+    # ниже порога — ничего
+    assert cb_stop_after_loss(2, None, 0, now, 3, 60) == (None, 0)
+    # на пороге — с текущего момента
+    assert cb_stop_after_loss(3, None, 0, now, 3, 60) == (now + timedelta(minutes=60), 3)
+    # уже отработанная серия — ничего
+    old = now - timedelta(minutes=5)
+    assert cb_stop_after_loss(3, old, 3, now, 3, 60) == (old, 3)
+    # новый убыток после истечения — новая с текущего момента
+    assert cb_stop_after_loss(4, old, 3, now, 3, 60) == (now + timedelta(minutes=60), 4)
+    # новый убыток во время идущей — с её конца
+    running = now + timedelta(minutes=20)
+    assert cb_stop_after_loss(4, running, 3, now, 3, 60) == (running + timedelta(minutes=60), 4)

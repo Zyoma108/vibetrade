@@ -4,6 +4,8 @@ Shared utilities for analytics modules.
 Extracts duplicated code from detector.py, price_surge.py, app.py, and runner.py.
 """
 
+from datetime import datetime, timedelta
+
 import numpy as np
 
 OI_TREND_BARS = 3  # Legacy-режим: сколько ПОСЛЕДНИХ ТОЧЕК OI берётся на тренд
@@ -168,3 +170,27 @@ def cb_trade_outcome(pnl: float | None, stop_price: float | None, entry_price: f
     if stop_price is not None and stop_price == entry_price:
         return "neutral"
     return "loss"
+
+
+def cb_stop_after_loss(losses: int, stop_until: datetime | None, consumed_at: int,
+                       now: datetime, loss_streak_stop: int,
+                       stop_minutes: float) -> tuple[datetime | None, int]:
+    """Запустить полную остановку Circuit Breaker В МОМЕНТ убытка: `(stop_until, consumed_at)`.
+
+    Зовётся сразу после того, как убыток вырастил серию до `losses`. Остановка
+    стартует тогда, когда серия достигла порога, а не когда придёт следующий
+    сигнал. До 10.10.2026 прод проверял порог только в `open_position`, и
+    60-минутная пауза начиналась с первого сигнала ПОСЛЕ серии — хоть через 15
+    часов (02.10 18:39 третий стоп → заблокирован сигнал 03.10 10:12). Движок
+    при этом проверял порог на каждом шаге скана, и остановка истекала вхолостую:
+    свип CB видел её «мёртвым кодом», а в проде она отсекала первый сетап после
+    каждой серии (8 сетапов за 27.08-22.09, 5 за 28.09-10.10).
+
+    Новый убыток сверх уже отработанной остановки (`losses > consumed_at`)
+    запускает следующую; если текущая ещё идёт, следующая начинается с её
+    конца — так движок вёл себя и раньше. Одна реализация на прод и бэктест.
+    """
+    if losses < loss_streak_stop or losses <= consumed_at:
+        return stop_until, consumed_at
+    start = stop_until if stop_until is not None and stop_until > now else now
+    return start + timedelta(minutes=stop_minutes), losses
