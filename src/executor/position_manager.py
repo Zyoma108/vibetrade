@@ -7,6 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.analytics.base import Signal
+from src.analytics.utils import cb_trade_outcome
 from src.config import TradingConfig
 from src.connectors.exchange import ExchangeConnector
 from src.executor.guards import SOURCE, TradingGuards
@@ -443,7 +444,13 @@ class PositionManager:
                 try:
                     partial_trigger = self._partial_trigger_price(entry_price, tp_price)
                     partial_qty = await self._partial_qty(signal.symbol, quantity)
-                    if partial_qty <= 0:
+                    if self.config.partial_close_qty_pct <= 0:
+                        logger.info(
+                            f"Частичная фиксация {signal.symbol} выключена "
+                            f"(partial_close_qty_pct = 0) — на триггере "
+                            f"{partial_trigger:.6f} стоп уйдёт в б/у"
+                        )
+                    elif partial_qty <= 0:
                         logger.info(
                             f"Частичная фиксация {signal.symbol} недоступна: "
                             f"{self.config.partial_close_qty_pct:.0f}% от {quantity} "
@@ -928,7 +935,10 @@ class PositionManager:
         0.0 означает, что фиксировать нечем: шаг лота крупнее доли. Так бывает на
         малом депозите у монет с грубым шагом (SUI на bybit — 10 контрактов при
         позиции в 10), и раньше в этом случае уходил заведомо отбойный ордер.
+        Тот же 0.0 при `partial_close_qty_pct = 0` — там фиксации нет намеренно.
         """
+        if self.config.partial_close_qty_pct <= 0:
+            return 0.0
         return await self._connector.amount_to_precision(
             symbol, quantity * (self.config.partial_close_qty_pct / 100)
         )
@@ -938,6 +948,14 @@ class PositionManager:
 
         Возвращает True, если лимитник исполнился и позиция обработана.
         """
+        # Сколько именно ждём от лимитника — считаем той же формулой, которой
+        # он выставлялся при открытии (см. open_position, шаг 4). Ноль — лимитника
+        # не было (шаг лота крупнее доли или partial_close_qty_pct = 0), и тогда
+        # не за чем ходить на биржу: это запрос на позицию в КАЖДОМ цикле.
+        expected_partial = await self._partial_qty(pos.symbol, pos.quantity)
+        if expected_partial <= 0:
+            return False
+
         try:
             ex_positions = await self._connector.fetch_positions(
                 pos.symbol
@@ -951,9 +969,7 @@ class PositionManager:
 
         actual_contracts = abs(ex_positions[0]["contracts"])
 
-        # Сколько именно ждём от лимитника — считаем той же формулой, которой
-        # он выставлялся при открытии (см. open_position, шаг 4). Раньше здесь
-        # стоял порог «осталось меньше 75% позиции», и он молча ломался на
+        # Раньше здесь стоял порог «осталось меньше 75% позиции», и он молча ломался на
         # грубом шаге лота: позиция в 4 контракта при целом шаге даёт партиал
         # 4 * 0.3 = 1.2 -> 1, остаток 3 из 4 — ровно 75%, исполнение не
         # детектировалось никогда. На депозите, где нотионал позиции ~$12,
@@ -961,9 +977,6 @@ class PositionManager:
         # остатком 3.0 и 2.4 контракта). Константа так же молча ломала любое
         # понижение partial_close_qty_pct до 25% и ниже — а свип от 12.08.2026
         # вёл ровно туда.
-        expected_partial = await self._partial_qty(pos.symbol, pos.quantity)
-        if expected_partial <= 0:
-            return False  # лимитника не было — шаг лота крупнее доли
         if actual_contracts > pos.quantity - expected_partial * PARTIAL_FILL_DETECT_RATIO:
             return False
 
@@ -1023,9 +1036,10 @@ class PositionManager:
 
         close_qty = await self._partial_qty(pos.symbol, pos.quantity)
         if close_qty <= 0:
-            # Закрыть часть нечем — шаг лота крупнее доли. Но вторая половина
-            # механизма (перевод стопа в безубыток) от объёма не зависит, а
-            # защищает она больше, чем сама фиксация. Идемпотентно по
+            # Закрыть часть нечем: либо шаг лота крупнее доли, либо доля нулевая
+            # намеренно (partial_close_qty_pct = 0 — режим «только б/у»). Вторая
+            # половина механизма (перевод стопа в безубыток) от объёма не зависит,
+            # а защищает она больше, чем сама фиксация. Идемпотентно по
             # current_sl_price, иначе set_tpsl уходил бы каждый цикл.
             if pos.current_sl_price != pos.entry_price:
                 try:
@@ -1038,13 +1052,27 @@ class PositionManager:
                         tp_as_limit=self.config.tp_as_limit_order,
                     )
                     pos.current_sl_price = pos.entry_price
+                    why = (
+                        "выключена" if self.config.partial_close_qty_pct <= 0
+                        else "невозможна (шаг лота)"
+                    )
                     logger.info(
-                        f"Частичная фиксация {pos.symbol} невозможна (шаг лота), "
+                        f"Частичная фиксация {pos.symbol} {why}, "
                         f"стоп переведён в безубыток"
+                    )
+                    await self._notify(
+                        f"🔒 <b>Стоп в безубыток</b> {pos.direction.upper()}\n"
+                        f"Монета: {pos.symbol}\n"
+                        f"Цена ${current_price:.6f} дошла до триггера "
+                        f"({self.config.partial_close_pct:.0f}% пути до TP)"
                     )
                 except Exception as e:
                     logger.warning(f"Перевод стопа в б/у для {pos.symbol}: {e}")
-            return True
+            # False, а не True: позиция не закрывалась и не менялась в объёме,
+            # и остаток цикла (выход по max_hold_hours) обязан отработать. С True
+            # time-exit пропускался в каждом цикле, пока цена выше триггера —
+            # позиция в б/у без фиксации могла жить сколько угодно.
+            return False
 
         # Проверить, нет ли уже лимитника на бирже (после рестарта).
         # Сбой этого запроса НЕ означает "ордеров нет": раньше исключение здесь
@@ -1304,9 +1332,23 @@ class PositionManager:
             else (trade.entry_price / exit_price - 1) * 100
         )
 
-        # Circuit Breaker: обновляем счётчик убытков подряд
+        # Circuit Breaker: обновляем счётчик убытков подряд.
+        # Сделка, у которой стоп уже стоял в б/у, по смыслу не убыток: её худший
+        # исход — комиссии и проскальзывание стопа. Без фиксации доли
+        # (partial_close_qty_pct = 0) такой выход даёт PnL около −$0.02, и прежняя
+        # проверка `pnl <= 0` засчитывала в серию каждый безубыток — по свипу
+        # 08.09.2026 это треть сделок. Б/у нейтрален: серию не растит и не
+        # сбрасывает (выход в б/у с плюсом — по-прежнему победа). Та же логика —
+        # в движке бэктеста: обе стороны зовут `cb_trade_outcome`.
+        cb_outcome = cb_trade_outcome(trade.pnl, trade.current_sl_price, trade.entry_price)
         if self.config.circuit_breaker_enabled:
-            if (trade.pnl or 0) <= 0:
+            if cb_outcome == "neutral":
+                logger.info(
+                    f"Circuit Breaker: выход в б/у (PnL=${trade.pnl:+.2f} на "
+                    f"{trade.symbol}) — не убыток, серия "
+                    f"{self.guards.consecutive_losses} без изменений"
+                )
+            elif cb_outcome == "loss":
                 self.guards.register_loss()
                 logger.warning(
                     f"Circuit Breaker: {self.guards.consecutive_losses} убытков подряд "
@@ -1331,6 +1373,8 @@ class PositionManager:
             "sl": ("🛑", "Стоп-лосс"),
         }
         emoji, label = labels.get(reason, ("⏰", "Выход по времени"))
+        if reason == "sl" and cb_outcome == "neutral":
+            emoji, label = "⚪", "Стоп в безубытке"
 
         await self._notify(
             f"{emoji} <b>{label}</b> {trade.direction.upper()}\n"

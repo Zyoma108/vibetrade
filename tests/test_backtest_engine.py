@@ -598,6 +598,50 @@ def test_be_stop_exit_does_not_feed_circuit_breaker(cb_parity_db):
     )
 
 
+def test_breakeven_exit_without_partial_is_neutral_for_circuit_breaker(cb_parity_db):
+    """partial_close_qty_pct = 0: б/у-выход даёт −комиссии, но в серию не идёт.
+
+    Тот же сценарий, что выше, только без фиксации доли. Первая сделка уходит
+    в б/у с PnL около −$0.02; прежнее правило `pnl <= 0 → убыток` засчитывало
+    её в серию, и вторая открывалась половинным размером. Правило общее с
+    продом — `analytics.utils.cb_trade_outcome`.
+
+    Мутация: вернуть в движке `else: cb_losses += 1` — |PnL| второй упадёт вдвое.
+    """
+    settings = _settings()
+    settings.trading.partial_close_qty_pct = 0.0
+    settings.trading.circuit_breaker_loss_streak_reduce = 1
+    settings.trading.circuit_breaker_loss_streak_stop = 99
+    settings.trading.cooldown_hours = 0.0
+
+    result = simulate(settings, load_data(cb_parity_db), has_oi=True)
+    trades = {t["symbol"]: t for t in result["trades_list"]}
+
+    assert "AAA/USDT:USDT" in trades and "BBB/USDT:USDT" in trades, result["trades_list"]
+    first = trades["AAA/USDT:USDT"]
+    assert first["exit_reason"] == "sl"
+    assert first["sl_price"] == first["entry_price"], "стоп переведён в б/у"
+    assert first["partial_pnl"] == 0.0, "доля нулевая — фиксировать нечего"
+    assert first["pnl"] <= 0, "без фиксации б/у-выход — это одни комиссии"
+
+    second = trades["BBB/USDT:USDT"]
+    assert second["exit_reason"] == "sl"
+    assert second["pnl"] < -7.0, (
+        f"вторая сделка открыта уменьшенным размером (PnL={second['pnl']:.2f}) — "
+        "значит б/у-выход без фиксации засчитан в серию убытков"
+    )
+
+
+def test_cb_trade_outcome():
+    from src.analytics.utils import cb_trade_outcome
+
+    assert cb_trade_outcome(0.5, 100.0, 100.0) == "win"     # б/у после партиала в плюсе
+    assert cb_trade_outcome(-0.02, 100.0, 100.0) == "neutral"
+    assert cb_trade_outcome(-0.02, 95.0, 100.0) == "loss"   # стоп не переводился
+    assert cb_trade_outcome(0.0, None, 100.0) == "loss"     # стоп неизвестен — как раньше
+    assert cb_trade_outcome(None, None, 100.0) == "loss"
+
+
 # ---------------------------------------------------------------------------
 # Метрики решения: знаменатель R
 # ---------------------------------------------------------------------------

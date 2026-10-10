@@ -262,6 +262,57 @@ class TestClosePositionCounter:
         assert pm.guards.consecutive_losses == 1
 
     @pytest.mark.asyncio
+    async def test_breakeven_stop_exit_is_neutral(self):
+        """Стоп в б/у, выход ровно по входу: PnL = −комиссии, но это не убыток.
+
+        Без фиксации доли (partial_close_qty_pct = 0) так выходит каждый
+        безубыток; засчитывать его в серию — треть сделок в Circuit Breaker
+        (свип 08.09.2026). Серия не растёт и не сбрасывается."""
+        pm = _pm()
+        pm.guards.consecutive_losses = 2
+        pm._send_message = AsyncMock()
+        trade = _trade(entry_price=1.0)
+        trade.current_sl_price = 1.0
+        await pm._close_position(trade, exit_price=1.0, reason="sl")
+        assert trade.pnl < 0, "комиссии делают безубыток микро-минусом"
+        assert pm.guards.consecutive_losses == 2
+
+    @pytest.mark.asyncio
+    async def test_breakeven_stop_exit_via_exchange_is_neutral(self):
+        """Тот же б/у-выход, но замеченный сверкой с биржей (tp_sl_exchange → sl)."""
+        pm = _pm()
+        pm.guards.consecutive_losses = 2
+        pm._send_message = AsyncMock()
+        trade = _trade(entry_price=1.0)
+        trade.current_sl_price = 1.0
+        await pm._close_position(trade, exit_price=0.999, reason="tp_sl_exchange")
+        assert pm.guards.consecutive_losses == 2
+
+    @pytest.mark.asyncio
+    async def test_loss_under_original_stop_still_counts(self):
+        """Стоп не переводился (стоит на −5%) — минус остаётся убытком."""
+        pm = _pm()
+        pm.guards.consecutive_losses = 2
+        pm._send_message = AsyncMock()
+        trade = _trade(entry_price=1.0)
+        trade.current_sl_price = 0.95
+        await pm._close_position(trade, exit_price=0.95, reason="sl")
+        assert pm.guards.consecutive_losses == 3
+
+    @pytest.mark.asyncio
+    async def test_profitable_breakeven_exit_still_resets(self):
+        """Б/у после партиала — в плюсе, и он по-прежнему победа (поведение до правки)."""
+        pm = _pm()
+        pm.guards.consecutive_losses = 2
+        pm._send_message = AsyncMock()
+        trade = _trade(entry_price=1.0)
+        trade.current_sl_price = 1.0
+        trade.partial_pnl = 0.05
+        await pm._close_position(trade, exit_price=1.0, reason="sl")
+        assert trade.pnl > 0
+        assert pm.guards.consecutive_losses == 0
+
+    @pytest.mark.asyncio
     async def test_disabled_does_not_track(self):
         pm = _pm(circuit_breaker_enabled=False)
         pm._send_message = AsyncMock()
@@ -1144,7 +1195,10 @@ class TestExchangeLotStep:
         connector.create_market_order.assert_not_awaited()
 
     async def test_fallback_moves_stop_to_breakeven_when_slice_too_small(self):
-        """Фиксировать нечем, но безубыток от объёма не зависит — стоп двигаем."""
+        """Фиксировать нечем, но безубыток от объёма не зависит — стоп двигаем.
+
+        Возврат False: позиция не закрывалась и в объёме не менялась, остаток
+        цикла (time-exit) обязан отработать — см. TestBreakevenOnly."""
         connector = self._step_connector(step=10.0, contracts=10.0)
         connector.fetch_open_orders = AsyncMock(return_value=[])
         connector.create_market_reduce_order = AsyncMock()
@@ -1152,7 +1206,7 @@ class TestExchangeLotStep:
         pos = _trade(entry_price=100.0, quantity=10.0)
 
         trigger = pm._partial_trigger_price(pos.entry_price, pm._tp_price(pos.entry_price))
-        assert await pm._check_partial_close_fallback(pos, trigger) is True
+        assert await pm._check_partial_close_fallback(pos, trigger) is False
 
         connector.create_market_reduce_order.assert_not_awaited()
         assert not pos.partial_closed          # фиктивной фиксации нет
@@ -1169,7 +1223,7 @@ class TestExchangeLotStep:
         pos.current_sl_price = pos.entry_price
 
         trigger = pm._partial_trigger_price(pos.entry_price, pm._tp_price(pos.entry_price))
-        assert await pm._check_partial_close_fallback(pos, trigger) is True
+        assert await pm._check_partial_close_fallback(pos, trigger) is False
         connector.set_tpsl.assert_not_awaited()
 
     async def test_pending_entry_quantity_truncated_to_lot_step(self):
@@ -1224,6 +1278,91 @@ def test_agreement_error_covers_both_bybit_codes():
 # ---------------------------------------------------------------------------
 # Защита после частичной фиксации: б/у-стоп и детект исполнения лимитника
 # ---------------------------------------------------------------------------
+
+
+class TestBreakevenOnly:
+    """partial_close_qty_pct = 0: на триггере только перевод стопа в б/у.
+
+    Лимитника частичной фиксации нет, поэтому триггер ловится опросом цены в
+    fallback-ветке. Там же раньше стоял `return True`, из-за которого time-exit
+    пропускался в каждом цикле, пока цена выше триггера."""
+
+    def test_config_accepts_zero(self):
+        assert _config(partial_close_qty_pct=0.0).partial_close_qty_pct == 0.0
+
+    async def test_open_position_places_no_partial_limit(self):
+        # Шаг мелкий: если лимитник не выставлен, то из-за нулевой доли, а не лота.
+        connector = TestExchangeLotStep._step_connector(step=0.001, contracts=15.0)
+        pm = TestExchangeLotStep._pm_ready(connector)
+        pm.config.partial_close_qty_pct = 0.0
+        with patch("asyncio.sleep", AsyncMock()):
+            trade, _, _ = await pm.open_position(TestExchangeLotStep._session(), _signal())
+        assert trade is not None
+        connector.place_reduce_only_limit.assert_not_awaited()
+
+    async def test_limit_fill_check_does_not_query_exchange(self):
+        """Лимитника нет — fetch_positions на каждую позицию в каждом цикле не нужен."""
+        connector = _fake_connector(fetch_positions=AsyncMock(return_value=[]))
+        pm = _pm(connector, partial_close_qty_pct=0.0)
+        pos = _trade(entry_price=100.0, quantity=10.0)
+
+        assert await pm._check_limit_partial_fill(pos) is False
+        connector.fetch_positions.assert_not_awaited()
+        # Ноль — намеренный, а не результат округления: биржу не спрашиваем.
+        # Боевой ccxt на объёме 0 бросает InvalidOrder, и это не путь для штатного режима.
+        connector.amount_to_precision.assert_not_awaited()
+
+    async def test_trigger_moves_stop_to_breakeven_without_closing(self):
+        connector = _fake_connector(
+            set_tpsl=AsyncMock(), create_market_reduce_order=AsyncMock(),
+            fetch_open_orders=AsyncMock(return_value=[]),
+        )
+        pm = _pm(connector, partial_close_qty_pct=0.0)
+        pm._send_message = AsyncMock()
+        pos = _trade(entry_price=100.0, quantity=10.0)
+        trigger = pm._partial_trigger_price(pos.entry_price, pm._tp_price(pos.entry_price))
+
+        assert await pm._check_partial_close_fallback(pos, trigger) is False
+        connector.create_market_reduce_order.assert_not_awaited()
+        assert connector.set_tpsl.await_args.kwargs["sl_price"] == pos.entry_price
+        assert connector.set_tpsl.await_args.kwargs["amount"] == 10.0
+        assert pos.current_sl_price == pos.entry_price
+        assert pos.quantity == 10.0 and not pos.partial_closed
+        assert len(pm._outbox) == 1, "уведомление о переводе в б/у"
+
+        # Следующий цикл: стоп уже в б/у — ни запроса, ни повторного уведомления.
+        assert await pm._check_partial_close_fallback(pos, trigger) is False
+        connector.set_tpsl.assert_awaited_once()
+        assert len(pm._outbox) == 1
+
+    async def test_time_exit_fires_while_price_above_trigger(self):
+        """Позиция в б/у выше триггера обязана закрыться по max_hold_hours."""
+        connector = _fake_connector(
+            set_tpsl=AsyncMock(), close_position=AsyncMock(),
+            fetch_my_trades=AsyncMock(return_value=[]),
+        )
+        pm = _pm(connector, partial_close_qty_pct=0.0, max_hold_hours=1.0)
+        pm._send_message = AsyncMock()
+        pos = _trade(entry_price=100.0, quantity=10.0)
+        pos.tp_sl_set = True
+        pos.current_sl_price = pos.entry_price  # б/у уже стоит
+        pos.entry_time = datetime.now(tz=timezone.utc) - timedelta(hours=2)
+        trigger = pm._partial_trigger_price(pos.entry_price, pm._tp_price(pos.entry_price))
+
+        connector.fetch_positions = AsyncMock(
+            return_value=[{"symbol": pos.symbol, "contracts": 10.0}]
+        )
+        pm._get_current_price = AsyncMock(return_value=trigger * 1.01)  # type: ignore[method-assign]
+        session = AsyncMock()
+        session.add = MagicMock()
+        result = MagicMock()
+        result.scalars.return_value.all.return_value = [pos]
+        session.execute = AsyncMock(return_value=result)
+
+        closed = await pm.update_positions(session)
+
+        connector.close_position.assert_awaited_once_with(pos.symbol)
+        assert closed == [pos] and pos.status == "closed"
 
 
 class TestBreakevenStopRetry:

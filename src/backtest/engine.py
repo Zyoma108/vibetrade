@@ -28,7 +28,7 @@ from pathlib import Path
 
 from src.analytics.detector import WINDOW_PAD_BARS, SetupDetector
 from src.analytics.utils import OI_TREND_BARS, oi_trend_passes, timeframe_to_minutes
-from src.analytics.utils import adaptive_stop_pct
+from src.analytics.utils import adaptive_stop_pct, cb_trade_outcome
 from src.backtest.metrics import breakeven_credit, summarize
 
 
@@ -539,18 +539,19 @@ def simulate(settings, data, has_oi: bool = True, collect_retracement: bool = Tr
                 positions.remove(pos)
                 last_exit_time[pos.symbol] = ts
                 if cfg.circuit_breaker_enabled:
-                    # Боевой PositionManager._close_position решает по ЗНАКУ PnL
-                    # (`if (trade.pnl or 0) <= 0`), а не по причине выхода. Выход по
-                    # стопу после партиала — прибыльный (доля забронирована на 35%
-                    # пути), и в проливе он СБРАСЫВАЕТ серию убытков. Движок же
-                    # инкрементировал серию на любом `sl`, из-за чего Circuit Breaker
-                    # в бэктесте срабатывал заметно чаще боевого: на БД 27.08-08.09
-                    # 21 сделка уменьшенным размером против 12 в проливе.
-                    if pos.pnl > 0:
+                    # Боевой PositionManager._close_position решает по ЗНАКУ PnL,
+                    # а не по причине выхода. Выход по стопу после партиала —
+                    # прибыльный (доля забронирована на 35% пути), и в проливе он
+                    # СБРАСЫВАЕТ серию убытков. Движок же инкрементировал серию на
+                    # любом `sl`, из-за чего Circuit Breaker в бэктесте срабатывал
+                    # заметно чаще боевого: на БД 27.08-08.09 21 сделка уменьшенным
+                    # размером против 12 в проливе.
+                    outcome = cb_trade_outcome(pos.pnl, pos.sl_price, pos.entry_price)
+                    if outcome == "win":
                         cb_losses = 0
                         cb_stop_until = None
                         cb_stop_consumed_at = 0
-                    else:
+                    elif outcome == "loss":
                         cb_losses += 1
                 continue
 
@@ -566,11 +567,12 @@ def simulate(settings, data, has_oi: bool = True, collect_retracement: bool = Tr
                 positions.remove(pos)
                 last_exit_time[pos.symbol] = ts
                 if cfg.circuit_breaker_enabled:
-                    if pos.pnl > 0:
+                    outcome = cb_trade_outcome(pos.pnl, pos.sl_price, pos.entry_price)
+                    if outcome == "win":
                         cb_losses = 0
                         cb_stop_until = None
                         cb_stop_consumed_at = 0
-                    else:
+                    elif outcome == "loss":
                         cb_losses += 1
 
         # --- manage pending entries ---

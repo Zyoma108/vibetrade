@@ -152,3 +152,19 @@ def adaptive_stop_pct(
     if mult <= 0 or range_pct is None or range_pct <= 0:
         return fixed_pct
     return min(max(range_pct * mult, min_pct), max_pct)
+
+
+def cb_trade_outcome(pnl: float | None, stop_price: float | None, entry_price: float) -> str:
+    """Как закрытая сделка двигает серию Circuit Breaker: 'win' | 'loss' | 'neutral'.
+
+    Плюс сбрасывает серию, минус растит её, а минус при стопе, уже стоящем в
+    б/у (`stop_price == entry_price`), нейтрален: это комиссии и проскальзывание
+    стопа, а не убыток. Без фиксации доли (partial_close_qty_pct = 0) так выходит
+    каждый безубыток, и прежнее `pnl <= 0 → убыток` засчитывало в серию треть
+    сделок (свип 08.09.2026). Одна реализация на прод и бэктест — правило 2.
+    """
+    if (pnl or 0) > 0:
+        return "win"
+    if stop_price is not None and stop_price == entry_price:
+        return "neutral"
+    return "loss"
