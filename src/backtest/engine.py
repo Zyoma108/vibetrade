@@ -542,7 +542,9 @@ def simulate(settings, data, has_oi: bool = True, collect_retracement: bool = Tr
             if low <= pos.sl_price:
                 pos.exit_price = pos.sl_price
                 pos.exit_time = ts
-                pos.exit_reason = "sl"
+                # Стоп выше входа бывает только подтянутым трейлингом — так его
+                # и называем, как прод (`PositionManager._close_position`).
+                pos.exit_reason = "trail" if pos.sl_price > pos.entry_price else "sl"
                 pos.fee += _fee(cfg, pos.sl_price * pos.quantity, taker=True)
                 pos.pnl = (pos.sl_price - pos.entry_price) * pos.quantity + pos.partial_pnl - pos.fee
                 pos.closed = True

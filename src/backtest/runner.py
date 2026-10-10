@@ -15,7 +15,7 @@ import logging
 from pathlib import Path
 
 from src.backtest.engine import DEFAULT_MARKETS_PATH, load_data, load_markets, simulate
-from src.backtest.metrics import breakeven_credit, outcome_counts
+from src.backtest.metrics import BREAKEVEN, LOSS, breakeven_credit, outcome, outcome_counts
 from src.config import Settings
 
 logger = logging.getLogger(__name__)
@@ -172,13 +172,27 @@ def _print_comparison(bt: dict, live: dict | None) -> None:
                 print(f"      - {reason}: {count}")
 
 
+def _trade_emoji(t: dict) -> str:
+    """Значок сделки — как в Telegram у прода: по механизму выхода И результату.
+
+    Раньше значок брался только из `exit_reason`, и любой выход по стопу шёл с 🛑 —
+    в том числе б/у в плюсе после партиала и выход подтянутым трейлингом.
+    """
+    reason = t.get("exit_reason")
+    if reason == "tp":
+        return "✅"
+    if reason == "trail":
+        return "📈"
+    if reason == "sl":
+        return {LOSS: "🛑", BREAKEVEN: "⚪"}.get(outcome(t), "✅")
+    return "⏰"
+
+
 def _print_trade_list(trades: list, title: str, max_show: int = 20) -> None:
     """Вывести список сделок."""
     print(f"\n  {title} (последние {min(len(trades), max_show)}):")
     for t in trades[-max_show:]:
-        emoji = "✅" if t["exit_reason"] == "tp" else (
-            "🛑" if t["exit_reason"] == "sl" else "⏰"
-        )
+        emoji = _trade_emoji(t)
         pnl_pct = (t["exit_price"] / t["entry_price"] - 1) * 100
         print(
             f"  {emoji} {t['symbol']:25s} "

@@ -1143,7 +1143,21 @@ def test_trailing_exit_follows_peak_instead_of_fixed_tp(run_past_tp_db):
     trail = simulate(s, load_data(path), has_oi=True)["trades_list"]
     assert len(trail) == 1
     t = trail[0]
-    assert t["exit_reason"] == "sl", "выход по подтянутому стопу"
+    assert t["exit_reason"] == "trail", "выход по подтянутому стопу — как в проде"
     assert t["exit_price"] == pytest.approx(entry * (1.18 - 0.04), rel=1e-9)
     assert t["partial_closed"] is True, "партиал от расчётного TP работает как раньше"
     assert t["pnl"] > base[0]["pnl"]
+
+
+def test_runner_trade_emoji_follows_result_not_only_mechanism():
+    """Выход по стопу в плюсе не должен печататься красным: б/у — ⚪, трейлинг — 📈."""
+    from src.backtest.runner import _trade_emoji
+
+    def t(reason, exit_price):
+        return {"exit_reason": reason, "entry_price": 100.0, "exit_price": exit_price, "pnl": 0.0}
+
+    assert _trade_emoji(t("tp", 108.0)) == "✅"
+    assert _trade_emoji(t("trail", 107.5)) == "📈"
+    assert _trade_emoji(t("sl", 100.0)) == "⚪"
+    assert _trade_emoji(t("sl", 96.0)) == "🛑"
+    assert _trade_emoji(t("time", 101.0)) == "⏰"
