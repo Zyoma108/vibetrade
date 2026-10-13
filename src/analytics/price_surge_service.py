@@ -68,28 +68,24 @@ class PriceSurgeSignalProcessor:
         outbox: list[str] = []
 
         interval = self.config.price_surge_minutes
-        window_bars = self.detector._window_bars
 
         # Pre-compute hour_bars from timeframe
         tf_min = timeframe_to_minutes(self.timeframe)
         hour_bars = max(60 // tf_min, 1)
 
         for sig in signals:
-            # Fetch exact prices from candles for the window (any exchange)
-            c_rows = (
-                await session.execute(
-                    select(Candle.open, Candle.close, Candle.timestamp)
-                    .where(Candle.symbol == sig.symbol)
-                    .order_by(desc(Candle.timestamp))
-                    .limit(window_bars + 1)
-                )
-            ).all()
-            if len(c_rows) < window_bars + 1:
+            # Рост и цены — ровно те, по которым детектор принял решение. Раньше
+            # их пересчитывали здесь запросом по символу без фильтра биржи: у
+            # монеты с рядами на binance и bybit `limit 7` брал бары обеих бирж
+            # вперемешку, и в БД попадал рост вплоть до отрицательного. Кулдаун
+            # сравнивает новые пампы с максимумом из БД, поэтому порог эскалации
+            # падал ниже нуля, и сигнал повторялся каждый цикл (13.10.2026).
+            change_pct = sig.change_pct
+            open_p = sig.window_open
+            close_p = sig.window_close
+            if change_pct is None or open_p is None or close_p is None:
+                logger.warning(f"Памп {sig.symbol} без замеров детектора — пропущен")
                 continue
-            c_rows = list(reversed(c_rows))
-            open_p = c_rows[0][0]
-            close_p = c_rows[-1][1]
-            change_pct = (close_p / open_p - 1) * 100 if open_p > 0 else 0
 
             # Persist to DB
             ps_signal = PriceSurgeSignal(
@@ -116,7 +112,7 @@ class PriceSurgeSignalProcessor:
 
             # 1-hour price change
             hour_change = await self._calc_hour_change(
-                session, sig.symbol, hour_bars
+                session, sig.exchange, sig.symbol, hour_bars
             )
 
             # OI change over last 3 points
@@ -144,13 +140,16 @@ class PriceSurgeSignalProcessor:
     # ------------------------------------------------------------------
 
     async def _calc_hour_change(
-        self, session: AsyncSession, symbol: str, hour_bars: int,
+        self, session: AsyncSession, exchange: str | None, symbol: str, hour_bars: int,
     ) -> float:
-        """Calculate price change over the last hour from OHLCV data."""
+        """Calculate price change over the last hour from OHLCV data.
+
+        Только по бирже, на которой детектор увидел памп: без фильтра бары
+        двух бирж перемешиваются, и «час» оказывается получасом."""
         hour_rows = (
             await session.execute(
                 select(Candle.open, Candle.close)
-                .where(Candle.symbol == symbol)
+                .where(Candle.exchange == exchange, Candle.symbol == symbol)
                 .order_by(desc(Candle.timestamp))
                 .limit(hour_bars + 1)
             )

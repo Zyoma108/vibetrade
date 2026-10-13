@@ -27,6 +27,16 @@ class Signal:
     # max_window_range_pct.
     window_range_pct: float | None = None
 
+    # Чем PriceSurgeDetector измерил памп: биржа ряда, рост окна и цены на его
+    # краях. PriceSurgeSignalProcessor пишет в БД и в сообщение именно их, а не
+    # пересчитывает: пересчёт шёл по свечам без фильтра биржи, и в
+    # price_surge_signals попадал другой рост (вплоть до отрицательного), по
+    # которому кулдаун затем сравнивал новые пампы — см. docs/strategy.md.
+    exchange: str | None = None
+    change_pct: float | None = None
+    window_open: float | None = None
+    window_close: float | None = None
+
 
 class BaseDetector(ABC):
     """Абстрактный детектор торговых сетапов."""

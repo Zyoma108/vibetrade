@@ -58,7 +58,7 @@ class PriceSurgeDetector(BaseDetector):
         # Лучший (максимальный) рост по монете за цикл. Ключ — символ, а не пара
         # exchange:symbol: одна и та же монета торгуется и на binance, и на bybit,
         # и без схлопывания по символу за цикл уходило бы два одинаковых сообщения.
-        best: dict[str, tuple[float, float]] = {}
+        best: dict[str, tuple[float, float, float, str]] = {}
         for exchange, symbol in symbols:
             try:
                 candles = await self._dp.load_candles(
@@ -76,14 +76,16 @@ class PriceSurgeDetector(BaseDetector):
                 if change_pct >= self.config.price_surge_pct:
                     prev = best.get(symbol)
                     if prev is None or change_pct > prev[0]:
-                        best[symbol] = (change_pct, float(closes[-1]))
+                        best[symbol] = (
+                            change_pct, float(closes[-1]), float(opens[0]), exchange,
+                        )
 
             except Exception:
                 logger.exception(f"Ошибка анализа {exchange}:{symbol}")
 
         signals: list[Signal] = []
         suppressed = 0
-        for symbol, (change_pct, close) in best.items():
+        for symbol, (change_pct, close, open_, exchange) in best.items():
             if not self._passes_cooldown(symbol, change_pct, recent):
                 suppressed += 1
                 continue
@@ -99,6 +101,10 @@ class PriceSurgeDetector(BaseDetector):
                         f"{self.config.price_surge_minutes} мин\n"
                         f"Цена: {close:.6f}"
                     ),
+                    exchange=exchange,
+                    change_pct=change_pct,
+                    window_open=open_,
+                    window_close=close,
                 )
             )
             logger.info(f"Памп: {symbol} +{change_pct:.1f}%")

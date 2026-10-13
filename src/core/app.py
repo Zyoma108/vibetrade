@@ -7,11 +7,12 @@ from datetime import datetime, timezone
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.analytics.base import BaseDetector
-from src.analytics.data_provider import CandleCache, DataProvider
+from src.analytics.data_provider import STALE_AFTER_BARS, CandleCache, DataProvider
 from src.analytics.detector import SetupDetector
 from src.analytics.market_context import MarketContext
 from src.analytics.price_surge import PriceSurgeDetector
 from src.analytics.price_surge_service import PriceSurgeSignalProcessor
+from src.analytics.utils import timeframe_to_minutes
 from src.collectors.market_data import MarketDataCollector
 from src.config import Settings
 from src.connectors.exchange import ExchangeConnector
@@ -283,8 +284,14 @@ class Application:
         """
         outbox: list[str] = []
 
-        # Создаём общий DataProvider на цикл — с персистентным кешем свечей
-        dp = DataProvider(candle_cache=self._candle_cache)
+        # Создаём общий DataProvider на цикл — с персистентным кешем свечей.
+        # Замёрзшие ряды (свежего бара нет STALE_AFTER_BARS таймфреймов)
+        # детекторам не отдаются — см. DataProvider._is_stale.
+        bar_sec = timeframe_to_minutes(self.settings.collectors.timeframe) * 60
+        dp = DataProvider(
+            candle_cache=self._candle_cache,
+            max_bar_age_sec=STALE_AFTER_BARS * bar_sec,
+        )
         if self._detector:
             self._detector.data_provider = dp
         if self._detector_price_surge:
@@ -372,6 +379,12 @@ class Application:
             surge_messages = await self._ps_processor.process(session)
 
         await session.commit()
+
+        if dp.stale_pairs:
+            sample = ", ".join(dp.stale_pairs[:5])
+            logger.info(
+                f"Пропущено пар с устаревшими свечами: {len(dp.stale_pairs)} ({sample})"
+            )
 
         # Всё сетевое — строго после коммита, вне write-лока БД
         await self._flush_outbox(outbox, signals_to_send, surge_messages)

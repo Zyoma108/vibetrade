@@ -784,3 +784,83 @@ class TestLoadOIWindow:
         await self._seed(session, [(-30, 999.0)])
         second = await dp.load_oi_window(session, "binance", "OI/USDT", 720, now=self.NOW)
         assert first == second
+
+
+# ---------------------------------------------------------------------------
+# Замёрзшие ряды (13.10.2026)
+# ---------------------------------------------------------------------------
+
+
+async def _seed_recent(session, exchange: str, symbol: str, count: int, last_age_min: float):
+    """``count`` 3-минутных свечей, последняя открыта ``last_age_min`` минут назад."""
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    last = now - timedelta(minutes=last_age_min)
+    session.add_all(
+        Candle(
+            exchange=exchange, symbol=symbol,
+            timestamp=last - timedelta(minutes=3 * (count - 1 - i)),
+            open=1.0, high=1.01, low=0.99, close=1.0, volume=100.0,
+        )
+        for i in range(count)
+    )
+    await session.commit()
+
+
+class TestStalePairs:
+    """Ряд, который перестал обновляться, детекторам не отдаётся.
+
+    13.10.2026 после сбоя сети у 246 монет остался bybit-ряд, который больше
+    не дописывался, а пара из списка детекторов не выпадала (список берётся из
+    tickers). Pump-детектор каждый цикл видел в нём один и тот же старый рост.
+    """
+
+    MAX_AGE = 9 * 60  # 3 бара по 3 минуты
+
+    async def test_frozen_series_returns_nothing(self, session_factory):
+        async with session_factory() as sess:
+            await _seed_recent(sess, "bybit", "STX/USDT:USDT", count=20, last_age_min=160)
+
+        dp = DataProvider(candle_cache=CandleCache(), max_bar_age_sec=self.MAX_AGE)
+        async with session_factory() as sess:
+            result = await dp.load_candles(sess, "bybit", "STX/USDT:USDT", limit=10)
+
+        assert result == []
+        assert dp.stale_pairs == ["bybit:STX/USDT:USDT"]
+
+    async def test_live_series_passes(self, session_factory):
+        """Последний бар — формирующийся, ему меньше таймфрейма."""
+        async with session_factory() as sess:
+            await _seed_recent(sess, "binance", "STX/USDT:USDT", count=20, last_age_min=1)
+
+        dp = DataProvider(candle_cache=CandleCache(), max_bar_age_sec=self.MAX_AGE)
+        async with session_factory() as sess:
+            result = await dp.load_candles(sess, "binance", "STX/USDT:USDT", limit=10)
+
+        assert len(result) == 10
+        assert dp.stale_pairs == []
+
+    async def test_one_missed_cycle_is_not_stale(self, session_factory):
+        """Монета пропущена по таймауту на прошлом цикле — отстаёт на бар, это норма."""
+        async with session_factory() as sess:
+            await _seed_recent(sess, "binance", "LAG/USDT", count=20, last_age_min=5)
+
+        dp = DataProvider(candle_cache=CandleCache(), max_bar_age_sec=self.MAX_AGE)
+        async with session_factory() as sess:
+            assert len(await dp.load_candles(sess, "binance", "LAG/USDT", limit=10)) == 10
+
+    async def test_without_persistent_cache_same_rule(self, session_factory):
+        async with session_factory() as sess:
+            await _seed_recent(sess, "bybit", "OLD/USDT", count=20, last_age_min=160)
+
+        dp = DataProvider(max_bar_age_sec=self.MAX_AGE)
+        async with session_factory() as sess:
+            assert await dp.load_candles(sess, "bybit", "OLD/USDT", limit=10) == []
+
+    async def test_check_off_by_default(self, session_factory):
+        """Без порога (тесты, скрипты) поведение прежнее — старая история отдаётся."""
+        async with session_factory() as sess:
+            await _seed_recent(sess, "bybit", "OLD/USDT", count=20, last_age_min=160)
+
+        dp = DataProvider(candle_cache=CandleCache())
+        async with session_factory() as sess:
+            assert len(await dp.load_candles(sess, "bybit", "OLD/USDT", limit=10)) == 10
