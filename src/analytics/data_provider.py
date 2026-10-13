@@ -40,6 +40,13 @@ OI_WINDOW_MAX_POINTS = 64
 # (такой отбрасывается фильтром `volume > 0` и иначе пропал бы из окна).
 REFRESH_TAIL_BARS = 3
 
+# Через сколько таймфреймов без нового бара ряд считается замёрзшим (см.
+# DataProvider._is_stale). Последний бар живого ряда — формирующийся, его
+# возраст меньше одного таймфрейма; монета, пропущенная по таймауту на прошлом
+# цикле, отстаёт ещё на бар. Три бара — запас над обоими случаями и при этом
+# меньше 18-минутного окна pump-детектора.
+STALE_AFTER_BARS = 3
+
 
 class CandleCache:
     """Persistent candle cache across collection cycles.
@@ -156,12 +163,45 @@ class DataProvider:
     cycles: only new candles are fetched from the DB on each call.
     """
 
-    def __init__(self, candle_cache: CandleCache | None = None) -> None:
+    def __init__(
+        self,
+        candle_cache: CandleCache | None = None,
+        max_bar_age_sec: float | None = None,
+    ) -> None:
         self._symbols: list[tuple[str, str]] | None = None
         self._candles: dict[str, list[dict[str, Any]]] = {}
         self._oi_values: dict[str, list[float]] = {}
         self._oi_windows: dict[str, tuple[list[float], list[float]] | None] = {}
         self._persistent_cache = candle_cache
+        self._max_bar_age_sec = max_bar_age_sec
+        self._stale: set[str] = set()
+
+    @property
+    def stale_pairs(self) -> list[str]:
+        """Пары `exchange:symbol`, отброшенные в этом цикле как устаревшие."""
+        return sorted(self._stale)
+
+    def _is_stale(self, last_ts: datetime) -> bool:
+        """Последний бар ряда старше `max_bar_age_sec` — ряд больше не обновляется.
+
+        Список пар детекторы берут из `tickers` (см. `get_active_symbols`), а
+        тикер ByBit пишется по КАЖДОЙ его монете на каждом цикле. Поэтому пара,
+        чьи свечи перестали собираться, из списка не выпадает, и без этой
+        проверки детекторы каждый цикл анализируют одно и то же старое окно
+        как текущее. 13.10.2026 так 246 bybit-рядов замёрзли после сбоя сети,
+        и pump-детектор слал по STX и ARC сигнал каждый цикл.
+
+        Порог задаётся по времени, а не числом баров, и только в бою: бэктест
+        этот класс не использует, а в тестах и скриптах проверка выключена.
+        SQLite роняет tzinfo, поэтому сравниваем в naive-UTC (как в
+        `SetupDetector._last_bar_age_sec`).
+        """
+        if self._max_bar_age_sec is None:
+            return False
+        if last_ts.tzinfo is not None:
+            last_ts = last_ts.astimezone(timezone.utc).replace(tzinfo=None)
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        return (now - last_ts).total_seconds() > self._max_bar_age_sec
 
     # ------------------------------------------------------------------
     # Active symbols
@@ -228,8 +268,14 @@ class DataProvider:
 
         Returns candles in chronological order (oldest first), skipping
         zero-volume bars (unclosed candles).
+
+        An empty list for a pair whose newest bar is older than
+        ``max_bar_age_sec`` — see ``_is_stale``.
         """
         cache_key = f"{exchange}:{symbol}"
+
+        if cache_key in self._stale:
+            return []
 
         # Intra-cycle cache — already loaded this symbol during this cycle
         if cache_key in self._candles and len(self._candles[cache_key]) >= limit:
@@ -239,6 +285,9 @@ class DataProvider:
             candles = await self._persistent_cache.load_or_refresh(
                 session, exchange, symbol, limit,
             )
+            if candles and self._is_stale(candles[-1]["timestamp"]):
+                self._stale.add(cache_key)
+                return []
             # Populate intra-cycle cache so multiple detectors share it
             # (strip 'timestamp' — detector code expects only OHLCV keys)
             self._candles[cache_key] = [
@@ -256,7 +305,10 @@ class DataProvider:
             .limit(limit)
         )
         result = await session.execute(stmt)
-        rows = result.scalars().all()
+        rows = [r for r in result.scalars().all() if r.volume > 0]
+        if rows and self._is_stale(rows[0].timestamp):  # rows — от новых к старым
+            self._stale.add(cache_key)
+            return []
 
         candles = [
             {
@@ -266,8 +318,7 @@ class DataProvider:
                 "close": r.close,
                 "volume": r.volume,
             }
-            for r in reversed(rows)  # chronological order
-            if r.volume > 0  # skip unclosed candles
+            for r in reversed(rows)  # chronological order; zero-volume skipped above
         ]
         self._candles[cache_key] = candles
         return candles

@@ -338,6 +338,80 @@ async def test_history_kept_for_all_scanned_coins(session_factory, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Сбой тикеров binance: общие монеты не переводятся на bybit
+# ---------------------------------------------------------------------------
+
+
+class _FlakyTickersConnector(_MultiCoinConnector):
+    """Как _MultiCoinConnector, но fetch_tickers можно уронить на нужных опросах."""
+
+    def __init__(self, exchange_id: str, symbols: list[str], fail_on: set[int]):
+        super().__init__(exchange_id, symbols)
+        self._ticker_calls = 0
+        self._fail_on = fail_on
+
+    async def fetch_tickers(self) -> list[dict]:
+        self._ticker_calls += 1
+        if self._ticker_calls in self._fail_on:
+            raise TimeoutError("binance GET /fapi/v1/ticker/24hr")
+        return await super().fetch_tickers()
+
+
+def _two_exchange_collector(binance_fail_on: set[int]) -> MarketDataCollector:
+    return MarketDataCollector(
+        connectors=[
+            _FlakyTickersConnector("binance", ["COM/USDT:USDT"], binance_fail_on),
+            _MultiCoinConnector("bybit", ["COM/USDT:USDT", "UNI/USDT:USDT"]),
+        ],
+        exclude_coins=[], min_volume_usdt=0.0, interval_seconds=15, timeframe="3m",
+    )
+
+
+async def _candle_exchanges(session_factory) -> dict[str, set[str]]:
+    async with session_factory() as session:
+        rows = (await session.execute(select(Candle.symbol, Candle.exchange))).all()
+    out: dict[str, set[str]] = {}
+    for symbol, exchange in rows:
+        out.setdefault(symbol, set()).add(exchange)
+    return out
+
+
+async def test_common_coin_not_rerouted_to_bybit_when_binance_tickers_fail(
+    session_factory, monkeypatch,
+):
+    """13.10.2026: один неудачный запрос тикеров binance перевёл все общие монеты
+    на bybit, и у каждой появился bybit-ряд, который дальше не обновлялся —
+    pump-детектор слал по нему один и тот же сигнал каждый цикл."""
+    import src.collectors.market_data as md
+
+    monkeypatch.setattr(md, "async_session", session_factory)
+    collector = _two_exchange_collector(binance_fail_on={2})
+
+    await collector._collect_cycle()  # binance в порядке
+    await collector._collect_cycle()  # тикеры binance упали
+
+    exchanges = await _candle_exchanges(session_factory)
+    assert exchanges["COM/USDT:USDT"] == {"binance"}, "общая монета не должна уйти на bybit"
+    assert exchanges["UNI/USDT:USDT"] == {"bybit"}, "уникальная монета bybit собирается дальше"
+
+
+async def test_cycle_skipped_when_binance_never_answered(session_factory, monkeypatch):
+    """Тикеры binance не пришли ни разу — какие монеты общие, неизвестно,
+    поэтому свечи в этом цикле не собираются вовсе."""
+    import src.collectors.market_data as md
+
+    monkeypatch.setattr(md, "async_session", session_factory)
+    collector = _two_exchange_collector(binance_fail_on={1})
+
+    await collector._collect_cycle()
+    assert await _candle_exchanges(session_factory) == {}
+
+    await collector._collect_cycle()  # binance ответил — сбор обычный
+    exchanges = await _candle_exchanges(session_factory)
+    assert exchanges == {"COM/USDT:USDT": {"binance"}, "UNI/USDT:USDT": {"bybit"}}
+
+
+# ---------------------------------------------------------------------------
 # Цена записи: коммитов на цикл должно быть на два порядка меньше числа монет
 # ---------------------------------------------------------------------------
 

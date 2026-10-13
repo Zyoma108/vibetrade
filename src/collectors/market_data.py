@@ -101,6 +101,9 @@ class MarketDataCollector:
         self._on_cycle_done = on_cycle_done
         self._running = False
         self._task: asyncio.Task | None = None
+        # Монеты binance из последнего УДАЧНОГО запроса тикеров — см. _route_coins.
+        # None — тикеры binance ещё ни разу не приходили.
+        self._binance_symbols: set[str] | None = None
 
     async def start(self) -> None:
         self._running = True
@@ -161,6 +164,74 @@ class MarketDataCollector:
         base = symbol.split("/")[0].upper()
         return base not in self._exclude_coins
 
+    def _route_coins(
+        self, all_tickers: dict[str, list[dict]], by_symbol: dict[str, dict[str, dict]],
+    ) -> tuple[list[dict], list[dict]]:
+        """Разложить монеты ByBit по биржам сбора: (binance, bybit).
+
+        Монета, которая есть на обеих биржах, собирается ТОЛЬКО с binance, а
+        bybit-коннектор берёт лишь монеты, которых на binance нет. Объём
+        проверяется по OR: достаточно на любой из бирж.
+
+        Если тикеры binance в этом цикле не пришли, общие монеты пропускаются,
+        а не уходят на bybit. Иначе одним неудачным запросом бот заводит по
+        каждой из них bybit-ряд на 100 баров, который со следующего цикла
+        больше не обновляется: 13.10.2026 так появилось 246 замёрзших рядов,
+        pump-детектор слал по ним одни и те же сигналы каждый цикл, а сама
+        запись 27 700 свечей заняла 120 с — цикл длиной в два бара. Какие
+        монеты общие, берётся из последнего удачного запроса тикеров binance;
+        пока его не было, неизвестно и это — тогда цикл пропускается целиком.
+        """
+        has_binance = any(c.exchange_id == "binance" for c in self._connectors)
+        binance_ok = "binance" in all_tickers
+        if binance_ok:
+            self._binance_symbols = {t["symbol"] for t in all_tickers["binance"]}
+        elif has_binance and self._binance_symbols is None:
+            logger.warning(
+                "binance: тикеры не получены, а список его монет ещё неизвестен — "
+                "сбор свечей в этом цикле пропущен"
+            )
+            return [], []
+
+        selected_binance: list[dict] = []
+        selected_bybit: list[dict] = []
+        skipped_common = 0
+        for t in all_tickers.get("bybit", []):
+            symbol = t["symbol"]
+            tickers = by_symbol.get(symbol, {})
+            bybit_t = tickers.get("bybit")
+            if bybit_t is None:
+                continue
+
+            if not self._passes_basic_filter(bybit_t):
+                continue
+
+            # Объём: берём максимум из двух бирж (если монета есть на обеих)
+            bybit_vol = bybit_t.get("volume") or 0
+            binance_t = tickers.get("binance")
+            binance_vol = (binance_t.get("volume") or 0) if binance_t else 0
+
+            if max(bybit_vol, binance_vol) < self._min_volume:
+                continue
+
+            if binance_t is not None:
+                selected_binance.append(binance_t)
+            elif not binance_ok and has_binance and symbol in self._binance_symbols:
+                skipped_common += 1
+            else:
+                selected_bybit.append(bybit_t)
+
+        logger.info(
+            f"bybit: {len(selected_binance)} общих с binance, "
+            f"{len(selected_bybit)} уникальных (будут собраны)"
+        )
+        if skipped_common:
+            logger.warning(
+                f"binance: тикеры не получены — {skipped_common} общих монет "
+                f"пропущены в этом цикле (не переводятся на bybit)"
+            )
+        return selected_binance, selected_bybit
+
     async def _collect_cycle(self) -> None:
         logger.info("Цикл сбора данных...")
         async with async_session() as session:
@@ -182,38 +253,8 @@ class MarketDataCollector:
                     by_symbol.setdefault(t["symbol"], {})[exchange_id] = t
 
             # 3. Отбираем монеты, доступные на ByBit (торговая биржа)
-            #    Объём проверяется по OR: достаточно на любой из бирж
             bybit_raw = all_tickers.get("bybit", [])
-            selected_binance: list[dict] = []
-            selected_bybit: list[dict] = []
-
-            for t in bybit_raw:
-                symbol = t["symbol"]
-                tickers = by_symbol.get(symbol, {})
-                bybit_t = tickers.get("bybit")
-                if bybit_t is None:
-                    continue
-
-                if not self._passes_basic_filter(bybit_t):
-                    continue
-
-                # Объём: берём максимум из двух бирж (если монета есть на обеих)
-                bybit_vol = bybit_t.get("volume") or 0
-                binance_t = tickers.get("binance")
-                binance_vol = (binance_t.get("volume") or 0) if binance_t else 0
-
-                if max(bybit_vol, binance_vol) < self._min_volume:
-                    continue
-
-                if binance_t is not None:
-                    selected_binance.append(binance_t)
-                else:
-                    selected_bybit.append(bybit_t)
-
-            logger.info(
-                f"bybit: {len(selected_binance)} общих с binance, "
-                f"{len(selected_bybit)} уникальных (будут собраны)"
-            )
+            selected_binance, selected_bybit = self._route_coins(all_tickers, by_symbol)
 
             # 3.5. Сохраняем ВСЕ ByBit тикеры (нужны детектору для определения доступности).
             # Заодно собираем OI, который уже приехал в тикере (см. ExchangeConnector.fetch_tickers) —

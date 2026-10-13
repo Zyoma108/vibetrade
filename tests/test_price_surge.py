@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from src.analytics.data_provider import DataProvider
 from src.analytics.price_surge import PriceSurgeDetector
+from src.analytics.price_surge_service import PriceSurgeSignalProcessor
 from src.config import StrategyConfig
 from src.storage.models import Base, Candle, PriceSurgeSignal, Ticker
 
@@ -233,3 +234,47 @@ class TestCrossExchangeDedup:
         assert len(signals) == 1
         # Берём максимальный рост из двух
         assert "+12" in signals[0].message
+
+
+# ---------------------------------------------------------------------------
+# Обработчик пишет в БД тот рост, по которому решал детектор
+# ---------------------------------------------------------------------------
+
+
+class TestProcessorPersistsDetectorMeasurement:
+    """13.10.2026: обработчик пересчитывал рост запросом по символу без фильтра
+    биржи. У монеты с рядами на двух биржах бары перемешивались, в БД писался
+    рост вплоть до отрицательного, и кулдаун (порог = максимум из БД + эскалация)
+    пропускал тот же памп каждый цикл."""
+
+    def _processor(self) -> PriceSurgeSignalProcessor:
+        det = _detector(price_surge_escalation_pct=5.0)
+        proc = PriceSurgeSignalProcessor(det.config, det, timeframe="3m")
+        proc.data_provider = _dp()
+        return proc
+
+    async def test_persisted_change_is_detectors(self, session):
+        await _seed_pump(session, "DUAL/USDT", growth_pct=1.0, exchange="bybit")
+        await _seed_pump(session, "DUAL/USDT", growth_pct=12.0, exchange="binance")
+        proc = self._processor()
+
+        messages = await proc.process(session)
+        await session.flush()
+
+        rows = (await session.execute(select(PriceSurgeSignal))).scalars().all()
+        assert len(rows) == 1
+        assert abs(rows[0].change_pct - 12.0) < 0.01
+        assert len(messages) == 1 and "+12.0%" in messages[0]
+
+    async def test_repeat_of_same_pump_stays_in_cooldown(self, session):
+        await _seed_pump(session, "DUAL/USDT", growth_pct=1.0, exchange="bybit")
+        await _seed_pump(session, "DUAL/USDT", growth_pct=12.0, exchange="binance")
+        proc = self._processor()
+
+        first = await proc.process(session)
+        await session.flush()
+        proc.data_provider = _dp()  # следующий цикл
+        second = await proc.process(session)
+
+        assert len(first) == 1
+        assert second == [], "тот же памп не должен пробивать кулдаун"
