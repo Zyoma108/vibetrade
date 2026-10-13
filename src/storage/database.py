@@ -245,6 +245,7 @@ async def init_db() -> None:
             ("current_sl_price", "FLOAT"),
             ("signal_price", "FLOAT"),
             ("trailing_set", "INTEGER DEFAULT 0"),
+            ("stop_pct", "FLOAT"),
         ]:
             try:
                 await conn.exec_driver_sql(

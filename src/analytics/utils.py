@@ -156,6 +156,48 @@ def adaptive_stop_pct(
     return min(max(range_pct * mult, min_pct), max_pct)
 
 
+def atr_stop_pct(
+    atr_pct: float | None,
+    mult: float,
+    stop_loss_pct: float,
+    min_pct: float = ADAPTIVE_STOP_MIN_PCT,
+) -> float:
+    """Стоп в % от входа: `mult` × ATR, но НЕ ШИРЕ фиксированного `stop_loss_pct`.
+
+    ATR-стоп 13.10.2026 — пересмотр июньского отказа из `docs/decisions.md`
+    («исторический ATR непоказателен в момент пампа») на новых данных: фильтры
+    детектора отсекли низколиквидные монеты с аномальной волатильностью.
+    Решение о включении — только по свипу на всех БД с правилом 8.
+
+    Кап сверху — сам `stop_loss_pct`, а не отдельный порог: все замеры проекта
+    сходятся, что стоп и так широк (4% лучше 5% на обеих БД, свип стопов 23.09,
+    год истории 11.10), то есть ATR здесь умеет только СУЖАТЬ стоп под тихую
+    монету — вытянуть его на волатильной шире боевого значения он не может.
+    Пол `min_pct` тот же, что у адаптивного от размаха: ниже 2% стоп сидит в
+    комиссии и проскальзывании (круговая комиссия ≈ 0.11% в цене).
+
+    `mult <= 0` или неизвестный ATR — фиксированный `stop_loss_pct`, поведение
+    до 13.10.2026. Одна реализация на бэктест и прод (правило 2).
+    """
+    if mult <= 0 or atr_pct is None or atr_pct <= 0:
+        return stop_loss_pct
+    return min(max(atr_pct * mult, min_pct), stop_loss_pct)
+
+
+def resolve_stop_pct(window_range_pct: float | None, atr_pct: float | None, cfg) -> float:
+    """Стоп в % от входа по ОБЕИМ адаптивным мерам сразу: размах окна, затем ATR.
+
+    Механизмы взаимоисключающие (валидатор TradingConfig запрещает включать оба),
+    поэтому порядок цепочки не влияет на результат: любой выключенный механизм
+    возвращает вход unchanged. Одна реализация на прод (`open_position`) и движок
+    (`price_ctx` с теми же ключами) — мера кладётся в контекст детектором.
+    """
+    stop = adaptive_stop_pct(
+        window_range_pct, cfg.stop_loss_window_range_mult, cfg.stop_loss_pct,
+    )
+    return atr_stop_pct(atr_pct, cfg.stop_loss_atr_mult, stop)
+
+
 def cb_trade_outcome(pnl: float | None, stop_price: float | None, entry_price: float) -> str:
     """Как закрытая сделка двигает серию Circuit Breaker: 'win' | 'loss' | 'neutral'.
 
@@ -196,21 +238,41 @@ def cb_stop_after_loss(losses: int, stop_until: datetime | None, consumed_at: in
     return start + timedelta(minutes=stop_minutes), losses
 
 
-def trailing_activation_price(entry_price: float, cfg) -> float:
+def trailing_scale(cfg, stop_pct: float | None) -> float:
+    """Во сколько раз трейлинг-геометрия сжимается вместе с пер-сделочным стопом.
+
+    `trailing_scale_with_stop` выключен или стоп неизвестен — 1.0 (абсолютные
+    проценты конфига, как подобрано свипом 11.10.2026). Включён — активация и
+    отступ делятся на `stop_loss_pct` и множатся на фактический стоп сделки: при
+    стопе 4% пропорции боевые (2× и 1.25× стопа), при стопе 2% — те же 2× и
+    1.25×, а не 4× и 2.5×. Без этого на тихих монетах выход уезжает дальше от
+    стопа ровно тогда, когда стоп сузился, и б/у-выходов становится больше, а не
+    меньше — противоположно цели ATR-стопа.
+    """
+    if not getattr(cfg, "trailing_scale_with_stop", False) or stop_pct is None:
+        return 1.0
+    if cfg.stop_loss_pct <= 0:
+        return 1.0
+    return stop_pct / cfg.stop_loss_pct
+
+
+def trailing_activation_price(entry_price: float, cfg, stop_pct: float | None = None) -> float:
     """Цена, с которой включается трейлинг-стоп (`trailing_activation_pct` от входа).
 
     Одна формула на прод (`PositionManager`, `activePrice` ByBit) и движок бэктеста —
     правило 2 AGENTS.md распространяется на любую боевую логику, которую движок
-    воспроизводит.
+    воспроизводит. `stop_pct` — пер-сделочный стоп ATR: при включённом
+    `trailing_scale_with_stop` активация сжимается пропорционально ему.
     """
-    return entry_price * (1 + cfg.trailing_activation_pct / 100)
+    return entry_price * (1 + cfg.trailing_activation_pct * trailing_scale(cfg, stop_pct) / 100)
 
 
-def trailing_distance(entry_price: float, cfg) -> float:
+def trailing_distance(entry_price: float, cfg, stop_pct: float | None = None) -> float:
     """Отступ трейлинг-стопа от максимума — ЦЕНОВАЯ дистанция, % от входа.
 
-    Нативный трейлинг ByBit (`trailingStop`) задаётся расстоянием в цене, а не в
+    Нативный трейлинг ByBit (`trailingStop`) задаётся расстоянием в цене, а не
     процентах от максимума: стоп = максимум после активации − дистанция. Движок
     считает так же, иначе модель описывала бы не тот выход, который исполняет биржа.
+    `stop_pct` — см. `trailing_activation_price`.
     """
-    return entry_price * cfg.trailing_distance_pct / 100
+    return entry_price * cfg.trailing_distance_pct * trailing_scale(cfg, stop_pct) / 100

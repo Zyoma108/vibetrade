@@ -26,6 +26,10 @@ class Signal:
     # стоп (utils.adaptive_stop_pct). Детектор считает её всё равно, для
     # max_window_range_pct.
     window_range_pct: float | None = None
+    # ATR в % от цены последнего бара окна (период/источник — trading.stop_loss_atr_*),
+    # мера для ATR-стопа (utils.atr_stop_pct). Считает детектор тем же методом,
+    # которым его просит посчитать движок бэктеста, — см. SetupDetector.atr_pct.
+    atr_pct: float | None = None
 
     # Чем PriceSurgeDetector измерил памп: биржа ряда, рост окна и цены на его
     # краях. PriceSurgeSignalProcessor пишет в БД и в сообщение именно их, а не

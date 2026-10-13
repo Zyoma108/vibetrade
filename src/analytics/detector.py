@@ -66,6 +66,8 @@ class SetupDetector(BaseDetector):
         config: StrategyConfig,
         timeframe: str = "3m",
         data_provider: DataProvider | None = None,
+        atr_period: int = 14,
+        atr_source: str = "baseline",
     ):
         self.config = config
         self._exclude_coins = set(c.upper() for c in config.exclude_coins)
@@ -73,6 +75,13 @@ class SetupDetector(BaseDetector):
         self._timeframe_sec = timeframe_to_minutes(timeframe) * 60
         self._dp = data_provider or DataProvider()
         self._regime_volume_mult: float = 1.0  # Множитель от рыночного режима
+        # Параметры ATR-стопа (trading.stop_loss_atr_*): мера — параметр ВЫХОДА,
+        # но считает её детектор, потому что только у него есть окно свечей.
+        # Прокидываются обоими местами конструирования — Application и движок
+        # бэктеста — из одного и того же trading-конфига, иначе мера в бою и в
+        # модели разъедется (правило 2 AGENTS.md).
+        self._atr_period = atr_period
+        self._atr_source = atr_source
         # Внутри «замерочного» прогона гейтов (_closed_bar_verdict) отказы не
         # логируются: сигнал в этот момент уже найден и в Telegram уходит, а
         # строка «Сигнал пропущен» в логе означала бы обратное.
@@ -164,6 +173,12 @@ class SetupDetector(BaseDetector):
                 seen.add(symbol)
 
                 signal = self._build_signal(symbol, direction, vol_window)
+                # Меры шума монеты для адаптивных стопов (utils.adaptive_stop_pct,
+                # utils.atr_stop_pct). До 13.10.2026 window_range_pct объявлялся
+                # в датаклассе, но никем не заполнялся: адаптивный стоп был
+                # фичей одного движка бэктеста.
+                signal.window_range_pct = price_ctx.get("window_range_pct")
+                signal.atr_pct = price_ctx.get("atr_pct")
                 # Взято ли окно со сдвигом — единственный способ измерить
                 # эффект undersized_verdict_min_bar_maturity_pct: бэктест его
                 # не воспроизводит (там нет формирующегося бара), поэтому
@@ -587,6 +602,39 @@ class SetupDetector(BaseDetector):
             return None
         return float((win_high / win_low - 1) * 100)
 
+    def atr_pct(self, candles: list[dict]) -> float | None:
+        """ATR(period) в % от close последнего бара окна. None — не определён.
+
+        Мера для ATR-стопа (`utils.atr_stop_pct`, пересмотр июньского отказа из
+        `docs/decisions.md` — 13.10.2026). Период и источник баров — из
+        trading-конфига через конструктор, чтобы живой детектор и движок бэктеста
+        считали одну и ту же величину на одном и том же окне.
+
+        `source='baseline'` — true range по последним `period` барам ДО
+        sustain-окна: волатильность «спокойной» монеты, мера не подстроена под
+        памп (аргумент, которым ATR-стоп отвергали в июне). `source='signal'` —
+        классический ATR на последнем баре сигнала, включая памп-бары: как его
+        видела бы биржа. Нормировка на close ПОСЛЕДНЕГО бара, а не самого окна
+        ATR: стоп задаётся в % от цены входа, которая и есть этот close.
+        """
+        period = self._atr_period
+        bars = candles if self._atr_source == "signal" else candles[: -self.config.sustain_bars]
+        # true range нужно period значений, а каждое требует предыдущий бар
+        if len(bars) < period + 1:
+            return None
+        last_close = candles[-1]["close"]
+        if last_close <= 0:
+            return None
+        highs = np.array([c["high"] for c in bars[-(period + 1):]])
+        lows = np.array([c["low"] for c in bars[-(period + 1):]])
+        prev_closes = np.array([c["close"] for c in bars[-(period + 1):-1]])
+        tr = np.maximum.reduce([
+            highs[1:] - lows[1:],
+            np.abs(highs[1:] - prev_closes),
+            np.abs(lows[1:] - prev_closes),
+        ])
+        return float(np.mean(tr) / last_close * 100)
+
     def check_price_trend(self, candles: list[dict], context: dict | None = None) -> str | None:
         """Только лонг: цена должна вырасти, но не слишком сильно
         (фильтр «памп уже состоялся»).
@@ -660,6 +708,12 @@ class SetupDetector(BaseDetector):
             # у вызывающего — копия этой арифметики разъехалась бы так же, как
             # копии гейтов (AGENTS.md, правило 2).
             context["window_range_pct"] = range_pct
+        if context is not None:
+            # То же для ATR-стопа (`utils.atr_stop_pct`): мера уже посчитана на
+            # нужном окне, вызывающему остаётся применить множитель.
+            atr = self.atr_pct(candles)
+            if atr is not None:
+                context["atr_pct"] = atr
         if max_range > 0 and range_pct is not None and range_pct > max_range:
             self._reject(
                 context,

@@ -104,6 +104,8 @@ class Application:
         self._detector = SetupDetector(
             self.settings.strategy,
             timeframe=self.settings.collectors.timeframe,
+            atr_period=self.settings.trading.stop_loss_atr_period,
+            atr_source=self.settings.trading.stop_loss_atr_source,
         )
 
         # Вторая стратегия (только сигналы, без торговли)

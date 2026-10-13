@@ -5,7 +5,7 @@ from typing import Optional
 
 import yaml
 from dotenv import load_dotenv
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 load_dotenv()
 
@@ -251,6 +251,46 @@ class TradingConfig(BaseModel):
             "монеты, и самый шумный квартиль — худший на обеих БД."
         ),
     )
+    stop_loss_atr_mult: float = Field(
+        default=0.0, ge=0.0, le=50.0,
+        description=(
+            "Стоп как МНОЖИТЕЛЬ ATR вместо фиксированного процента: "
+            "clamp(ATR × mult, 2%, stop_loss_pct) — сузить может, расширить нет "
+            "(все замеры проекта: стоп и так широк). 0 = выкл, используется "
+            "stop_loss_pct. Формула — analytics.utils.atr_stop_pct. Пересмотр "
+            "июньского отказа из docs/decisions.md на новых данных (фильтры "
+            "отсекли неликвид): 13.10.2026, включение — только по свипу с "
+            "правилом 8. Меру считает детектор и кладёт в Signal.atr_pct."
+        ),
+    )
+    stop_loss_atr_period: int = Field(
+        default=14, ge=2, le=100,
+        description=(
+            "Период ATR в барах таймфрейма (14 × 3м = 42 мин) для stop_loss_atr_mult. "
+            "Прокидывается в SetupDetector: мера обязана считаться тем же кодом, "
+            "что видит движок бэктеста (правило 2 AGENTS.md)"
+        ),
+    )
+    stop_loss_atr_source: str = Field(
+        default="baseline",
+        description=(
+            "Какие бары меряет ATR: 'baseline' — по барам ДО sustain-окна "
+            "(«спокойная» волатильность монеты, мера не подстроена под памп — "
+            "прямой ответ на аргумент июньского отказа); 'signal' — классический "
+            "ATR на последнем баре сигнала (включает 4 памп-бара)"
+        ),
+    )
+    trailing_scale_with_stop: bool = Field(
+        default=False,
+        description=(
+            "Сжимать трейлинг вместе с пер-сделочным стопом: активация и отступ "
+            "множатся на stop_pct/stop_loss_pct. При стопе 4% пропорции боевые "
+            "(активация 2× стопа, отступ 1.25×), при сужении стопа геометрия "
+            "сохраняется, а не уезжает. Имеет смысл только вместе с "
+            "stop_loss_atr_mult > 0 (или stop_loss_window_range_mult > 0). "
+            "Формула — analytics.utils.trailing_scale"
+        ),
+    )
     trailing_activation_pct: float = Field(
         default=0.0, ge=0.0, le=100.0,
         description=(
@@ -302,6 +342,25 @@ class TradingConfig(BaseModel):
         if 0 < v < 10:
             raise ValueError("partial_close_pct: 0 (выключено) или от 10 до 90")
         return v
+
+    @field_validator("stop_loss_atr_source")
+    @classmethod
+    def _atr_source_known(cls, v: str) -> str:
+        if v not in ("baseline", "signal"):
+            raise ValueError("stop_loss_atr_source: 'baseline' (до sustain-окна) или 'signal'")
+        return v
+
+    @model_validator(mode="after")
+    def _adaptive_stops_are_exclusive(self) -> "TradingConfig":
+        # Две меры шума на один стоп одновременно — это два множителя друг на
+        # друга, результат которых не читается из конфига. resolve_stop_pct
+        # цепляет их последовательно и полагается на взаимоисключительность.
+        if self.stop_loss_window_range_mult > 0 and self.stop_loss_atr_mult > 0:
+            raise ValueError(
+                "stop_loss_window_range_mult и stop_loss_atr_mult взаимоисключающие — "
+                "включай один механизм адаптивного стопа"
+            )
+        return self
 
 
 class MarketContextConfig(BaseModel):

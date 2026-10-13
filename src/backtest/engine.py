@@ -28,7 +28,7 @@ from pathlib import Path
 
 from src.analytics.detector import WINDOW_PAD_BARS, SetupDetector
 from src.analytics.utils import OI_TREND_BARS, oi_trend_passes, timeframe_to_minutes
-from src.analytics.utils import adaptive_stop_pct, cb_stop_after_loss, cb_trade_outcome
+from src.analytics.utils import cb_stop_after_loss, cb_trade_outcome, resolve_stop_pct
 from src.analytics.utils import trailing_activation_price, trailing_distance
 from src.backtest.metrics import breakeven_credit, summarize
 
@@ -44,18 +44,22 @@ class SimPosition:
         "symbol", "entry_price", "entry_time", "quantity",
         "tp_price", "sl_price", "partial_closed", "partial_unavailable", "partial_pnl",
         "closed", "exit_price", "exit_time", "pnl", "exit_reason", "fee",
-        "risk", "peak",
+        "risk", "peak", "stop_pct",
     )
 
     def __init__(self, symbol: str, entry_price: float, entry_time: datetime,
                  quantity: float, tp_price: float, sl_price: float, fee: float = 0.0,
-                 risk: float = 0.0):
+                 risk: float = 0.0, stop_pct: float = 0.0):
         self.symbol = symbol
         self.entry_price = entry_price
         self.entry_time = entry_time
         self.quantity = quantity
         self.tp_price = tp_price
         self.sl_price = sl_price
+        # Стоп сделки, % от входа: фиксированный или адаптивный (ATR/размах).
+        # Нужен на всём жизненном цикле: от него масштабируется трейлинг
+        # (trailing_scale_with_stop) — как у Trade.stop_pct в проде.
+        self.stop_pct = stop_pct
         self.partial_closed = False
         # Доля под частичную фиксацию оказалась мельче шага лота: в бою лимитник
         # не выставляется, и повторять проверку каждый бар незачем.
@@ -84,12 +88,12 @@ class PendingEntry:
 
     __slots__ = (
         "symbol", "limit_price", "signal_time", "expires_at",
-        "quantity", "tp_price", "sl_price", "fee", "risk",
+        "quantity", "tp_price", "sl_price", "fee", "risk", "stop_pct",
     )
 
     def __init__(self, symbol: str, limit_price: float, signal_time: datetime,
                  expires_at: datetime, quantity: float, tp_price: float,
-                 sl_price: float, fee: float, risk: float = 0.0):
+                 sl_price: float, fee: float, risk: float = 0.0, stop_pct: float = 0.0):
         self.symbol = symbol
         self.limit_price = limit_price
         self.signal_time = signal_time
@@ -99,6 +103,7 @@ class PendingEntry:
         self.sl_price = sl_price
         self.fee = fee  # комиссия входа, известна заранее (maker, лимит известен)
         self.risk = risk  # бюджет риска в $ — переносится в SimPosition при исполнении
+        self.stop_pct = stop_pct  # стоп сделки, % — переносится в SimPosition при исполнении
 
 
 DEFAULT_MARKETS_PATH = "config/bybit_markets.json"
@@ -408,7 +413,12 @@ def simulate(settings, data, has_oi: bool = True, collect_retracement: bool = Tr
     гарантированно откажет. Выключается для проверки этого утверждения.
     """
     cfg = settings.trading
-    detector = SetupDetector(settings.strategy, timeframe=settings.collectors.timeframe)
+    detector = SetupDetector(
+        settings.strategy,
+        timeframe=settings.collectors.timeframe,
+        atr_period=cfg.stop_loss_atr_period,
+        atr_source=cfg.stop_loss_atr_source,
+    )
 
     symbols = data["symbols"]
     sym_ts_to_row = data["sym_ts_to_row"]
@@ -582,8 +592,11 @@ def simulate(settings, data, has_oi: bool = True, collect_retracement: bool = Tr
             if trailing:
                 if high > pos.peak:
                     pos.peak = high
-                if pos.peak >= trailing_activation_price(pos.entry_price, cfg):
-                    trail_sl = pos.peak - trailing_distance(pos.entry_price, cfg)
+                # Активация/отступ — от пер-сделочного стопа при включённом
+                # масштабировании (trailing_scale_with_stop): та же общая
+                # формула, что в проде (`analytics.utils.trailing_*`).
+                if pos.peak >= trailing_activation_price(pos.entry_price, cfg, pos.stop_pct):
+                    trail_sl = pos.peak - trailing_distance(pos.entry_price, cfg, pos.stop_pct)
                     if trail_sl > pos.sl_price:
                         pos.sl_price = trail_sl
 
@@ -624,6 +637,7 @@ def simulate(settings, data, has_oi: bool = True, collect_retracement: bool = Tr
                     quantity=pe.quantity, tp_price=pe.tp_price, sl_price=pe.sl_price,
                     risk=pe.risk,
                     fee=pe.fee,
+                    stop_pct=pe.stop_pct,
                 )
                 if id(pe) in retr_map:
                     retr_map[id(pos)] = retr_map.pop(id(pe))
@@ -732,13 +746,10 @@ def simulate(settings, data, has_oi: bool = True, collect_retracement: bool = Tr
 
             price_ctx: dict = {}
             direction = detector.check_price_trend(vol_window, price_ctx)
-            # Размах sustain-окна кладёт сам детектор (`window_range_pct`), здесь
-            # он только читается: считать его копией в движке запрещено
-            # правилом 2 AGENTS.md.
-            stop_pct = adaptive_stop_pct(
-                price_ctx.get("window_range_pct"),
-                cfg.stop_loss_window_range_mult,
-                cfg.stop_loss_pct,
+            # Меры шума (размах окна, ATR) кладёт сам детектор, здесь они только
+            # читаются: считать их копией в движке запрещено правилом 2 AGENTS.md.
+            stop_pct = resolve_stop_pct(
+                price_ctx.get("window_range_pct"), price_ctx.get("atr_pct"), cfg,
             )
             if direction != "long":
                 if price_ctx.get("stage"):
@@ -831,7 +842,7 @@ def simulate(settings, data, has_oi: bool = True, collect_retracement: bool = Tr
                 pe = PendingEntry(
                     symbol=sym, limit_price=limit_price, signal_time=ts,
                     expires_at=expires_at, quantity=qty, tp_price=tp, sl_price=sl,
-                    fee=entry_fee, risk=risk_budget,
+                    fee=entry_fee, risk=risk_budget, stop_pct=stop_pct,
                 )
                 if retracement_pct is not None:
                     retr_map[id(pe)] = retracement_pct
@@ -859,7 +870,7 @@ def simulate(settings, data, has_oi: bool = True, collect_retracement: bool = Tr
             pos = SimPosition(
                 symbol=sym, entry_price=entry_price, entry_time=ts,
                 quantity=qty, tp_price=tp, sl_price=sl, fee=entry_fee,
-                risk=risk_budget,
+                risk=risk_budget, stop_pct=stop_pct,
             )
             if retracement_pct is not None:
                 retr_map[id(pos)] = retracement_pct
@@ -898,6 +909,7 @@ def simulate(settings, data, has_oi: bool = True, collect_retracement: bool = Tr
             "symbol": t.symbol,
             "entry_price": t.entry_price,
             "exit_price": t.exit_price,
+            "quantity": t.quantity,
             "entry_time": t.entry_time.isoformat(),
             "exit_time": t.exit_time.isoformat() if t.exit_time else None,
             "pnl": t.pnl,
@@ -910,6 +922,7 @@ def simulate(settings, data, has_oi: bool = True, collect_retracement: bool = Tr
             "retracement_pct": retr_map.get(id(t)),
             "tp_price": t.tp_price,
             "sl_price": t.sl_price,
+            "stop_pct": t.stop_pct,
         })
 
     # Метрики решения считаются в одном месте на весь проект — см. metrics.py.

@@ -224,6 +224,7 @@ class Trade(Base):
     current_sl_price: Mapped[float | None] = mapped_column(Float, nullable=True, default=None)  # последний известный эффективный стоп (перевод в безубыток после частичной фиксации)
     signal_price: Mapped[float | None] = mapped_column(Float, nullable=True, default=None)  # референсная цена в момент сигнала — неизменный якорь для замера фактического проскальзывания входа
     trailing_set: Mapped[bool] = mapped_column(default=False)  # выставлен ли на бирже трейлинг-стоп (trading.trailing_activation_pct > 0); повторяется каждый цикл, пока не встанет
+    stop_pct: Mapped[float | None] = mapped_column(Float, nullable=True, default=None)  # фактический стоп сделки, % от входа: фиксированный stop_loss_pct или адаптивный (ATR/размах окна, utils.resolve_stop_pct). Нужен после открытия: от него пересчитываются TP-опора партиала и масштабированный трейлинг. NULL у позиций, открытых до 13.10.2026 и восстановленных sync_positions, — читатели обязаны падать на stop_loss_pct
 
 
 class BotState(Base):
