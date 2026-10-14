@@ -45,18 +45,21 @@ def _trades(r):
     ]
 
 
-def run_db(db: str, outdir: str, tag: str, config: str = "config/config.yaml"):
+def run_db(db: str, outdir: str, tag: str, config: str = "config/config.yaml",
+           stages: tuple = STAGES):
     t0 = time.time()
     data = load_data(db)
     ts = data["all_timestamps"]
     days = (ts[-1] - ts[0]).total_seconds() / 86400
-    markets = load_markets(None)
+    # load_markets(None) означал бы «шаг лота выключен» — обязательно дефолтный
+    # путь, иначе «депозит»-стадия молча превращается в дубль чистой.
+    markets = load_markets()
     log(f"[{tag}] загрузка {time.time()-t0:.0f}s; период {days:.1f} суток; "
-        f"markets={'да' if markets else 'нет'}")
+        f"markets={'да' if markets else 'НЕТ (стадия deposit будет = clean!)'}")
 
     out = {"db": db, "days": round(days, 2), "tag": tag, "stages": {}}
 
-    for stage in STAGES:
+    for stage in stages:
         deposit = 1000.0 if stage == "clean" else 60.0
         mk = None if stage == "clean" else markets
         stage_out = {}
@@ -184,4 +187,5 @@ if __name__ == "__main__":
     if sys.argv[1] == "pool":
         pool(sys.argv[2], sys.argv[3:])
     else:
-        run_db(sys.argv[1], sys.argv[2], sys.argv[3])
+        stages = tuple(sys.argv[4].split(",")) if len(sys.argv) > 4 else STAGES
+        run_db(sys.argv[1], sys.argv[2], sys.argv[3], stages=stages)
